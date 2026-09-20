@@ -30,12 +30,30 @@ VM2API_DB_SECRET='再一串'
 
 ## 安装
 
+**一键（推荐）：**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
+```
+
+脚本会 clone 到 `/opt/vm2api`、补全 `.env`（`chmod 600`）、`docker compose up -d --build`。`.env` 缺失或 `VM2API_ADMIN_PASSWORD` 为空时写入默认管理台 **`admin` / `123456`**（已有密码不覆盖）。空的 `VM2API_API_KEY` / `VM2API_DB_SECRET` 会生成随机值。登录：`http://<ip>:8787/cc#/login`。以后：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+sudo bash /opt/vm2api/deploy/install.sh check
+sudo bash /opt/vm2api/deploy/install.sh changelog
+```
+
+保留 `.env` / `vms/` / `data/`。不要 `docker rm` 槽。管理台 **设置 → 关于** 可复制同一条命令、看 changelog。指定版本：`--version v1.2.10`。若 changelog 提到 `wrap-cli/sync`，加 `--sync-wrap`。
+
+**手动：**
+
 ```bash
 git clone https://github.com/dofastted/vm2api.git /opt/vm2api
 cd /opt/vm2api
 cp .env.example .env
 chmod 600 .env
-# 填写上面三项
+# 空密码默认 admin / 123456；API key / DB secret 为空时入口会生成
 
 docker compose up -d --build
 curl -sS --noproxy '*' http://127.0.0.1:8787/health
@@ -43,7 +61,7 @@ curl -sS --noproxy '*' http://127.0.0.1:8787/health
 
 二进制在仓内 `bin/`，Compose 会拷到挂载目录。`bin/kin-*` 必须 **755**。缺槽位系统镜像时会编 `kin-os/ubuntu:24.04`。
 
-升级到 **v1.2.5** 见下面「已部署机升级到 1.2.5」。控制面重启 + wrap-cli sync，不要 `docker rm` 槽。
+升级到 **v1.2.10** 见下面「已部署机升级到 1.2.10」。只重启控制面，不要 `docker rm` 槽。
 
 Docker Desktop / WSL 下 `curl 127.0.0.1:8787` 可能失败：
 
@@ -53,7 +71,7 @@ docker exec vm2api python3 -c 'import urllib.request; print(urllib.request.urlop
 
 ## 上线后
 
-1. 打开 `/console`，用 `VM2API_ADMIN_PASSWORD` 登录。
+1. 打开 `/cc#/login`，用管理台密码登录（未配置时为 `admin` / `123456`）。
 2. 代理池：添加本地出口，或导入 SOCKS5。
 3. 建槽、绑出口、启动。没出口会停在 `stopped`。
 4. 在槽里导入凭证，再用 `sk-vm-…` 或 master key 打 `POST /v1/messages`。
@@ -79,6 +97,160 @@ location / {
 ## 本机 Node（备选）
 
 仓内已有 `bin/kin-*`。还要 `npm ci`、`pnpm -C web install --frozen-lockfile && npm run build:web`，以及占位 `vms/active.json`。单元：[deploy/vm2api.service](deploy/vm2api.service)。细节见 [BUILD.md](BUILD.md)。
+
+## 一键安装 / 更新
+
+`deploy/install.sh` 对齐 sub2api / CLIProxyAPI：查 GitHub 最新 Release → checkout tag → 重建控制面。不碰已有非空 `.env` 字段、`vms/`、`data/`，不 `docker rm` 槽。构建前若 `.dockerignore` 挡住 `CHANGELOG.md` 会自动补 `!CHANGELOG.md` 并重试一次。
+
+### 两类安装错误
+
+**1. `COPY VERSION CHANGELOG.md` / `"/CHANGELOG.md": not found`**
+
+v1.2.7 的 `.dockerignore` 用 `*.md` 把 changelog 挡在构建上下文外。脚本会自动补一行；若仍失败：
+
+```bash
+cd /opt/vm2api
+grep -q '!CHANGELOG.md' .dockerignore || echo '!CHANGELOG.md' >> .dockerignore
+docker compose up -d --build
+```
+
+或 `curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade`。
+
+**2. 管理台「Missing credentials」/「鉴权失效，请重新登录」**
+
+打开登录页，不要直接进总览：`http://<ip>:8787/cc#/login`。未配置时账密是 `admin` / `123456`。已有密码：`grep '^VM2API_ADMIN_PASSWORD=' /opt/vm2api/.env`。
+
+```bash
+# 安装
+curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
+
+# 更新到最新 Release
+curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+
+# 指定 tag
+sudo bash /opt/vm2api/deploy/install.sh upgrade --version v1.2.10
+
+# 只检查
+sudo bash /opt/vm2api/deploy/install.sh check
+```
+
+面板：`GET /api/panel/version`、`GET /api/panel/changelog`、`POST /api/panel/update`（`{ confirm: true }` 才会在已挂 `docker.sock` 的机器上拉起升级助手）。容器里没有宿主机 git 仓时返回 `409 host_upgrade_required`，响应里带同一条 curl 命令。
+
+## 已部署机升级到 1.2.10
+
+1.2.10 只动**控制面**（Docker web `pnpm build` 类型检查；换仓内 `kin-cookie-auth`）。不必换槽内 kernel，也不要 `docker rm` 槽。
+
+推荐：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+```
+
+手动：
+
+```bash
+cd /opt/vm2api
+git fetch --tags
+git checkout v1.2.10
+docker compose up -d --build
+curl -sS --noproxy '*' http://127.0.0.1:8787/health
+```
+
+本机 systemd：`git checkout v1.2.10` → `npm ci` → `pnpm -C web install --frozen-lockfile && npm run build:web` → 换仓内 `bin/kin-cookie-auth` → `systemctl restart vm2api` **一次**。
+
+## 已部署机升级到 1.2.9
+
+1.2.9 只动**控制面**（thinking-only 残包同槽重试；一键安装补空账密；HTTP 裸 IP 登录不再丢会话）。不必换槽内 kernel，也不要 `docker rm` 槽。
+
+推荐：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+```
+
+手动：
+
+```bash
+cd /opt/vm2api
+git fetch --tags
+git checkout v1.2.9
+docker compose up -d --build
+curl -sS --noproxy '*' http://127.0.0.1:8787/health
+```
+
+本机 systemd：`git checkout v1.2.9` → `npm ci` → `pnpm -C web install --frozen-lockfile && npm run build:web` → `systemctl restart vm2api` **一次**。
+
+## 已部署机升级到 1.2.8
+
+1.2.8 只动**控制面**（`.dockerignore` 放行 `CHANGELOG.md`，修好 v1.2.7 的 compose `COPY CHANGELOG.md` 失败）。不必换槽内 kernel，也不要 `docker rm` 槽。
+
+推荐：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+```
+
+若还停在失败的 1.2.7 构建，可先手工：
+
+```bash
+cd /opt/vm2api
+grep -q '!CHANGELOG.md' .dockerignore || echo '!CHANGELOG.md' >> .dockerignore
+docker compose up -d --build
+```
+
+然后再升到 v1.2.8。
+
+手动：
+
+```bash
+cd /opt/vm2api
+git fetch --tags
+git checkout v1.2.8
+docker compose up -d --build
+curl -sS --noproxy '*' http://127.0.0.1:8787/health
+```
+
+本机 systemd：`git checkout v1.2.8` → `npm ci` → `pnpm -C web install --frozen-lockfile && npm run build:web` → `systemctl restart vm2api` **一次**。
+
+## 已部署机升级到 1.2.7
+
+1.2.7 只动**控制面 Node + web**（版本检查、一键安装/更新、面板「关于」）。不必换槽内 kin-kernel / wrap CLI，也不要 `docker rm` 槽。
+
+推荐：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+```
+
+手动：
+
+```bash
+cd /opt/vm2api
+git fetch --tags
+git checkout v1.2.7
+docker compose up -d --build
+curl -sS --noproxy '*' http://127.0.0.1:8787/health
+```
+
+本机 systemd：`git checkout v1.2.7` → `npm ci` → `pnpm -C web install --frozen-lockfile && npm run build:web` → `systemctl restart vm2api` **一次**。
+
+管理台 **设置 → 关于** 也可复制命令或（已挂 docker.sock 时）从面板发起。
+
+## 已部署机升级到 1.2.6
+
+1.2.6 只动**控制面 Node + web**（本地出口导入、kernel 探活、Setup Token 额度）。不必换槽内 kin-kernel / wrap CLI，也不要 `docker rm` 槽。
+
+```bash
+cd /opt/vm2api
+git fetch --tags
+git checkout v1.2.6
+docker compose up -d --build
+curl -sS --noproxy '*' http://127.0.0.1:8787/health
+```
+
+本机 systemd：`git checkout v1.2.6` → `npm ci` → `pnpm -C web install --frozen-lockfile && npm run build:web` → `systemctl restart vm2api` **一次**。
+
+当前不在 1.2.5 的机器：若 wrap CLI 还是 `cli-dist`，先按下面「已部署机升级到 1.2.5」做 `wrap-cli/sync`，再 `git checkout v1.2.6` 重启控制面。
 
 ## 已部署机升级到 1.2.5
 

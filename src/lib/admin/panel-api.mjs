@@ -402,7 +402,7 @@ export async function buildVmDetail({
     requestLog,
   })
   const gpt = isCodexVm(vm)
-  const inferenceEngine = gpt ? null : summary.resolved_inference_engine || 'go'
+  const inferenceEngine = gpt ? null : summary.resolved_inference_engine || 'rust'
   let goHealth = null
   let rustHealth = null
   let codexHealth = null
@@ -422,18 +422,11 @@ export async function buildVmDetail({
       if (gpt) {
         codexHealth = failed
       } else {
-        goHealth = failed
         rustHealth = failed
       }
     }
   }
-  const activeEngine = gpt
-    ? null
-    : inferenceEngine === 'rust' && rustHealth?.reachable
-      ? 'rust'
-      : goHealth?.reachable
-        ? 'go'
-        : null
+  const activeEngine = gpt ? null : rustHealth?.reachable ? 'rust' : null
   return ok({
     vm: summary,
     proxy: summary.proxy || null,
@@ -611,7 +604,8 @@ export async function buildProbeOne({ cfg, accountQuota, id, force = false, usag
     storedTier,
   })
   const cache = usageCache || getUsageCache()
-  const skipHop = !shouldHopOfficialUsage(acc?.unified, { hop })
+  if (force) cache.clear(accountId)
+  const skipHop = !shouldHopOfficialUsage(acc?.unified, { hop, force })
   let result = skipHop
     ? {
         ok: true,
@@ -741,11 +735,11 @@ export async function buildProbeOne({ cfg, accountQuota, id, force = false, usag
   })
 }
 
-export async function buildProbeAll({ cfg, accountQuota, hop = false } = {}) {
+export async function buildProbeAll({ cfg, accountQuota, hop = false, force = false } = {}) {
   const vms = listVms(cfg.paths.project)
   const items = []
   for (const s of vms) {
-    const one = await buildProbeOne({ cfg, accountQuota, id: s.id, hop })
+    const one = await buildProbeOne({ cfg, accountQuota, id: s.id, hop, force })
     if (one.ok === false || one.status) {
       items.push({ vm_id: s.id, ok: false, error: one.body?.error || one })
     } else {
@@ -1059,6 +1053,9 @@ function proxyConfigured(v, hit) {
 function canImportCredential(v, hit) {
   if (hit) return !!(hit.enabled && hit.status !== 'dead' && hit.status !== 'fail')
   const base = v.proxy || {}
+  const scheme = String(base.scheme || base.kind || '').toLowerCase()
+  const host = String(base.host || '').toLowerCase()
+  if (base.id === 'px-local' || scheme === 'local' || host === 'local') return true
   return !!(base.url || (base.host && base.port) || v.proxy_id)
 }
 
@@ -1074,7 +1071,7 @@ function mergeVmProxy(v, poolSnap) {
       id: hit?.id || base.id || v.proxy_id || null,
       host: hit?.host || base.host || null,
       port: hit?.port || base.port || null,
-      scheme: base.scheme || 'socks5',
+      scheme: hit?.scheme || base.scheme || (hit?.id === 'px-local' || base.id === 'px-local' ? 'local' : 'socks5'),
       has_auth: hit?.has_auth ?? !!(base.url && /\/\/[^/@]+@/.test(base.url)),
       status: hit?.status ?? null,
       enabled: hit?.enabled ?? null,
@@ -1271,35 +1268,49 @@ function enrichVm(v, accountQuota, active, extras = {}) {
   }
 }
 
-function isLeftoverVmKeyedAccount(account, vm) {
+export function isLeftoverVmKeyedAccount(account, vm) {
   if (!account || !vm) return false
-  const leftoverId = account.account_id === vm.id && account.account_id !== vm.account_uuid
-  return leftoverId && !account.email
+  const uuid = vm.account_uuid || vm.claude?.account_uuid || null
+  if (!uuid) return false
+  return account.account_id === vm.id && account.account_id !== uuid && !account.email
 }
 
-function isSeedAccountRow(account) {
+export function isSeedAccountRow(account) {
   if (!account) return false
   const unified = account.unified || {}
   const probe = account.last_probe || unified.last_probe
   if (probe && (probe.ok === true || probe.ok === false || probe.at)) return false
+  const extra5 = unified.headers?.['5h'] || {}
+  const extra7 = unified.headers?.['7d'] || {}
+  if (
+    extra5.utilization != null ||
+    extra5.status ||
+    extra5.reset ||
+    extra7.utilization != null ||
+    extra7.status ||
+    extra7.reset
+  ) {
+    return false
+  }
   const w5 = unified.official?.['5h'] || unified['5h'] || {}
   const util = Number(w5.utilization || 0)
   const status = String(w5.status || 'active').toLowerCase()
   return util === 0 && (status === 'active' || !w5.status) && !unified.official
 }
 
-function findAccount(accountQuota, vm) {
+export function findAccount(accountQuota, vm) {
   if (!accountQuota || typeof accountQuota.snapshot !== 'function') return null
   const snap = accountQuota.snapshot()
   const accounts = snap.accounts || []
-  if (vm.account_uuid) {
-    const byUuid = accounts.find((a) => a.account_id === vm.account_uuid)
+  const uuid = vm.account_uuid || vm.claude?.account_uuid || null
+  if (uuid) {
+    const byUuid = accounts.find((a) => a.account_id === uuid)
     if (byUuid && !isSeedAccountRow(byUuid)) return byUuid
   }
   return (
     accounts.find(
       (a) => (a.vm_id === vm.id || a.account_id === vm.id) && !isLeftoverVmKeyedAccount(a, vm) && !isSeedAccountRow(a),
-    ) || (vm.account_uuid ? accounts.find((a) => a.account_id === vm.account_uuid) : null)
+    ) || (uuid ? accounts.find((a) => a.account_id === uuid) : null)
   )
 }
 

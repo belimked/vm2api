@@ -9,6 +9,7 @@ import {
   createPanelSession,
   extractPanelToken,
   panelSessionCookie,
+  panelCookieSecure,
   clearPanelSessionCookie,
   revokePanelSession,
   revokePanelSessionsForUser,
@@ -122,6 +123,7 @@ import { withVmLock, atomicWriteJson } from '../vm/vm-file.mjs'
 import { snapshotDatabaseMetrics } from '../db/database-metrics.mjs'
 import { getUsageCache } from '../oauth/usage-cache.mjs'
 import { getDb, getDbPath } from '../db/database.mjs'
+import { readLocalVersion, loadChangelog, buildUpdateStatus, startHostUpgrade } from './release.mjs'
 import { removeVmFromDb } from '../vm/vm-db-sync.mjs'
 import { normalizeCredentialMode } from '../oauth/credential-mode.mjs'
 import { reloadActiveVm } from '../core/config.mjs'
@@ -165,7 +167,7 @@ import {
 } from '../vm/wrap-cli-runtime.mjs'
 import { restartRustKernel, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
 
-import { workerHealth, countTokensViaWorker } from '../transport/go-worker-client.mjs'
+import { countTokensViaWorker } from '../transport/go-worker-client.mjs'
 import { apiKeyBetaHeader, setupTokenBetaHeader } from '../protocol/claude-code-betas.mjs'
 import { rustKernelHealth, toPublicKernelHealth } from '../transport/rust-kernel-client.mjs'
 import { codexKernelHealth } from '../transport/codex-kernel-client.mjs'
@@ -338,12 +340,8 @@ export function createPanelHandler(ctx) {
         },
       }
     }
-    const [go, rust] = await Promise.all([
-      workerHealth(exec, { timeoutMs: 600 }),
-      rustKernelHealth(exec, { timeoutMs: 600 }),
-    ])
+    const rust = await rustKernelHealth(exec, { timeoutMs: 600 })
     return {
-      go: toPublicKernelHealth(go, 'go'),
       rust: toPublicKernelHealth(rust, 'rust'),
     }
   }
@@ -441,7 +439,7 @@ export function createPanelHandler(ctx) {
     const vmId = id || getActiveVmId(cfg.paths.project)
     const exec = workerExecForVm(vmId)
     if (!exec) return { ok: false, vm_id: vmId, error: 'vm_not_found' }
-    const health = await workerHealth(exec)
+    const health = await rustKernelHealth(exec)
     return {
       ok: !!health.ok,
       vm_id: vmId,
@@ -580,7 +578,7 @@ export function createPanelHandler(ctx) {
         } catch {}
       }
       const token = createPanelSession(authed.username, { role: authed.role })
-      const secure = (process.env.PUBLIC_SCHEME || 'https') === 'https'
+      const secure = panelCookieSecure(req)
       res.setHeader('Set-Cookie', panelSessionCookie(token, { secure }))
       const me = { user: authed.username, role: authed.role }
       return json(res, 200, {
@@ -596,7 +594,7 @@ export function createPanelHandler(ctx) {
     if (req.method === 'POST' && p === '/api/panel/logout') {
       const tok = extractPanelToken(req)
       if (tok) revokePanelSession(tok)
-      const secure = (process.env.PUBLIC_SCHEME || 'https') === 'https'
+      const secure = panelCookieSecure(req)
       res.setHeader('Set-Cookie', clearPanelSessionCookie({ secure }))
       return json(res, 200, { ok: true })
     }
@@ -620,7 +618,9 @@ export function createPanelHandler(ctx) {
       }
       if (req.method === 'GET' && p === '/api/panel/me') {
         const me = mePayload(req)
-        return json(res, 200, { ok: true, ...me, data: me })
+        const version = readLocalVersion(cfg?.paths?.project)
+        const payload = { ...me, version }
+        return json(res, 200, { ok: true, ...payload, data: payload })
       }
       const gate = authorizePanelRoute(req.method, p, panelIdentity(req).role)
       if (!gate.ok) {
@@ -652,6 +652,31 @@ export function createPanelHandler(ctx) {
           usageCache: getUsageCache(),
         })
         return json(res, 200, panel.ok(snapshot))
+      }
+      if (req.method === 'GET' && p === '/api/panel/version') {
+        const status = await buildUpdateStatus({ projectRoot: cfg?.paths?.project })
+        return json(res, 200, panel.ok(status))
+      }
+      if (req.method === 'GET' && p === '/api/panel/changelog') {
+        const current = readLocalVersion(cfg?.paths?.project)
+        const entries = loadChangelog(cfg?.paths?.project)
+        return json(res, 200, panel.ok({ current, current_tag: `v${current}`, entries }))
+      }
+      if (req.method === 'POST' && p === '/api/panel/update') {
+        const body = await readBody(req, 8192).catch(() => ({}))
+        const result = await startHostUpgrade({
+          projectRoot: cfg?.paths?.project,
+          confirm: body?.confirm === true,
+          version: body?.version,
+        })
+        if (result.error) {
+          return json(res, result.status, {
+            ok: false,
+            error: result.error,
+            data: result.data || null,
+          })
+        }
+        return json(res, result.status, panel.ok(result.data))
       }
       if (p === '/api/panel/users' || /^\/api\/panel\/users\/[^/]+$/.test(p)) {
         return json(res, 404, {
@@ -1448,7 +1473,7 @@ export function createPanelHandler(ctx) {
       // POST /api/panel/vms/:id/probe
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/probe$/.test(p)) {
         const id = p.split('/')[4]
-        const result = await panel.buildProbeOne({ cfg, accountQuota, id })
+        const result = await panel.buildProbeOne({ cfg, accountQuota, id, hop: true, force: true })
         if (result.status) return json(res, result.status, result.body)
         return json(res, 200, result)
       }
@@ -2777,7 +2802,10 @@ export function createPanelHandler(ctx) {
 
       // POST /api/panel/probe
       if (req.method === 'POST' && p === '/api/panel/probe') {
-        const result = await panel.buildProbeAll({ cfg, accountQuota })
+        const body = await readBody(req, 4096).catch(() => ({}))
+        const hop = body?.hop !== false
+        const force = body?.force !== false
+        const result = await panel.buildProbeAll({ cfg, accountQuota, hop, force })
         return json(res, 200, result)
       }
       if (req.method === 'GET' && p === '/api/panel/health-probe') {

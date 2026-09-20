@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+## 1.2.10 — 2026-09-20
+
+修复 Docker web 构建，并换仓内 `kin-cookie-auth`。不必换槽内 kernel。
+
+- 401 跳登录补上必填 `search`，`tsc -b` 通过，compose 不再卡在 Dockerfile 第 7 步 `pnpm build`
+- `kin-cookie-auth` 按 rust cli-hop 2.1.263 对齐 sessionKey 换票请求头（`claude-cli` + stainless，不再用合成 Chrome UA）
+
+已部署机升级：只更新控制面并重启一次。不必 `wrap-cli/sync`。见 [DEPLOY.md](docs/DEPLOY.md#已部署机升级到-1210)
+
+## 1.2.9 — 2026-09-20
+
+thinking-only 残包不再当 HTTP 200；一键安装与 HTTP 面板登录加固。不必换槽内 kernel。
+
+- `stream:false` 组包未完成不算 committed；只有 thinking / `stop_reason=null` 的假 `verified` 同槽再 hop，拿到正文再 200
+- 重试用尽才 502 `incomplete_response`，禁止 `terminal_state=verified` + 空正文
+- 槽满（`ready_slots=0`）等空槽，不 `docker restart`，也不往满槽塞请求
+- 一键安装：空 `.env` 补默认管理台 `admin` / `123456`（不覆盖已有密码）与随机 API key；缺 `!CHANGELOG.md` 则补上并在 compose 失败时重试
+- HTTP 裸 IP 登录：Bearer 写入 localStorage；Cookie `Secure` 跟请求走；401 回登录页，不再摊英文 Missing credentials
+
+已部署机升级：只更新控制面并重启一次。不必 `wrap-cli/sync`。见 [DEPLOY.md](docs/DEPLOY.md#已部署机升级到-129)
+
+## 1.2.8 — 2026-09-20
+
+修复 compose build：`.dockerignore` 的 `*.md` 把 `CHANGELOG.md` 挡在构建上下文外，`COPY CHANGELOG.md` 失败。不必换槽内 kernel。
+
+- `.dockerignore` 增加 `!CHANGELOG.md`
+
+已部署机升级：只更新控制面并重启一次。不必 `wrap-cli/sync`。见 [DEPLOY.md](docs/DEPLOY.md#已部署机升级到-128)。卡住的 1.2.7 构建可先在仓库根 `.dockerignore` 加一行 `!CHANGELOG.md` 再 `docker compose up -d --build`。
+
+## 1.2.7 — 2026-09-20
+
+控制面：版本检查与一键更新。不必换槽内 kernel。
+
+- `deploy/install.sh`：安装 / 更新 / 检查 / changelog / 状态（参考 sub2api 与 CLIProxyAPI）
+- 面板 `GET /api/panel/version`、`GET /api/panel/changelog`、`POST /api/panel/update`；`GET /me` 带 `version`
+- 设置页「关于」：当前版本、GitHub 最新 Release、changelog、复制一键命令
+- 镜像 COPY `VERSION` / `CHANGELOG.md`；已挂 `docker.sock` 时可由面板拉起宿主机升级助手
+
+已部署机升级：只更新控制面 Node（含 web）并重启一次。不必 `wrap-cli/sync`。见 [DEPLOY.md](docs/DEPLOY.md#已部署机升级到-127)。
+
+## 1.2.6 — 2026-09-20
+
+控制面：本地出口导入、kernel 探活、Setup Token 额度。不必换槽内 kernel。
+
+- 本地出口绑槽后允许导入 / host hop（空 SOCKS URL 视为直连，不再报未绑定）
+- 调度、面板 live credential、VM 详情健康检查打 rust `kernel.sock`，不再探不存在的 `worker.sock`
+- Setup Token 写入凭证时把 `inference` 规范成 `user:inference`
+- Setup Token Extra 5h/7d 进面板详情；手动额度探测真正 hop
+- 额度卡展示剩余百分比与重置时间
+
+已部署机升级：只更新控制面 Node（含 web）并重启一次。不必 `wrap-cli/sync`。见 [DEPLOY.md](docs/DEPLOY.md#已部署机升级到-126)。
+
 ## 1.2.5 — 2026-09-20
 
 仓内预编译 linux amd64 二进制，clone / compose 即可部署，不必在服务器上编 kernel 与 wrap CLI。

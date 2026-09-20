@@ -1,6 +1,6 @@
 # vm2api
 
-虚拟机拟真 + Claude Code 原生 subagent。**0 提示词注入**。
+虚拟机拟真 + Claude Code。**0 提示词注入**。
 
 [![Release](https://img.shields.io/github/v/release/dofastted/vm2api?display_name=tag)](https://github.com/dofastted/vm2api/releases)
 [![License](https://img.shields.io/badge/License-Noncommercial-yellow.svg)](LICENSE)
@@ -16,9 +16,7 @@
 
 ## 核心能力
 
-- 🪪 **Console API，不是 OAuth**：Setup Token 转成 Console 可用 API，取代 OAuth 换来的 AT / RT。上游按 Console 客户端看待你。
 - 🧼 **0 提示词注入**：不再靠改 system / 注入人设去“像官方”。身份在凭证形态上就已经是 Console。
-- 🧩 **Claude Code 原生 subagent**：槽内官方转发面，最大 **20** 路并发，不用第三方假客户端顶替。
 - 🖥️ **Docker 或真虚拟机**：一槽一台机器。拟真物理机指纹仍在攻克，欢迎方案。
 - 📡 **全量遥测**：目标是 Claude 认为你是一台完全独立的电脑，并且无其余特征。
 - 🌐 **出口可选**：每槽一条远程 SOCKS5，或代理池「添加本地出口」。
@@ -42,6 +40,17 @@
 
 生产就用这条。仓库必须在 **`/opt/vm2api`**（容器内外路径一致）。
 
+**一键安装 / 更新**（保留已有非空 `.env` 字段 / `vms/` / `data/`，不 `docker rm` 槽）。空密码默认 **`admin` / `123456`**，登录 `http://<ip>:8787/cc#/login`。构建若报 `CHANGELOG.md: not found`，脚本会补 `.dockerignore` 并重试。
+
+```bash
+curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
+# 以后更新
+curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+sudo bash /opt/vm2api/deploy/install.sh check
+```
+
+管理台 **设置 → 关于** 会对照 GitHub Release，并给出同一条命令。
+
 **运行形态（不是一个父容器里一堆子进程）：**
 
 - Compose **只起 1 个** `vm2api` 控制面（面板、`/v1`、调度）
@@ -53,13 +62,13 @@ git clone https://github.com/dofastted/vm2api.git /opt/vm2api
 cd /opt/vm2api
 cp .env.example .env
 chmod 600 .env
-# 填写 VM2API_API_KEY / VM2API_ADMIN_PASSWORD / VM2API_DB_SECRET
+# 空密码默认 admin / 123456；空 API key / DB secret 由入口生成
 
 docker compose up -d --build
 curl -sS --noproxy '*' http://127.0.0.1:8787/health
 ```
 
-`--build` 拷仓内 `bin/kin-{kernel,egress,worker,codex-kernel,cookie-auth}` 和 `share/wrap-cli`，**不在服务器上编 Rust/Go**。缺槽位 OS 时入口编 `kin-os/ubuntu:24.04`。其它发行版：`node docker/kin-os/build.mjs`。槽 UID 是 `10000+序号`，`bin/kin-*` 必须 **755**，不要 `700`。已部署机升 **v1.2.5**：控制面重启 + wrap-cli sync。见 [DEPLOY.md](docs/DEPLOY.md#已部署机升级到-125)。
+`--build` 拷仓内 `bin/kin-{kernel,egress,worker,codex-kernel,cookie-auth}` 和 `share/wrap-cli`，**不在服务器上编 Rust/Go**。缺槽位 OS 时入口编 `kin-os/ubuntu:24.04`。其它发行版：`node docker/kin-os/build.mjs`。槽 UID 是 `10000+序号`，`bin/kin-*` 必须 **755**，不要 `700`。已部署机升 **v1.2.10**：控制面重启即可。见 [DEPLOY.md](docs/DEPLOY.md#已部署机升级到-1210)。
 
 
 
@@ -132,23 +141,13 @@ curl -sS http://127.0.0.1:8787/v1/messages \
 
 ## 技术路线
 
-![Console API 取代 OAuth AT/RT，零提示词注入](docs/images/vm2api-01-console-api.png)
-
-| 旧路 | 本仓 |
-|------|------|
-| OAuth 拿到 AT / RT，上游按 OAuth 客户端看你 | Setup Token → Console API |
-| 为了像官方，要注人设 / 提示词 | Claude 认为你是 Console API |
-| 提示词注入有泄漏面 | **0 提示词注入** |
-
-![用户请求到 Console API 的六站流水线](docs/images/vm2api-02-route.png)
-
 ```text
 用户请求
   → 协议清洗
   → POST /v1/messages
-  → 接入 Claude Code 原生 subagent
+  → 接入 Claude Code 
   → TCP 转发
-  → Console API endpoint
+  → endpoint
   → 透明转发给用户
 ```
 
@@ -214,11 +213,11 @@ VM2API_DB_SECRET=       # 库加密
 
 ## 版本与构建
 
-当前发布：**v1.2.5**
+当前发布：**v1.2.10**
 
 ```bash
-git tag -a v1.2.5 -m "vm2api v1.2.5"
-git push origin v1.2.5
+git tag -a v1.2.10 -m "vm2api v1.2.10"
+git push origin v1.2.10
 ```
 
 `v*` tag 会触发 [Release 工作流](.github/workflows/release.yml)，再挂一份 linux amd64 ELF。仓内 `bin/` 已可直接部署。步骤：[BUILD.md](docs/BUILD.md)
