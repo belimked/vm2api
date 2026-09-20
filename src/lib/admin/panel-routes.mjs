@@ -75,6 +75,7 @@ import { startProbeTest, getProbeTest, listProbeTests, cancelProbeTest, getProbe
 import { publicKeyView } from './api-keys.mjs'
 import { publicEndpointView, fetchUpstreamModels, API_ENDPOINT_PRESETS } from './api-endpoints.mjs'
 import { authorizePanelRoute, mePayload, panelIdentity } from './panel-acl.mjs'
+import { mergeNotifyConfig, publicNotifyConfig, publicRoutingNotify, sendNotifyTest } from './notify.mjs'
 import {
   denyIfUserCannotDeleteVm,
   denyIfUserMissesKey,
