@@ -50,7 +50,7 @@ test('prompt template needles are blocked without waiting for structure', () => 
   )
 })
 
-test('openai chat memory-extractor harvest is blocked without structure gates', () => {
+test('openai chat persistable envelope matches 1.2.1 and is not distill', () => {
   const hit = detectDistill({
     inbound: {
       model: 'claude-opus-5',
@@ -74,11 +74,15 @@ test('openai chat memory-extractor harvest is blocked without structure gates', 
       ],
     },
   })
-  assert.equal(hit.action, 'block')
-  assert.equal(
-    hit.hits.some((h) => h.rule === 'needle'),
-    true,
-  )
+  assert.equal(hit.action, 'pass')
+})
+
+test('default needles do not include persistable envelope or harvest wrapper phrases', () => {
+  const joined = DEFAULT_DISTILL_RULES.needles.join('\n')
+  assert.equal(/persistable response items/i.test(joined), false)
+  assert.equal(/memory-stage-one/i.test(joined), false)
+  assert.equal(/must distill reusable/i.test(joined), false)
+  assert.equal(/must extract durable memory/i.test(joined), false)
 })
 
 test('plain cluster VM email UI prompt is not distill', () => {
@@ -165,6 +169,25 @@ test('default needles do not include 请分步解答', () => {
   )
 })
 
+test('default needles do not include x-anthropic-billing-header', () => {
+  assert.equal(
+    DEFAULT_DISTILL_RULES.needles.some((n) => /billing-header/i.test(n)),
+    false,
+  )
+})
+
+test('Claude Code billing header in system is not distill', () => {
+  const hit = detectDistill({
+    inbound: inbound('帮我改一下登录页的校验提示', {
+      max_tokens: 64000,
+      tools: [{ name: 'bash', input_schema: { type: 'object' } }],
+      system:
+        "x-anthropic-billing-header: cc_version=2.1.257.efd; cc_entrypoint=cli; cch=cc746;\nYou are Claude Code, Anthropic's official CLI for Claude.",
+    }),
+  })
+  assert.equal(hit.action, 'pass')
+})
+
 test('distillBlockError uses panel-editable message and 403', () => {
   const err = distillBlockError(
     { error: { message: '不允许蒸馏', status: 403, code: ErrorCode.DISTILL_BLOCKED } },
@@ -209,6 +232,8 @@ test('handleProtocol intercepts distill before credential hop, refusal guard aft
   assert.ok(distill > before)
   assert.ok(refusal > distill)
   assert.ok(api > refusal)
+  const guard = src.slice(src.indexOf('function applyDistillGuard'), src.indexOf('function isZeroInjectMode'))
+  assert.ok(guard.includes('isProxiedOfficialClaudeCode'))
 })
 
 test('assemble path does not forward onCommit to the kernel hop', () => {

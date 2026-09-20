@@ -6,6 +6,34 @@ import {
   shouldContinue,
 } from '../../src/lib/pool/upstream-error-policy.mjs'
 
+test('unified account 429 without reset header uses usage window then 5 minutes', () => {
+  const now = 1_700_000_000_000
+  const usageReset = now + 3_600_000
+  const fromUsage = classifyUpstreamResult(
+    {
+      status: 429,
+      body: { type: 'error', error: { type: 'rate_limit_error', message: 'limited' } },
+      headers: {
+        'anthropic-ratelimit-unified-5h-status': 'rejected',
+      },
+    },
+    { model: 'claude-opus-test', now, usage: { reset_5h: new Date(usageReset).toISOString() } },
+  )
+  assert.equal(fromUsage.reason, 'account_quota_exhausted')
+  assert.equal(fromUsage.cooldownUntil, usageReset)
+  const fallback = classifyUpstreamResult(
+    {
+      status: 429,
+      body: { type: 'error', error: { type: 'rate_limit_error', message: 'limited' } },
+      headers: {
+        'anthropic-ratelimit-unified-5h-status': 'rejected',
+      },
+    },
+    { model: 'claude-opus-test', now },
+  )
+  assert.equal(fallback.cooldownUntil, now + 5 * 60_000)
+})
+
 test('unified account 429 cools account until authoritative reset', () => {
   const now = 1_700_000_000_000
   const reset = now + 120_000
@@ -50,6 +78,20 @@ test('entitlement 429 stops without poisoning pool', () => {
   )
   assert.equal(policy.scope, 'request')
   assert.equal(policy.action, 'stop')
+})
+
+test('wrap Connection error retries the same account', () => {
+  const policy = classifyUpstreamResult({
+    status: 200,
+    ok: false,
+    committed: false,
+    terminalState: 'incomplete',
+    body: { error: { type: 'api_error', message: 'provider error: provider error: Connection error.' } },
+  })
+  assert.equal(policy.scope, 'worker')
+  assert.equal(policy.action, 'continue')
+  assert.equal(policy.reason, 'wrap_connection_error')
+  assert.equal(policy.retrySameAccount, true)
 })
 
 test('committed incomplete stream never switches account', () => {

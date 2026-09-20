@@ -5,7 +5,9 @@ import {
   assistantVisibleOutput,
   isCompleteAssistantMessage,
   isIncompleteAssistantMessage,
+  isWrapConnectionError,
 } from '../core/errors.mjs'
+import { parseResetMs } from './quota-window.mjs'
 
 const ENTITLEMENT_PATTERNS = [
   /extra usage required/i,
@@ -84,6 +86,18 @@ function resetFromHeaders(headers, now = Date.now()) {
     })
     .filter((value) => value && value > now)
   return resets.length ? Math.min(...resets) : null
+}
+
+function usageWindowReset(usage, now = Date.now()) {
+  if (!usage || typeof usage !== 'object') return null
+  const candidates = [usage.reset_5h, usage.reset_7d, usage['5h']?.reset, usage['7d']?.reset]
+    .map((value) => parseResetMs(value))
+    .filter((value) => Number.isFinite(value) && value > now)
+  return candidates.length ? Math.min(...candidates) : null
+}
+
+function accountLimitUntil(reset, usage, now) {
+  return reset || usageWindowReset(usage, now) || now + 5 * 60_000
 }
 
 export const FABLE_FAMILY_KEY = 'fable'
@@ -216,6 +230,7 @@ export function classifyUpstreamResult(
     credentialGeneration = null,
     priorAuth401Generation = null,
     signatureRepair = false,
+    usage = null,
   } = {},
 ) {
   if (isSilentClaudeRefusal(result) && !result.committed) {
@@ -276,6 +291,13 @@ export function classifyUpstreamResult(
       reason: 'downstream_committed_or_incomplete',
       cooldownUntil: null,
     }
+  }
+  if (isWrapConnectionError(message) || isWrapConnectionError(hay)) {
+    return continueWithoutCooldown({
+      scope: 'worker',
+      reason: 'wrap_connection_error',
+      retrySameAccount: true,
+    })
   }
   if (result.transportError || status === 0) {
     if (isProxyFailure(workerCode, message)) {
@@ -408,7 +430,7 @@ export function classifyUpstreamResult(
         scope: 'account',
         action: 'continue-and-cooldown',
         reason: 'account_quota_exhausted',
-        cooldownUntil: reset || now + 5 * 60_000,
+        cooldownUntil: accountLimitUntil(reset, usage, now),
       }
     }
     if (isFableWindowLimit(result.headers) || isFableModel(model)) {
@@ -435,7 +457,7 @@ export function classifyUpstreamResult(
       scope: 'account',
       action: 'continue-and-cooldown',
       reason: 'rate_limited',
-      cooldownUntil: reset || now + 60_000,
+      cooldownUntil: accountLimitUntil(reset, usage, now),
     }
   }
   if (status === 529) {

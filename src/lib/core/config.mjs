@@ -10,6 +10,29 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..', '..')
 const PROJECT = path.resolve(process.env.KIN_PROJECT_ROOT || path.resolve(ROOT, '..'))
 
+/** Live routing.json. KIN_ROUTING_FILE wins; otherwise <project>/src/config/routing.json. */
+export function routingConfigFile(projectRoot = PROJECT) {
+  const override = String(process.env.KIN_ROUTING_FILE || '').trim()
+  if (override) return override
+  return path.join(projectRoot || PROJECT, 'src', 'config', 'routing.json')
+}
+
+export function readRoutingConfigFile(projectRoot = PROJECT) {
+  const file = routingConfigFile(projectRoot)
+  let raw
+  try {
+    raw = fs.readFileSync(file, 'utf8')
+  } catch (error) {
+    if (error?.code === 'ENOENT') throw new Error(`Routing config '${file}' not found`, { cause: error })
+    throw new Error(`Routing config '${file}' unreadable: ${error?.message || error}`, { cause: error })
+  }
+  try {
+    return JSON.parse(raw)
+  } catch (error) {
+    throw new Error(`Routing config '${file}' has invalid JSON: ${error?.message || error}`, { cause: error })
+  }
+}
+
 export function loadConfig() {
   const keyFile = path.join(ROOT, 'config', 'test.key')
   const apiKey =

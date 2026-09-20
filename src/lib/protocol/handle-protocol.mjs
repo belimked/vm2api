@@ -139,7 +139,10 @@ export function createHandleProtocol(deps) {
   }
 
   function applyDistillGuard({ req, inbound, body, fp, logBag, requestId, res }) {
-    const official = isOfficialClaudeCodeTraffic(req.headers, inbound) || isOfficialClaudeClient(fp.client_class)
+    const official =
+      isOfficialClaudeCodeTraffic(req.headers, inbound) ||
+      isOfficialClaudeClient(fp.client_class) ||
+      (detectProxiedOfficialCcFromRoutingFile(routingConfigPath) && isProxiedOfficialClaudeCode(inbound))
     const zeroInject = isZeroInjectMode()
     const hit = detectDistill({ inbound, body, official, zeroInject }, cfg.distill)
     if (hit.action !== 'block') return false
@@ -148,7 +151,11 @@ export function createHandleProtocol(deps) {
     logBag.attempt_count = 0
     logBag.final_state = 'distill_blocked'
     logBag.error_code = hit.error.code
-    logBag.error_message = hit.error.message
+    const evidence = (hit.hits || [])
+      .map((item) => item.evidence || item.rule)
+      .filter(Boolean)
+      .join(';')
+    logBag.error_message = evidence ? `${hit.error.message}: ${evidence}` : hit.error.message
     const blocked = distillBlockError(cfg.distill, requestId)
     json(res, blocked.status, blocked.body)
     return true
@@ -241,6 +248,7 @@ export function createHandleProtocol(deps) {
       deliveryMode,
       want1m,
       routing,
+      slotWaitMs: candidate.slotWaitMs,
       noGoFallback,
       ensureCredential: (exec) => ensureWorkerCredential(exec),
       onEvent: async (line) => {
@@ -752,6 +760,7 @@ export function createHandleProtocol(deps) {
               cacheTtl,
               cacheBreakpoints,
               cacheControlLimit: Number(getRouting()?.compatibility?.cache_control_limit) || 4,
+              unofficial: !officialTraffic,
             })
             hopBody = await materializeRemoteImageSources(hopBody)
             const cliHide = personaHideForCliZero(personaIn, hopBody, {
@@ -859,6 +868,7 @@ export function createHandleProtocol(deps) {
               deliveryMode: attemptDelivery,
               want1m,
               routing: getRouting(),
+              slotWaitMs: candidate.slotWaitMs,
               noGoFallback: !!pinVmId,
               ensureCredential: (exec) => ensureWorkerCredential(exec),
               onCommit: () => {
