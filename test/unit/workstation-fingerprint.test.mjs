@@ -11,6 +11,7 @@ import {
   HOSTNAME_RE,
   isGeneratedHostname,
   isHexDeviceId,
+  MAC_RE,
   MACHINE_ID_RE,
   takenFingerprintKeys,
   writeGuestMachineIdFile,
@@ -22,8 +23,9 @@ test('generateWorkstationFingerprint emits a coherent linux pack', () => {
   assert.equal(pack.hostname.startsWith('ubuntu-'), true)
   assert.match(pack.device_id, DEVICE_ID_RE)
   assert.match(pack.guest_machine_id, MACHINE_ID_RE)
-  assert.equal(pack.sku, '4c8g')
-  assert.equal(pack.linux_kernel, '6.8.0-51-generic')
+  assert.ok(['2c4g', '4c8g'].includes(pack.sku))
+  assert.match(pack.linux_kernel, /^6\.8\.0-\d+-generic$/)
+  assert.match(pack.mac_address, MAC_RE)
   assert.equal(pack.locale, 'en_US.UTF-8')
   assert.match(pack.timezone, /^America\//)
   assert.equal(pack.source, 'generated')
@@ -34,8 +36,21 @@ test('generateWorkstationFingerprint emits a coherent linux pack', () => {
 test('debian family hostname and catalog kernel', () => {
   const pack = generateWorkstationFingerprint({ id: 'vm-10', kernel: 'debian-12' })
   assert.equal(pack.hostname.startsWith('debian-'), true)
-  assert.equal(pack.sku, '2c4g')
+  assert.ok(['2c4g', '4c8g'].includes(pack.sku))
   assert.match(pack.linux_kernel, /6\.1\.0-\d+-amd64/)
+})
+
+test('a regenerated pack rotates the nic and avoids taken macs', () => {
+  const first = generateWorkstationFingerprint({ id: 'vm-01', kernel: 'ubuntu-24.04' })
+  assert.match(first.mac_address, MAC_RE)
+  assert.equal(first.mac_address.startsWith('02:42'), false)
+  // Reset owns rotation: the same slot id must not reproduce the old nic.
+  const again = generateWorkstationFingerprint({ id: 'vm-01', kernel: 'ubuntu-24.04' })
+  assert.notEqual(again.mac_address, first.mac_address)
+  const taken = takenFingerprintKeys([{ fingerprint: first }])
+  assert.equal(taken.mac_address.has(first.mac_address), true)
+  const second = generateWorkstationFingerprint({ id: 'vm-02', kernel: 'ubuntu-24.04' }, { taken })
+  assert.notEqual(second.mac_address, first.mac_address)
 })
 
 test('collision retries until unused hostname', () => {

@@ -16,6 +16,7 @@ import { assertCliHopAllowed, resolveOfficialCcInference } from './slot-engine.m
 import { ensureSlotClaudeOwnership } from '../oauth/oauth-credentials.mjs'
 import { materializeWrapCli } from './wrap-cli-runtime.mjs'
 import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mjs'
+import { slotPick, workstationMacAddress } from '../identity/workstation-profile.mjs'
 import { ensureProxyEgress, isLocalEgressProxy, slotNetworkForVm } from './egress.mjs'
 
 export const RUNTIME = 'docker'
@@ -38,12 +39,17 @@ export const OS_ORDER = ['ubuntu-24.04', 'debian-12', 'archlinux', 'fedora-41']
 export { normalizeTimezone, normalizeTimezone as normalizeUsTimezone, US_TIMEZONES } from '../core/timezone.mjs'
 export const STANDARD_LOCALE = 'en_US.UTF-8'
 
+/**
+ * Guest OS and zone come from a hash of the slot id, not its ordinal.
+ * Index arithmetic put slot N and slot N+4 on the same distro, kernel, zone
+ * and sku — a mod-4 fleet reads as one cluster instead of N workstations.
+ */
 export function kernelForIndex(i) {
-  return OS_ORDER[(Number(i) - 1) % OS_ORDER.length]
+  return slotPick(OS_ORDER, {}, 'os', `vm-${Number(i) || 0}`)
 }
 
 export function timezoneForIndex(i) {
-  return US_TIMEZONES[(Number(i) - 1) % US_TIMEZONES.length]
+  return slotPick(US_TIMEZONES, {}, 'tz', `vm-${Number(i) || 0}`)
 }
 
 export function imageForKernel(kernel) {
@@ -477,6 +483,9 @@ export function startVmRuntime(vm, projectRoot, { recreate = false } = {}) {
     name,
     '--hostname',
     host,
+    // Docker's own 02:42:* range marks the NIC as a container.
+    '--mac-address',
+    workstationMacAddress(vm),
     '--network',
     netName,
     '--restart',
