@@ -116,7 +116,6 @@ export function prepareCliHopBody(
   {
     stream = true,
     repaired = false,
-    cacheTtl = null,
     cacheBreakpoints = CLI_HOP_CACHE_BREAKPOINTS,
     cacheControlLimit = 4,
     unofficial: _unofficial = false,
@@ -137,11 +136,9 @@ export function prepareCliHopBody(
   body = stripInvalidThinkingBlocks(body)
   body = alignSamplingWithThinking(body)
   body = stripIllegalCacheControlFields(body)
-  if (cacheTtl) body = applyCacheTtlToBody(body, CLI_HOP_CACHE_TTL)
   // Node rewrites last + penultimate user, then removes the current tail so
-  // the kernel can restamp it after transport conversion.
-  // Force 5m because wrap-owned earlier markers are ttl-less (=5m); a later
-  // 1h message marker is rejected by Anthropic's TTL ordering rule.
+  // the kernel can restamp it after transport conversion. Keep every Node
+  // marker at 5m because wrap-owned tools/system markers are ttl-less (=5m).
   if (cacheBreakpoints) {
     const cfg = normalizeCacheBreakpoints(cacheBreakpoints)
     body = applyCacheBreakpoints(body, {
@@ -158,10 +155,11 @@ export function prepareCliHopBody(
   }
   body = dropCliOwnedBreakpoints(body)
   body = dropLastMessageBreakpoint(body)
-  // The kernel prepends ttl-less (5m) tools/system markers, so every message
-  // marker — Node default or client supplied — must be 5m as well. Ordering
-  // alone cannot help: official traffic arrives with cacheTtl=null and may
-  // carry a client 1h marker that nothing earlier in this body outranks.
+  // enforceCacheTtlOrder only downgrades a 1h marker that sits AFTER a 5m one.
+  // An official client can send a 1h marker with nothing earlier in the Node
+  // body to outrank it, so ordering lets it through; the kernel then prepends
+  // its 5m tools/system markers and Anthropic 400s on the 1h-after-5m. Pin
+  // every marker to 5m unconditionally instead (dofastted/vm2api#32).
   body = applyCacheTtlToBody(body, CLI_HOP_CACHE_TTL)
   enforceCacheLimit(body, cacheControlLimit)
   return body
