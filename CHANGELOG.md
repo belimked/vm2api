@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.6 — 2026-09-21
+
+- Rust kernel 固定预开 20 个 Claude native CLI session 位
+- 新增全局与每槽 `session_slots` 热准入上限，独立于并发、RPM 与 sticky session
+- 设置页和 Claude VM 详情支持 Session 槽位配置；Codex 槽保持隐藏
+- routing 持久化失败时完整恢复内存运行态，避免半应用配置
+
+## 1.3.5 — 2026-09-21
+
+- Claude Code 身份、User-Agent 与默认 beta 序列同步官方 2.1.278 抓包
+- official 请求条件透传 request class、agent type、前序工具耗时与 context compacted 标记
+- SSE 聚合保留 `stop_details`、`safeguard_results` 与 `diagnostics`
+
 ## 1.3.4 — 2026-09-21
 
 - OpenAI 模型无论入站 chat、messages 还是 responses，hop 都洗到 `/v1/responses`
