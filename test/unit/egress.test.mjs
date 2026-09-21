@@ -48,6 +48,10 @@ test('iptables plan redirects tcp and dns, returns subnet, drops the rest', () =
   assert.ok(joined.some((s) => s.includes('-F KEGa1b2c3d4')))
   assert.ok(joined.some((s) => s.includes('-d 172.31.0.0/24 -j RETURN')))
   assert.ok(joined.some((s) => s.includes('FORWARD') && s.includes('DROP')))
+  // container→kin-egress must be accepted on the bridge or a strict host INPUT policy 502s
+  assert.ok(joined.some((s) => s.includes('-I INPUT 1 -i kega1b2c3d4 -p tcp --dport 20010 -j ACCEPT')))
+  assert.ok(joined.some((s) => s.includes('-I INPUT 1 -i kega1b2c3d4 -p udp --dport 20011 -j ACCEPT')))
+  assert.ok(plan.del.some((row) => row.join(' ').includes('-D INPUT -i kega1b2c3d4 -p tcp --dport 20010 -j ACCEPT')))
   assert.ok(plan.del.some((row) => row.includes('-X')))
 })
 
