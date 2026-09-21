@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.3.4 — 2026-09-21
+
+- OpenAI 模型无论入站 chat、messages 还是 responses，hop 都洗到 `/v1/responses`
+- 请求日志记录清洗后的 path/protocol；原来的入站协议留在 `hop_meta`
+- API 类 OpenAI 上游改为官方 Responses，不再 POST `/v1/chat/completions`
+
+## 1.3.3 — 2026-09-21
+
+- Codex Rotate 插件：采集并注入 `X-Codex-Turn-State`（292/332），设置 → 协议可开关，默认关闭
+- OpenAI / Codex 用量保留 `cached_tokens` 与 `cache_write_tokens`，计费和日志不再把上游缓存读成 0
+- 面板公开 routing 脱敏 SMTP / Telegram 密钥
+- 官方 CCH 按 xxh64 body hash 计算
+
+## 1.3.2 — 2026-09-21
+
+- 控制台左上角在 vm2api 徽标下显示构建版本号
+- Vite 从仓库 `VERSION` 注入版本，Docker 前端构建同步复制版本文件
+
+## 1.3.1 — 2026-09-21
+
+整合 VM 列表可视化升级与 1.3.0 网关遗漏修复。
+
+- VM 列表加入 fleet pulse 与用量仪表，重整桌面和移动端信息层级
+- 并发预约竞态失败后尝试其他账号，全部繁忙时进入账号等待队列
+- thinking-only、缺少 `stop_reason` 或非 assistant envelope 的响应不再误判成功
+- 同槽兄弟请求阻止即时回收时，最后一个请求结束后补做 wrap 回收
+- 控制台缓存 TTL 仅支持 `5m` / `1h`；请求显式 TTL 覆盖默认值，所有出站断点统一复写
+- Compose 默认镜像更新为 `vm2api:1.3.1`
+
 ## 1.3.0 — 2026-09-20
 
 - 官方 Claude Code init 同时读取并保留 `~/.claude.json` 与 `CLAUDE_CONFIG_DIR/.claude.json`，不再在身份同步后删除 CLI 生成文件

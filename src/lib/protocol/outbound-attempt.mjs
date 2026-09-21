@@ -27,6 +27,7 @@ import {
   CRS_OFFICIAL_CLI_SYSTEM,
   CRS_COMPACT_IDENTITY,
 } from '../identity/crs-persona.mjs'
+import { sealClaudeCodeCch } from '../identity/cch.mjs'
 import {
   CRS_OFFICIAL_AGENT_PROMPT,
   CRS_AGENT_EXPANSION,
@@ -79,9 +80,6 @@ export const CLI_HOP_CACHE_BREAKPOINTS = Object.freeze({
   tools_tail: false,
   messages: 'rewrite',
 })
-
-/** Wrap CLI and kernel emit ttl-less ephemeral markers, which Anthropic treats as 5m. */
-export const CLI_HOP_CACHE_TTL = '5m'
 
 function dropNodeCacheControl(node) {
   if (!node || typeof node !== 'object' || !node.cache_control) return node
@@ -136,15 +134,13 @@ export function prepareCliHopBody(
   body = stripInvalidThinkingBlocks(body)
   body = alignSamplingWithThinking(body)
   body = stripIllegalCacheControlFields(body)
-  if (cacheTtl) body = applyCacheTtlToBody(body, CLI_HOP_CACHE_TTL)
-  // 1.2.0 contract: Node rewrites last + penultimate user, then removes the
-  // current tail so the kernel can restamp it after transport conversion.
-  // Force 5m because wrap-owned earlier markers are ttl-less (=5m); a later
-  // 1h message marker is rejected by Anthropic's TTL ordering rule.
+  if (cacheTtl) body = applyCacheTtlToBody(body, cacheTtl)
+  // Node rewrites last + penultimate user, then removes the current tail so
+  // the kernel can restamp it after transport conversion with the same TTL.
   if (cacheBreakpoints) {
     const cfg = normalizeCacheBreakpoints(cacheBreakpoints)
     body = applyCacheBreakpoints(body, {
-      ttl: CLI_HOP_CACHE_TTL,
+      ttl: cacheTtl,
       config: {
         enabled: cfg.enabled,
         preserve_client: cfg.preserve_client,
@@ -157,7 +153,7 @@ export function prepareCliHopBody(
   }
   body = dropCliOwnedBreakpoints(body)
   body = dropLastMessageBreakpoint(body)
-  body = enforceCacheTtlOrder(body)
+  if (cacheTtl) body = applyCacheTtlToBody(body, cacheTtl)
   enforceCacheLimit(body, cacheControlLimit)
   return body
 }
@@ -283,6 +279,6 @@ export function prepareOutboundEnvelope({
     delete headers.Authorization
   }
   if (stream) headers.accept = 'text/event-stream'
-  const body = sanitizeAnthropicBodyForBetaTokens(prepared.body, headers?.['anthropic-beta'] || '')
+  const body = sealClaudeCodeCch(sanitizeAnthropicBodyForBetaTokens(prepared.body, headers?.['anthropic-beta'] || ''))
   return { body, headers, toolNames: prepared.toolNames }
 }
