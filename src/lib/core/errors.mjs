@@ -208,7 +208,16 @@ export function finalizeAssembledAssistantHop(result = {}) {
   return result
 }
 
+const INCOMPLETE_ASSISTANT_MESSAGE = 'Assistant hop ended without visible output or stop_reason'
+
 export function incompleteAssistantClientError(result = {}) {
+  // Keep the reason the hop died (an upstream 400, a wrap Connection error)
+  // instead of replacing it with the generic text; the code stays stable.
+  const prior = result?.body?.error?.message
+  const reason =
+    typeof prior === 'string' && prior.trim() && !prior.startsWith(INCOMPLETE_ASSISTANT_MESSAGE)
+      ? prior.trim().slice(0, 500)
+      : ''
   return {
     ...result,
     ok: false,
@@ -220,7 +229,7 @@ export function incompleteAssistantClientError(result = {}) {
       error: {
         type: ErrorType.UPSTREAM,
         code: ErrorCode.INCOMPLETE_RESPONSE,
-        message: 'Assistant hop ended without visible output or stop_reason',
+        message: reason ? `${INCOMPLETE_ASSISTANT_MESSAGE}: ${reason}` : INCOMPLETE_ASSISTANT_MESSAGE,
       },
     },
   }
