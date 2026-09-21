@@ -109,6 +109,31 @@ function dropLastMessageBreakpoint(body) {
   return { ...body, messages: next }
 }
 
+/**
+ * cli-hop must not leak any 1h marker. The shared applyCacheTtlToBody on this
+ * release line still honors 1h (bodyRequestsHourCache → honorHour), so a client
+ * 1h breakpoint on a non-tail message survives; the kernel then prepends its 5m
+ * tools/system markers and Anthropic 400s on the 1h-after-5m. Pin every cli-hop
+ * marker to 5m unconditionally, ignoring pins (dofastted/vm2api#32).
+ */
+function forceCliHopCacheTtl(body) {
+  if (!body || typeof body !== 'object') return body
+  const pin = (node) =>
+    node && typeof node === 'object' && node.cache_control
+      ? { ...node, cache_control: { type: 'ephemeral', ttl: CLI_HOP_CACHE_TTL } }
+      : node
+  const out = { ...body }
+  if (out.cache_control) out.cache_control = { type: 'ephemeral', ttl: CLI_HOP_CACHE_TTL }
+  if (Array.isArray(out.tools)) out.tools = out.tools.map(pin)
+  if (Array.isArray(out.system)) out.system = out.system.map(pin)
+  if (Array.isArray(out.messages)) {
+    out.messages = out.messages.map((message) =>
+      Array.isArray(message?.content) ? { ...message, content: message.content.map(pin) } : message,
+    )
+  }
+  return out
+}
+
 /** Caller fields only. CLI owns UA / billing / metadata / layoutSystemBlocks. */
 export function prepareCliHopBody(
   canonicalBody,
@@ -157,7 +182,11 @@ export function prepareCliHopBody(
   }
   body = dropCliOwnedBreakpoints(body)
   body = dropLastMessageBreakpoint(body)
-  body = enforceCacheTtlOrder(body)
+  // enforceCacheTtlOrder only downgrades a 1h marker that sits after a 5m one,
+  // and applyCacheTtlToBody still honors 1h on this line, so a client 1h marker
+  // survives and the kernel's later 5m prepend makes Anthropic 400. Force every
+  // cli-hop marker to 5m unconditionally instead (dofastted/vm2api#32).
+  body = forceCliHopCacheTtl(body)
   enforceCacheLimit(body, cacheControlLimit)
   return body
 }

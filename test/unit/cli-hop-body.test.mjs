@@ -220,8 +220,8 @@ test('cli-hop disabled keeps caller conversation breakpoints except last user', 
     },
     { cacheBreakpoints: { enabled: false } },
   )
-  assert.equal(body.messages[0].content[0].cache_control.ttl, '1h')
-  assert.equal(body.messages[2].content[0].cache_control.ttl, '1h')
+  assert.equal(body.messages[0].content[0].cache_control.ttl, '5m')
+  assert.equal(body.messages[2].content[0].cache_control.ttl, '5m')
   assert.equal(body.messages[4].content[0].cache_control, undefined)
 })
 
