@@ -82,12 +82,26 @@ export function iptablesPlan({ chain, bridge, subnet, tcpPort, dnsPort }) {
       ['-t', 'nat', '-A', chain, '-p', 'tcp', '-j', 'REDIRECT', '--to-ports', tcp],
       ['-t', 'filter', '-C', 'FORWARD', '-i', bridge, '!', '-d', subnet, '-j', 'DROP'],
       ['-t', 'filter', '-I', 'FORWARD', '1', '-i', bridge, '!', '-d', subnet, '-j', 'DROP'],
+      // REDIRECT DNATs the bridge to the gateway, so container→kin-egress packets
+      // traverse INPUT. A restrictive host INPUT policy (or a DROP ahead of
+      // docker's rules) silently drops them → kin-egress never receives → 502.
+      // Allow the kin-egress redirect ports on this bridge, inserted ahead of any
+      // DROP. Scoped to the two ports so nothing else on the bridge reaches host.
+      ['-t', 'filter', '-C', 'INPUT', '-i', bridge, '-p', 'tcp', '--dport', tcp, '-j', 'ACCEPT'],
+      ['-t', 'filter', '-I', 'INPUT', '1', '-i', bridge, '-p', 'tcp', '--dport', tcp, '-j', 'ACCEPT'],
+      ['-t', 'filter', '-C', 'INPUT', '-i', bridge, '-p', 'tcp', '--dport', dns, '-j', 'ACCEPT'],
+      ['-t', 'filter', '-I', 'INPUT', '1', '-i', bridge, '-p', 'tcp', '--dport', dns, '-j', 'ACCEPT'],
+      ['-t', 'filter', '-C', 'INPUT', '-i', bridge, '-p', 'udp', '--dport', dns, '-j', 'ACCEPT'],
+      ['-t', 'filter', '-I', 'INPUT', '1', '-i', bridge, '-p', 'udp', '--dport', dns, '-j', 'ACCEPT'],
     ],
     del: [
       ['-t', 'nat', '-D', 'PREROUTING', '-i', bridge, '-j', chain],
       ['-t', 'nat', '-F', chain],
       ['-t', 'nat', '-X', chain],
       ['-t', 'filter', '-D', 'FORWARD', '-i', bridge, '!', '-d', subnet, '-j', 'DROP'],
+      ['-t', 'filter', '-D', 'INPUT', '-i', bridge, '-p', 'tcp', '--dport', tcp, '-j', 'ACCEPT'],
+      ['-t', 'filter', '-D', 'INPUT', '-i', bridge, '-p', 'tcp', '--dport', dns, '-j', 'ACCEPT'],
+      ['-t', 'filter', '-D', 'INPUT', '-i', bridge, '-p', 'udp', '--dport', dns, '-j', 'ACCEPT'],
     ],
   }
 }
