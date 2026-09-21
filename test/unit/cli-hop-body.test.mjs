@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { prepareCliHopBody, stripCliOwnedSystem } from '../../src/lib/protocol/outbound-attempt.mjs'
+import { CLI_HOP_CACHE_TTL, prepareCliHopBody, stripCliOwnedSystem } from '../../src/lib/protocol/outbound-attempt.mjs'
 import { CRS_OFFICIAL_SYSTEM, CRS_OFFICIAL_CLI_SYSTEM } from '../../src/lib/identity/crs-persona.mjs'
 import { CRS_OFFICIAL_AGENT_PROMPT } from '../../src/lib/identity/official-cc-system-2.1.241.mjs'
 
@@ -220,8 +220,8 @@ test('cli-hop disabled keeps caller conversation breakpoints except last user', 
     },
     { cacheBreakpoints: { enabled: false } },
   )
-  assert.equal(body.messages[0].content[0].cache_control.ttl, '1h')
-  assert.equal(body.messages[2].content[0].cache_control.ttl, '1h')
+  assert.equal(body.messages[0].content[0].cache_control.ttl, '5m')
+  assert.equal(body.messages[2].content[0].cache_control.ttl, '5m')
   assert.equal(body.messages[4].content[0].cache_control, undefined)
 })
 
@@ -253,11 +253,11 @@ test('cli-hop rewrite wins over routing fill when inbound already stamped last u
     },
   )
   assert.equal(body.messages[0].content[0].cache_control, undefined)
-  assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '5m' })
   assert.equal(body.messages[4].content[0].cache_control, undefined)
 })
 
-test('cli-hop rewrite uses the resolved 1h TTL on its leftover marker', () => {
+test('cli-hop rewrite pins its leftover marker to 5m even when 1h is resolved', () => {
   const body = prepareCliHopBody(
     {
       model: 'claude-sonnet-5',
@@ -272,7 +272,7 @@ test('cli-hop rewrite uses the resolved 1h TTL on its leftover marker', () => {
     },
     { cacheTtl: '1h' },
   )
-  assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '5m' })
   assert.equal(body.messages[4].content[0].cache_control, undefined)
 })
 
@@ -287,7 +287,7 @@ test('cli-hop rewrite keeps sub2api penultimate user after dropping CLI last-use
       { role: 'assistant', content: [{ type: 'text', text: 'a2' }] },
     ],
   })
-  assert.deepEqual(body.messages[0].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.deepEqual(body.messages[0].content[0].cache_control, { type: 'ephemeral', ttl: '5m' })
   assert.equal(body.messages[2].content[0].cache_control, undefined)
   assert.equal(body.messages[3].content[0].cache_control, undefined)
 })
@@ -307,7 +307,7 @@ test('unofficial cli-hop rewrite matches official penultimate-user leftover', ()
   const unofficial = prepareCliHopBody(inbound, { unofficial: true, cacheTtl: '1h' })
   const official = prepareCliHopBody(structuredClone(inbound), { unofficial: false, cacheTtl: '1h' })
   assert.equal(unofficial.messages[0].content[0].cache_control, undefined)
-  assert.deepEqual(unofficial.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.deepEqual(unofficial.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '5m' })
   assert.equal(unofficial.messages[4].content[0].cache_control, undefined)
   assert.deepEqual(
     unofficial.messages.map((message) => message.content?.[0]?.cache_control),
@@ -348,7 +348,7 @@ test('unofficial cli-hop rewrite leaves leftover mid-system unmarked', () => {
   )
   assert.equal(later.messages[1].role, 'system')
   assert.equal(later.messages.at(-1).role, 'user')
-  assert.deepEqual(later.messages[0].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.deepEqual(later.messages[0].content[0].cache_control, { type: 'ephemeral', ttl: '5m' })
   assert.equal(later.messages[1].content[0].cache_control, undefined)
   assert.equal(later.messages.at(-1).content[0].cache_control, undefined)
   assert.equal(later.system[0].cache_control, undefined)
@@ -377,4 +377,61 @@ test('cli-hop strips Claude Code last tool_use/tool_result markers', () => {
   const userBlocks = body.messages[2].content
   assert.equal(asstBlocks.find((b) => b.type === 'tool_use')?.cache_control, undefined)
   assert.equal(userBlocks.find((b) => b.type === 'tool_result')?.cache_control, undefined)
+})
+
+// dofastted/vm2api#32: the kernel prepends ttl-less (5m) tools/system markers,
+// so any 1h message marker lands after a 5m one and Anthropic answers 400
+// "a ttl='1h' cache_control block must not come after a ttl='5m' block".
+function laterTurn(clientTtl = null) {
+  const marker = clientTtl ? { cache_control: { type: 'ephemeral', ttl: clientTtl } } : {}
+  return {
+    model: 'claude-sonnet-5',
+    max_tokens: 1024,
+    system: [{ type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.278' }],
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'hi' },
+          { type: 'text', text: 'ctx' },
+          { type: 'text', text: 'q1', ...marker },
+        ],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'hello' }] },
+      { role: 'user', content: [{ type: 'text', text: 'q2' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a2' }] },
+      { role: 'user', content: [{ type: 'text', text: 'q3' }] },
+    ],
+  }
+}
+
+function hourMarkers(body) {
+  const out = []
+  for (const [i, message] of (body.messages || []).entries()) {
+    for (const [j, block] of (Array.isArray(message.content) ? message.content : []).entries()) {
+      if (block?.cache_control?.ttl === '1h') out.push(`messages.${i}.content.${j}`)
+    }
+  }
+  return out
+}
+
+test('cli-hop pins its marker TTL to 5m', () => {
+  assert.equal(CLI_HOP_CACHE_TTL, '5m')
+})
+
+test('cli-hop never emits a 1h message marker on a later official turn (#32)', () => {
+  const body = prepareCliHopBody(laterTurn(), { stream: true, cacheTtl: null })
+  assert.deepEqual(hourMarkers(body), [])
+})
+
+test('cli-hop downgrades an official client 1h marker that nothing earlier outranks', () => {
+  const body = prepareCliHopBody(laterTurn('1h'), { stream: true, cacheTtl: null })
+  assert.deepEqual(hourMarkers(body), [])
+})
+
+test('cli-hop keeps unofficial traffic at 5m even when routing resolves 1h', () => {
+  for (const clientTtl of [null, '1h']) {
+    const body = prepareCliHopBody(laterTurn(clientTtl), { stream: true, cacheTtl: '1h' })
+    assert.deepEqual(hourMarkers(body), [], `clientTtl=${clientTtl}`)
+  }
 })
