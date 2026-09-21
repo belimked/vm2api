@@ -323,6 +323,14 @@ proxyPool = new ProxyPool({
   repairEgress: (proxy) => ensureProxyEgress(cfg.paths.project, proxy),
 })
 proxyPool.startScheduler()
+setImmediate(() => {
+  try {
+    const out = proxyPool.reconcileEgress()
+    if (out.repaired?.length) console.log(JSON.stringify({ event: 'egress_reconcile', repaired: out.repaired }))
+  } catch (e) {
+    console.error(JSON.stringify({ event: 'egress_reconcile_failed', error: String(e?.message || e) }))
+  }
+})
 
 initPoolRuntime()
 try {

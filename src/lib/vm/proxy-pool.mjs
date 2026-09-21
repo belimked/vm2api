@@ -792,6 +792,31 @@ export class ProxyPool {
     return { ok: true, proxy: this.publicProxy(p), probe: result }
   }
 
+  /**
+   * kin-egress forwarders are children of the control plane, so recreating
+   * its container kills them while the KEG* iptables chains keep redirecting
+   * slot traffic to their ports. Re-seat dead forwarders at boot instead of
+   * leaving every slot on "Connection error" until the first scheduled probe
+   * (probe_interval_min later). Local listen check only, no SOCKS5 round trip.
+   */
+  reconcileEgress() {
+    if (typeof this.egressCheck !== 'function' || typeof this.repairEgress !== 'function') {
+      return { ok: true, skipped: true, repaired: [] }
+    }
+    const repaired = []
+    for (const p of this.state.proxies) {
+      if (!p.enabled || !boundVmIdsOf(p).length) continue
+      if (this.egressCheck(p)?.ok) continue
+      try {
+        this.repairEgress(p)
+      } catch {
+        /* the scheduled probe retries */
+      }
+      repaired.push({ id: p.id, ok: !!this.egressCheck(p)?.ok })
+    }
+    return { ok: true, repaired }
+  }
+
   async probeAll({ onlyEnabled = true } = {}) {
     if (this._probing) return { ok: false, error: 'probe_in_progress' }
     this._probing = true
