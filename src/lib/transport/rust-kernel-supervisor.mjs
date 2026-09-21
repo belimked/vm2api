@@ -24,7 +24,10 @@ const CONTAINER_KERNEL_CONFIG = '/run/kin/kernel.json'
 export const CONTAINER_CLAUDE_BIN = '/home/kincli/.kin/cli-node'
 
 export const WRAP_SLOT_MIN = 1
-export const WRAP_SLOT_MAX = 2
+// The kernel binary already pre-opens 20 native CLI session slots (identical
+// binary through 1.3.8); 1.2.22 JS pinned slots_per_worker=2 and wasted the
+// other 18. Lift the JS cap to the kernel's real capacity.
+export const WRAP_SLOT_MAX = 20
 export const WEDGED_READY_WAIT_MS = 3000
 
 /** Pre-open native slots. 20 multiplexed CLI streams over one residential SOCKS incomplete-storm. */
