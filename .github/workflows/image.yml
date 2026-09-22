@@ -1,0 +1,54 @@
+# Build this fork's custom control-plane image and push it to GitHub Packages
+# (ghcr.io/<owner>/vm2api), so the server can `docker compose pull` instead of
+# building. Keeps our custom patches (egress fix, fingerprint MAC, ...).
+name: image
+
+on:
+  push:
+    tags: ['v*'] # +cus tags build here; plain vX.Y.Z are upstream-style (release.yml)
+  workflow_dispatch: # manual build from the current branch HEAD
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  control-plane:
+    # Only our custom (+cus) tags, or a manual run. Plain vX.Y.Z tags belong to
+    # release.yml, so skip them here to avoid double-publishing.
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.ref_name, '+cus') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: compute image tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          # Docker tags forbid '+' and '/'; sanitize the git ref to a valid tag.
+          safe=$(printf '%s' "${{ github.ref_name }}" | tr '+/' '--')
+          echo "image=ghcr.io/${owner}/vm2api:${safe}" >> "$GITHUB_OUTPUT"
+      - name: build and push control-plane image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # The Dockerfile defaults to China mirrors for on-server builds; GitHub's
+          # US runners are faster with the default registries.
+          build-args: |
+            NPM_REGISTRY=https://registry.npmjs.org
+            APT_MIRROR=deb.debian.org
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: summary
+        shell: bash
+        run: echo "Pushed ${{ steps.meta.outputs.image }} — set VM2API_IMAGE / VM2API_IMAGE_TAG in .env to pull it." >> "$GITHUB_STEP_SUMMARY"
