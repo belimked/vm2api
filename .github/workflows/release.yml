@@ -3,8 +3,7 @@ name: release
 
 on:
   push:
-    # Skip our +cus custom tags: they need no ghcr/release publish.
-    tags: ['v*', '!v*+cus*']
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -12,6 +11,8 @@ permissions:
 
 jobs:
   linux-amd64:
+    # Our +cus custom tags need no release/ghcr publish, so skip release for them.
+    if: ${{ !contains(github.ref_name, '+cus') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
