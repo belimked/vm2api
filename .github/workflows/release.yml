@@ -3,7 +3,8 @@ name: release
 
 on:
   push:
-    tags: ['v*']
+    # Skip our +cus custom tags: they need no ghcr/release publish.
+    tags: ['v*', '!v*+cus*']
   workflow_dispatch:
 
 permissions:
