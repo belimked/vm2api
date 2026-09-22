@@ -5,8 +5,9 @@ name: image
 
 on:
   push:
-    tags: ['v*'] # +cus tags build here; plain vX.Y.Z are upstream-style (release.yml)
-  workflow_dispatch: # manual build from the current branch HEAD
+    branches: ['cus/**'] # every push to a custom line rebuilds its moving image
+    tags: ['v*'] # +cus tags also build a versioned image; plain vX.Y.Z -> release.yml
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,9 +15,9 @@ permissions:
 
 jobs:
   control-plane:
-    # Only our custom (+cus) tags, or a manual run. Plain vX.Y.Z tags belong to
-    # release.yml, so skip them here to avoid double-publishing.
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.ref_name, '+cus') }}
+    # Build on any cus/** branch push, any +cus tag, or a manual run. Plain
+    # vX.Y.Z tags belong to release.yml, so skip those here.
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/') || contains(github.ref_name, '+cus') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
