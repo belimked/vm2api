@@ -3,7 +3,9 @@ name: release
 
 on:
   push:
-    tags: ['v*']
+    # Skip our +cus custom tags: they intentionally fail the tag==VERSION gate
+    # (e.g. v1.3.19+cus.0.4.0 vs VERSION 1.3.19) and need no ghcr publish.
+    tags: ['v*', '!v*+cus*']
   workflow_dispatch:
 
 permissions:
