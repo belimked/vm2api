@@ -59,6 +59,8 @@ export const ErrorCode = {
   UPSTREAM_OVERLOADED: 'upstream_overloaded',
   UPSTREAM_TIMEOUT: 'upstream_timeout',
   UPSTREAM_ERROR: 'upstream_error',
+  FABLE_REQUIRES_MAX: 'fable_requires_max',
+
   INCOMPLETE_RESPONSE: 'incomplete_response',
   // protocol
   PROTOCOL_UNSUPPORTED: 'protocol_unsupported',
@@ -67,6 +69,7 @@ export const ErrorCode = {
   // policy
   DISTILL_BLOCKED: 'distill_blocked',
   REFUSAL_GUARD: 'refusal_guard',
+  CONTENT_FILTER_REFUSAL: 'content_filter_refusal',
   // resource
   VM_NOT_FOUND: 'vm_not_found',
   NOT_FOUND: 'not_found',
@@ -94,9 +97,15 @@ const POOL_CAPACITY_CODES = new Set([
 
 const POOL_CAPACITY_MESSAGE = /no eligible|no ready api|account pool|号池没有|无可用账号|eligible claude/i
 const WRAP_CONNECTION_MESSAGE = /provider error:.*connection error/i
+const USAGE_POLICY_MESSAGE =
+  /usage policy|legal\/aup|unable to respond to this request|violate our usage|content_filter_refusal/i
 
 export function isWrapConnectionError(message = '') {
   return WRAP_CONNECTION_MESSAGE.test(String(message || ''))
+}
+
+export function isUsagePolicyErrorMessage(message = '') {
+  return USAGE_POLICY_MESSAGE.test(String(message || ''))
 }
 
 export function isPoolCapacityError(code, message = '') {
@@ -259,6 +268,15 @@ export function mapUpstreamError(status, body, headers = {}) {
     (upType ? body?.message : null) ||
     body?.raw ||
     null
+  if (inboundCode === ErrorCode.FABLE_REQUIRES_MAX) {
+    return makeError({
+      type: ErrorType.RATE_LIMIT,
+      code: ErrorCode.FABLE_REQUIRES_MAX,
+      message: String(msg || 'Fable requires an available Max account'),
+      status: 429,
+    })
+  }
+
   if (GATEWAY_OVERLOAD_CODES.has(String(inboundCode || '')) || isPoolCapacityError(inboundCode, msg)) {
     return makeError({
       type: ErrorType.OVERLOADED,
@@ -309,6 +327,16 @@ export function mapUpstreamError(status, body, headers = {}) {
   }
   const request_id =
     body?.error?.request_id || body?.request_id || headers['request-id'] || headers['x-request-id'] || null
+  if (inboundCode === ErrorCode.CONTENT_FILTER_REFUSAL) {
+    return makeError({
+      type: ErrorType.PERMISSION,
+      code: ErrorCode.CONTENT_FILTER_REFUSAL,
+      message: String(msg),
+      status: 403,
+      details: { upstream_type: upType, upstream_status: status },
+      request_id,
+    })
+  }
 
   if (status === 401 || status === 403 || upType === 'authentication_error') {
     return makeError({

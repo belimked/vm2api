@@ -100,6 +100,11 @@ function accountLimitUntil(reset, usage, now) {
   return reset || usageWindowReset(usage, now) || now + 5 * 60_000
 }
 
+/** Claude CLI wraps a full 5h/7d window as 502, not 429. */
+function isPlanLimitMessage(message) {
+  return /hit your limit|extra usage/i.test(String(message || ''))
+}
+
 export const FABLE_FAMILY_KEY = 'fable'
 
 function modelFamily(model) {
@@ -205,6 +210,10 @@ function claudeHasVisibleOutput(body) {
 }
 
 /** 200 + stop_reason=refusal with no visible text — not a successful empty reply. */
+function isContentFilterRefusal(result = {}) {
+  return isSilentClaudeRefusal(result)
+}
+
 export function isSilentClaudeRefusal(result = {}) {
   if (claudeStopReasonOf(result) !== 'refusal') return false
   return !claudeHasVisibleOutput(result.body)
@@ -212,6 +221,8 @@ export function isSilentClaudeRefusal(result = {}) {
 
 export const DEFAULT_OAUTH_401_COOLDOWN_MS = 120_000
 export const MAX_OAUTH_401_COOLDOWN_MS = 600_000
+/** Upstream 5xx: stop the account and the same prompt. Do not open another slot. */
+export const PROVIDER_PAUSE_MS = 60 * 60 * 1000
 
 export function clampOauth401CooldownMs(ms) {
   const n = Number(ms)
@@ -233,7 +244,7 @@ export function classifyUpstreamResult(
     usage = null,
   } = {},
 ) {
-  if (isSilentClaudeRefusal(result) && !result.committed) {
+  if (isContentFilterRefusal(result) && !result.committed) {
     return { scope: 'request', action: 'stop', reason: 'content_filter_refusal', cooldownUntil: null }
   }
   const completeAssistant = isCompleteAssistantMessage(result)
@@ -472,6 +483,13 @@ export function classifyUpstreamResult(
     }
   }
   if (status === 408 || status === 502 || status === 503 || status === 504 || status >= 500) {
+    if (workerCode === 'slot_busy' || /no free slot|slot_busy/i.test(hay)) {
+      return continueWithoutCooldown({
+        scope: 'worker',
+        reason: 'slot_busy',
+        retrySameAccount: false,
+      })
+    }
     if (isFableModel(model) && (status === 408 || status === 504 || /timeout/i.test(message))) {
       return {
         scope: 'model',
@@ -481,10 +499,30 @@ export function classifyUpstreamResult(
         cooldownUntil: now + 30_000,
       }
     }
-    return continueWithoutCooldown({
-      scope: 'provider',
-      reason: isTimeoutFailure(workerCode, message) ? 'provider_timeout' : 'provider_transient_error',
-    })
+    if (status === 408 || isTimeoutFailure(workerCode, message)) {
+      return continueWithoutCooldown({
+        scope: 'provider',
+        reason: 'provider_timeout',
+      })
+    }
+    if (isPlanLimitMessage(message)) {
+      return {
+        scope: 'account',
+        action: 'continue-and-cooldown',
+        reason: 'account_quota_exhausted',
+        cooldownUntil: accountLimitUntil(reset, usage, now),
+        retrySameAccount: false,
+      }
+    }
+    return {
+      scope: 'account',
+      action: 'pause',
+      reason: 'provider_pause',
+      cooldownUntil: now + PROVIDER_PAUSE_MS,
+      retrySameAccount: false,
+      rememberRefusal: true,
+      refusalTtlMs: PROVIDER_PAUSE_MS,
+    }
   }
   return { scope: 'request', action: 'stop', reason: `http_${status}`, cooldownUntil: null }
 }

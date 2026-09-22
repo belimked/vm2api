@@ -14,8 +14,10 @@ import {
   rustKernelBusy,
 } from './rust-kernel-client.mjs'
 import { OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
-import { setVmSchedulable } from '../vm/vm-registry.mjs'
-import { KERNEL_NATIVE_SLOT_COUNT, resolveCliSystemLayout } from '../vm/slot-engine.mjs'
+import { cacheTtlFromRouting, normalizeCacheTtl } from '../protocol/cache-ttl.mjs'
+import { setVmSchedulable, listVms, getVm } from '../vm/vm-registry.mjs'
+import { isCodexVm } from '../vm/vm-kind.mjs'
+import { KERNEL_NATIVE_SLOT_COUNT, resolveCliSystemLayout, resolveSlotPersonaPreset } from '../vm/slot-engine.mjs'
 import { ensureOfficialCredentialLink, slotUidGidFromHomeDir } from '../oauth/oauth-credentials.mjs'
 
 const starts = new Map()
@@ -499,6 +501,27 @@ export function stopAllRustKernels() {
   starts.clear()
   return { ok: true, stopped: 0, cancelled }
 }
+function kernelConfigText(config) {
+  return JSON.stringify(config, null, 2) + '\n'
+}
+
+function writeKernelJsonAtomically(configPath, config) {
+  const body = kernelConfigText(config)
+  try {
+    if (fs.readFileSync(configPath, 'utf8') === body) return false
+  } catch {}
+  const tempPath = `${configPath}.${process.pid}.${Date.now()}.tmp`
+  try {
+    fs.writeFileSync(tempPath, body, { mode: 0o600 })
+    fs.renameSync(tempPath, configPath)
+  } catch (error) {
+    try {
+      fs.rmSync(tempPath, { force: true })
+    } catch {}
+    throw error
+  }
+  return true
+}
 
 export function writeKernelConfig(
   projectRoot,
@@ -523,10 +546,13 @@ export function writeKernelConfig(
       secret = fs.readFileSync(tokenPath, 'utf8').trim()
     } catch {}
   }
+  if (!secret) secret = String(previous.internal_token || '').trim()
   if (secret) fs.writeFileSync(tokenPath, secret + '\n', { mode: 0o600 })
   const testEndpoints = process.env.KIN_KERNEL_TEST_ENDPOINTS === '1'
   const claudeBin = String(process.env.KIN_CLAUDE_BIN || '').trim() || CONTAINER_CLAUDE_BIN
   const tz = String(timezone || vm.timezone || previous.timezone || '').trim()
+  const defaultCacheTtl = routing != null ? cacheTtlFromRouting(routing) : normalizeCacheTtl(previous.default_cache_ttl)
+
   const config = {
     vm_id: vm.id,
     socket_path: '/run/kin/kernel.sock',
@@ -547,8 +573,13 @@ export function writeKernelConfig(
     provider: 'local_cli',
     claude_bin: claudeBin,
     slots_per_worker: wrapSlotCount(vm, routing || {}),
+    // Authoritative three-way switch (official / official_full / zero / custom).
+    // Kernel hot-reads this file. system_layout stays the layout it executes:
+    // zero → zero, every other preset → identity.
+    persona_preset: resolveSlotPersonaPreset(vm, routing || {}),
     system_layout: resolveCliSystemLayout(vm, routing || {}),
     cli_version: OFFICIAL_CLI_VERSION,
+    default_cache_ttl: defaultCacheTtl,
   }
 
   if (tz) config.timezone = tz
@@ -558,6 +589,70 @@ export function writeKernelConfig(
     if (anthropicBaseUrl) config.anthropic_base_url = anthropicBaseUrl
     if (oauthTokenUrl) config.oauth_token_url = oauthTokenUrl
   }
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 })
-  return { runDir, socketPath, configPath, credentialPath, tokenPath, provider: config.provider }
+  const changed = writeKernelJsonAtomically(configPath, config)
+  return {
+    runDir,
+    socketPath,
+    configPath,
+    credentialPath,
+    tokenPath,
+    provider: config.provider,
+    changed,
+    persona_preset: config.persona_preset,
+  }
+}
+
+const routingPersonaMtime = new Map()
+
+/** Project the web/routing persona switch onto every Claude kernel.json. Codex slots are left alone. */
+export function syncClaudeKernelConfigs(projectRoot, routing) {
+  if (!projectRoot) return { updated: 0, skipped: 0 }
+  let updated = 0
+  let skipped = 0
+  for (const { id } of listVms(projectRoot)) {
+    const vm = getVm(projectRoot, id)
+    if (!vm || isCodexVm(vm)) {
+      skipped += 1
+      continue
+    }
+    try {
+      const written = writeKernelConfig(projectRoot, vm, { routing })
+      if (written?.changed) updated += 1
+    } catch (error) {
+      skipped += 1
+      console.error(
+        JSON.stringify({
+          event: 'kernel_persona_sync_failed',
+          vm_id: id,
+          error: String(error?.message || error),
+        }),
+      )
+    }
+  }
+  return { updated, skipped }
+}
+
+/**
+ * routing.json is the web-managed authority. When its mtime moves (panel PUT or an
+ * external edit), rewrite Claude kernel.json so the kernel hot-reload sees the new preset.
+ * Unchanged bytes are not rewritten, so a repeat read does not bump mtime.
+ */
+export function syncClaudeKernelConfigsFromFile(projectRoot, routingFile) {
+  if (!projectRoot || !routingFile) return { updated: 0, skipped: true }
+  let mtimeMs
+  try {
+    mtimeMs = fs.statSync(routingFile).mtimeMs
+  } catch {
+    return { updated: 0, skipped: true }
+  }
+  if (routingPersonaMtime.get(routingFile) === mtimeMs) return { updated: 0, skipped: true }
+  let routing
+  try {
+    routing = JSON.parse(fs.readFileSync(routingFile, 'utf8'))
+  } catch {
+    return { updated: 0, skipped: true }
+  }
+  const result = syncClaudeKernelConfigs(projectRoot, routing)
+  routingPersonaMtime.set(routingFile, mtimeMs)
+  return result
 }

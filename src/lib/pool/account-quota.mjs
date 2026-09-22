@@ -555,10 +555,10 @@ export class AccountQuota {
 
     const w5 = headerWindowOrEmpty(acc.unified, '5h')
     const w7 = headerWindowOrEmpty(acc.unified, '7d')
-    const u5 = Number(w5.utilization || 0)
-    const u7 = Number(w7.utilization || 0)
+    const u5 = asUtilRatio(w5.utilization)
+    const u7 = asUtilRatio(w7.utilization)
 
-    if (this.config.block_on_5h && u5 >= ratio) {
+    if (this.config.block_on_5h && safetyTripped(u5, ratio, inflight)) {
       acc.last_blocked = { at: new Date().toISOString(), window: '5h', utilization: u5, status: w5.status }
       this.repo.save(acc)
       return {
@@ -568,13 +568,14 @@ export class AccountQuota {
           utilization: u5,
           safety_ratio: ratio,
           limit_5h: ratio,
+          inflight,
           reset: w5.reset,
           message: `5h usage ${(u5 * 100).toFixed(1)}% ≥ safety ${(ratio * 100).toFixed(0)}%; request blocked to protect quota`,
         },
       }
     }
 
-    if (this.config.block_on_7d && u7 >= weeklyRatio) {
+    if (this.config.block_on_7d && safetyTripped(u7, weeklyRatio, inflight)) {
       acc.last_blocked = { at: new Date().toISOString(), window: '7d', utilization: u7, status: w7.status }
       this.repo.save(acc)
       return {
@@ -755,8 +756,8 @@ export class AccountQuota {
     const weeklyRatio = Number(policy.limit_7d ?? policy.weekly_safety_ratio ?? 0.8)
     const w5 = headerWindowOrEmpty(acc.unified, '5h')
     const w7 = headerWindowOrEmpty(acc.unified, '7d')
-    const u5 = Number(w5.utilization || 0)
-    const u7 = Number(w7.utilization || 0)
+    const u5 = officialUtilToExtra(w5.utilization) || 0
+    const u7 = officialUtilToExtra(w7.utilization) || 0
     if (u5 >= 1 || u5 >= ratio) return false
     if (u7 >= 1 || u7 >= weeklyRatio) return false
     return true
@@ -1075,6 +1076,26 @@ function num(v) {
   return Number.isFinite(n) ? n : null
 }
 
+/** Header samples are 0–1; a leftover official reading can still be 0–100. */
+function asUtilRatio(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return n > 1.5 ? n / 100 : n
+}
+
+/**
+ * The 5h/7d header is the previous response, so calls already in flight are
+ * not in it. At the configured line, stop. Inside the last 5 points, don't
+ * admit a second call or the account lands on upstream 100%.
+ */
+function safetyTripped(util, ratio, inflight) {
+  const u = asUtilRatio(util)
+  const limit = asUtilRatio(ratio)
+  if (!(limit > 0) || !(u > 0)) return false
+  if (u >= limit) return true
+  return Number(inflight) > 0 && u >= limit - 0.05
+}
+
 function isUnifiedRejected(h = {}) {
   const s5 = String(h['anthropic-ratelimit-unified-5h-status'] || '').toLowerCase()
   const s7 = String(h['anthropic-ratelimit-unified-7d-status'] || '').toLowerCase()
@@ -1103,10 +1124,13 @@ function officialUtilToExtra(value) {
 }
 
 function officialLooksLimited(window = {}) {
+  const raw = window.utilization
+  const ratio = officialUtilToExtra(raw)
+  const percent = Number(raw) > 1.5
+  if (percent && ratio != null && ratio < 1) return false
   const s = String(window.status || '').toLowerCase()
   if (s === 'rejected' || s === 'rate_limited') return true
-  const n = Number(window.utilization)
-  return Number.isFinite(n) && n >= 1
+  return ratio != null && ratio >= 1
 }
 
 function officialLooksOpen(window = {}) {
@@ -1245,11 +1269,7 @@ function writeOfficialWindow(acc, key, incoming = {}) {
 }
 
 function officialOpen(window = {}) {
-  const u = Number(window.utilization)
-  const s = String(window.status || '').toLowerCase()
-  if (s === 'rejected' || s === 'rate_limited') return false
-  if (Number.isFinite(u) && u >= 1) return false
-  return true
+  return !officialLooksLimited(window)
 }
 
 function clearHeaderExhaustIfOfficialOpen(acc) {
@@ -1275,23 +1295,31 @@ function clearHeaderExhaustIfOfficialOpen(acc) {
 }
 
 function statusFromUtil(u) {
-  if (u >= 1) return 'rate_limited'
-  if (u >= 0.85) return 'warning'
+  const ratio = officialUtilToExtra(u) || 0
+  if (ratio >= 1) return 'rate_limited'
+  if (ratio >= 0.85) return 'warning'
   return 'active'
 }
 
 function windowIsFull(status, utilization) {
-  if (utilization != null && Number.isFinite(Number(utilization))) return Number(utilization) >= 1
+  const ratio = officialUtilToExtra(utilization)
+  const percent = Number(utilization) > 1.5
+  if (percent && ratio != null && ratio < 1) return false
+  if (ratio != null && ratio >= 1) return true
   const s = String(status || '').toLowerCase()
   return s === 'rejected' || s === 'rate_limited'
 }
 
 function statusFromProbeWindow(utilization, incomingStatus) {
-  if (utilization != null && Number.isFinite(Number(utilization))) {
-    if (Number(utilization) >= 1) return 'rejected'
+  const ratio = officialUtilToExtra(utilization)
+  const percent = Number(utilization) > 1.5
+  if (ratio != null) {
+    if (ratio >= 1) return 'rejected'
     const s = String(incomingStatus || '').toLowerCase()
     if (s === 'allowed' || s === 'allowed_warning' || s === 'active') return incomingStatus
-    return statusFromUtil(Number(utilization))
+    if (percent && (s === 'rejected' || s === 'rate_limited')) return 'allowed'
+    if (s === 'rejected' || s === 'rate_limited') return incomingStatus
+    return statusFromUtil(ratio)
   }
   return incomingStatus || null
 }
@@ -1301,11 +1329,12 @@ export function applyOfficialWindow(incoming = {}) {
   if (incoming.utilization == null && !incoming.status && !incoming.resets_at && !incoming.reset) {
     return null
   }
-  const utilization = incoming.utilization != null ? Number(incoming.utilization) || 0 : null
+  const raw = incoming.utilization != null ? Number(incoming.utilization) : null
+  const utilization = raw != null && Number.isFinite(raw) ? officialUtilToExtra(raw) : null
   return {
     utilization,
     reset: incoming.resets_at || incoming.reset || null,
-    status: statusFromProbeWindow(utilization, incoming.status) || 'allowed',
+    status: statusFromProbeWindow(raw, incoming.status) || 'allowed',
     ...(incoming.stale ? { stale: true, stale_reason: incoming.stale_reason || null } : {}),
   }
 }

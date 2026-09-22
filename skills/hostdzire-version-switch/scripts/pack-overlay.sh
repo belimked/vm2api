@@ -7,10 +7,11 @@ VERSION=$(tr -d ' \n' < VERSION)
 OUT=${OUT:-/tmp/vm2api-hostdzire-$VERSION}
 TGZ=${TGZ:-$OUT.tgz}
 
-if [ ! -f web/dist/index.html ]; then
-  echo "pack-overlay: web/dist missing; run pnpm -C web build" >&2
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "pack-overlay: pnpm is required to build web/dist" >&2
   exit 1
 fi
+pnpm -C web build
 for b in kin-kernel kin-codex-kernel kin-cookie-auth kin-egress kin-worker; do
   if [ ! -x "bin/$b" ]; then
     echo "pack-overlay: bin/$b missing or not executable" >&2

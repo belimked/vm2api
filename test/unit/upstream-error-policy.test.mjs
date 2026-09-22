@@ -140,7 +140,7 @@ test('response-header timeout does not cool the account', () => {
   assert.equal(shouldContinue(policy), true)
 })
 
-test('generic 502/5xx can failover without account cooldown', () => {
+test('generic 502 pauses scheduling for one hour instead of failing over', () => {
   const policy = classifyUpstreamResult(
     {
       status: 502,
@@ -148,9 +148,48 @@ test('generic 502/5xx can failover without account cooldown', () => {
     },
     { now: 1000 },
   )
+  assert.equal(policy.action, 'pause')
+  assert.equal(policy.reason, 'provider_pause')
+  assert.equal(policy.cooldownUntil, 1000 + 60 * 60 * 1000)
+  assert.equal(policy.rememberRefusal, true)
+  assert.equal(shouldContinue(policy), false)
+})
+
+test('slot_busy 503 does not park the account', () => {
+  const policy = classifyUpstreamResult(
+    {
+      status: 503,
+      body: {
+        type: 'error',
+        error: { type: 'worker_error', code: 'slot_busy', message: 'rust kernel has no free slot' },
+      },
+    },
+    { now: 1000 },
+  )
   assert.equal(policy.action, 'continue')
+  assert.equal(policy.reason, 'slot_busy')
   assert.equal(policy.cooldownUntil, null)
-  assert.equal(policy.retrySameAccount, true)
+  assert.equal(policy.retrySameAccount, false)
+})
+
+test('a 502 plan-limit message switches accounts instead of pausing', () => {
+  const policy = classifyUpstreamResult(
+    {
+      status: 502,
+      body: {
+        error: {
+          type: 'api_error',
+          message: "provider error: You've hit your limit · resets 4:20pm (America/Los_Angeles)",
+        },
+      },
+    },
+    { now: 1_000, usage: { reset_5h: 1_790_032_800 } },
+  )
+  assert.equal(policy.action, 'continue-and-cooldown')
+  assert.equal(policy.reason, 'account_quota_exhausted')
+  assert.equal(policy.cooldownUntil, 1_790_032_800_000)
+  assert.equal(policy.rememberRefusal, undefined)
+  assert.equal(shouldContinue(policy), true)
 })
 
 test('transport timeout is not treated as a dead proxy', () => {
@@ -362,6 +401,30 @@ test('200 refusal with empty visible output is content_filter, not success', () 
   assert.equal(policy.scope, 'request')
   assert.equal(policy.action, 'stop')
   assert.equal(policy.reason, 'content_filter_refusal')
+})
+
+test('502 pauses the account for one hour and is not a content-filter refusal', () => {
+  const before = Date.now()
+  const policy = classifyUpstreamResult({
+    ok: false,
+    status: 502,
+    terminalState: 'incomplete',
+    body: {
+      type: 'error',
+      error: {
+        type: 'api_error',
+        message:
+          'provider error: provider error: API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup)',
+      },
+    },
+  })
+  assert.equal(policy.action, 'pause')
+  assert.equal(policy.reason, 'provider_pause')
+  assert.equal(policy.rememberRefusal, true)
+  assert.equal(policy.refusalTtlMs, 60 * 60 * 1000)
+  assert.ok(policy.cooldownUntil >= before + 60 * 60 * 1000)
+  assert.equal(shouldContinue(policy), false)
+  assert.notEqual(policy.reason, 'content_filter_refusal')
 })
 
 test('assistant prefill 400 is repairable', () => {

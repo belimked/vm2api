@@ -123,7 +123,7 @@ import {
 import { makeError, ErrorType, ErrorCode } from '../core/errors.mjs'
 import * as panel from './panel-api.mjs'
 import { GATEWAY_CAPABILITIES } from '../vm/execution-context.mjs'
-import { withVmLock, atomicWriteJson } from '../vm/vm-file.mjs'
+import { withVmLock, atomicWriteJson, isValidVmId } from '../vm/vm-file.mjs'
 import { snapshotDatabaseMetrics } from '../db/database-metrics.mjs'
 import { getUsageCache } from '../oauth/usage-cache.mjs'
 import { getDb, getDbPath } from '../db/database.mjs'
@@ -151,7 +151,7 @@ import {
 } from '../vm/slot-runtime.mjs'
 import { recreateVmFiles, seedFreshCliHome } from '../vm/vm-recreate.mjs'
 import { writeSlotSeedFiles } from '../vm/slot-seed.mjs'
-import { egressEnabled, ensureProxyEgress, stopProxyEgress, boundProxyUrl } from '../vm/egress.mjs'
+import { egressEnabled, ensureProxyEgress, stopProxyEgress, boundProxyUrl, isLocalEgressProxy } from '../vm/egress.mjs'
 import { collectSlotIdentity } from '../vm/guest-identity.mjs'
 import { applyOfficialFingerprintToVm, reconcileOfficialFingerprints } from '../identity/official-fingerprint.mjs'
 import {
@@ -166,9 +166,11 @@ import {
   describeWrapSample,
   makeWrapSample,
   materializeWrapCli,
+  replaceKernelBinary,
   syncWrapSample,
   wrapCliHomeDir,
 } from '../vm/wrap-cli-runtime.mjs'
+import { readRawBody as defaultReadRawBody } from '../http/respond.mjs'
 import { restartRustKernel, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
 
 import { countTokensViaWorker } from '../transport/go-worker-client.mjs'
@@ -214,6 +216,7 @@ async function commitImportedCodexVm({ cfg, vmPath, existing, account }) {
 export function createPanelHandler(ctx) {
   const json = (...args) => ctx.json(...args)
   const readBody = (...args) => ctx.readBody(...args)
+  const readRawBody = (...args) => (ctx.readRawBody || defaultReadRawBody)(...args)
   const requireAuth = (...args) => ctx.requireAuth(...args)
   const cfg = ctx.cfg
   const routingConfigPath = ctx.routingConfigPath
@@ -380,6 +383,9 @@ export function createPanelHandler(ctx) {
     try {
       const saved = persistSlotEnginePolicy(cfg.paths.project, id, patch)
       if (!saved) return { ok: false, id, code: 'vm_not_found', error: 'vm not found' }
+      if (Object.prototype.hasOwnProperty.call(patch, 'persona_preset') && !isCodexVm(saved)) {
+        writeKernelConfig(cfg.paths.project, saved, { routing: ctx.routingConfig })
+      }
       return {
         ok: true,
         id,
@@ -400,6 +406,15 @@ export function createPanelHandler(ctx) {
         rollback,
       }
     }
+  }
+
+  function projectSlotKernelConfig(vm) {
+    if (!vm?.id || isCodexVm(vm)) return null
+    const full = getVm(cfg.paths.project, vm.id) || vm
+    return writeKernelConfig(cfg.paths.project, full, {
+      routing: ctx.routingConfig,
+      timezone: full.timezone,
+    })
   }
 
   function restoreRoutingRuntime(previous) {
@@ -1223,6 +1238,25 @@ export function createPanelHandler(ctx) {
         }
         return json(res, 200, panel.ok(made))
       }
+      if (req.method === 'POST' && p === '/api/panel/wrap-cli/kernel') {
+        let buf
+        try {
+          buf = await readRawBody(req, cfg.limits?.max_body_bytes || 32 * 1024 * 1024)
+        } catch (error) {
+          const status = error?.status || 400
+          const body = error?.body || { error: { message: String(error?.message || error) } }
+          return json(res, status, { ok: false, ...body })
+        }
+        if (!Buffer.isBuffer(buf)) buf = Buffer.from(buf || [])
+        if (!buf.length) {
+          return json(res, 400, { ok: false, error: { code: 'kernel_empty', message: 'kernel binary required' } })
+        }
+        const replaced = replaceKernelBinary(cfg.paths.project, buf)
+        if (!replaced.ok) {
+          return json(res, 400, { ok: false, error: { code: replaced.code, message: replaced.error } })
+        }
+        return json(res, 200, panel.ok(replaced))
+      }
 
       if (req.method === 'POST' && p === '/api/panel/wrap-cli/sync') {
         const body = await readBody(req, 32 * 1024).catch(() => ({}))
@@ -1234,14 +1268,27 @@ export function createPanelHandler(ctx) {
           for (const item of report.items || []) {
             if (!item.ok) continue
             const vm = getVm(cfg.paths.project, item.id)
+            if (vm.status !== 'running') {
+              item.kernel = { ok: true, skipped: true, reason: 'vm_stopped' }
+              continue
+            }
             if (resolveInferenceEngine(vm, ctx.routingConfig) !== 'rust') continue
             const exec = slotExec(cfg.paths.project, vm)
             item.kernel = await restartRustKernel(exec).catch((e) => ({
               ok: false,
               error: String(e?.message || e).slice(0, 200),
             }))
+            if (!item.kernel?.ok) {
+              item.ok = false
+              item.code = 'kernel_restart_failed'
+              item.error = item.kernel?.error || item.kernel?.reason || 'kernel restart failed'
+            }
           }
         }
+        const failed = (report.items || []).filter((item) => !item.ok)
+        report.ok = failed.length === 0
+        report.ok_count = report.items.length - failed.length
+        report.failed_count = failed.length
         return json(res, report.ok ? 200 : 400, panel.ok(report))
       }
       if (req.method === 'POST' && p === '/api/panel/vms/slot-policy') {
@@ -1391,7 +1438,13 @@ export function createPanelHandler(ctx) {
           }
           const vm = persistVmTimezone(cfg.paths.project, id, zone, { source: 'manual' })
           if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-          timezoneSync = { applied: true, timezone: zone, source: 'manual' }
+          const kernel = projectSlotKernelConfig(vm)
+          timezoneSync = {
+            applied: true,
+            timezone: zone,
+            source: 'manual',
+            kernel_hot: kernel?.changed === true,
+          }
         } else if (followProxyTz) {
           const synced = await syncVmTimezoneFromProxy(cfg.paths.project, proxyPool, id, { force: true })
           if (!synced.ok) {
@@ -1405,6 +1458,10 @@ export function createPanelHandler(ctx) {
             })
           }
           timezoneSync = { applied: synced.applied, timezone: synced.timezone, source: 'proxy_geo' }
+          if (synced.applied) {
+            const kernel = projectSlotKernelConfig({ id })
+            timezoneSync.kernel_hot = kernel?.changed === true
+          }
         }
         if (next != null) {
           const vm = applyVmConcurrency(id, next, { override: true })
@@ -1791,7 +1848,7 @@ export function createPanelHandler(ctx) {
       // DELETE /api/panel/vms/:id — remove VM record, cli-home, unbind proxy
       if (req.method === 'DELETE' && /^\/api\/panel\/vms\/[^/]+$/.test(p)) {
         const id = p.split('/')[4]
-        if (!id || id === 'create' || id === 'import') {
+        if (!isValidVmId(id)) {
           return json(res, 400, { ok: false, error: { message: 'invalid vm id' } })
         }
         const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
@@ -2104,7 +2161,7 @@ export function createPanelHandler(ctx) {
         const idx = nextNumericIndex(existing)
         const rawId = body.id || 'vm-' + padVm(idx)
         const id = String(rawId).replace(/[^a-zA-Z0-9_-]/g, '')
-        if (!id) return json(res, 400, { ok: false, error: { message: 'invalid id' } })
+        if (!isValidVmId(id)) return json(res, 400, { ok: false, error: { message: 'invalid id' } })
         const vmsDir = path.join(cfg.paths.project, 'vms')
         fs.mkdirSync(vmsDir, { recursive: true })
         const vmPath = path.join(vmsDir, id + '.json')
@@ -2183,7 +2240,9 @@ export function createPanelHandler(ctx) {
         } catch (e) {}
         let allocated = null
         const wantProxy = body.auto_allocate_proxy === true || startNow
-        if (wantProxy && !vm.proxy?.url) {
+        // px-local 没有 SOCKS URL，但它是合法出口；不要把它当成"未绑定"。
+        const hasExit = (v) => !!(v?.proxy?.url || isLocalEgressProxy(v?.proxy))
+        if (wantProxy && !hasExit(vm)) {
           try {
             allocated = proxyPool.allocateForVm(id, {
               ownerUserId: vm.owner_user_id || null,
@@ -2201,7 +2260,7 @@ export function createPanelHandler(ctx) {
           } catch (e) {}
         }
         let startError = null
-        if (startNow && vm.proxy?.url) {
+        if (startNow && hasExit(vm)) {
           const boot = await startSlotReady(vm, cfg.paths.project, { routing: ctx.routingConfig })
           if (!boot.ok) {
             // Slot JSON is already on disk. 500 here makes the console treat
@@ -3061,6 +3120,7 @@ export function createPanelHandler(ctx) {
             applied_concurrency: applied.concurrency,
             applied_rpm: applied.rpm,
             applied_session_slots: applied.session_slots,
+            kernel_persona: applied.kernel_persona || null,
             inference_runtime: publicEngineRuntime,
           }),
         )

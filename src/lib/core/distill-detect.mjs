@@ -1,7 +1,7 @@
 /**
  * Distill harvest detector.
- * Runs in handleProtocol before credential / slot hop.
- * Match layers: question fingerprint, prompt needles, contest+request structure.
+ * Runs in handleProtocol and count_tokens before any credential / slot hop.
+ * Match layers: hard harvest needles, hard distill/CoT regex, fingerprint, prompt needles, contest structure.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -13,6 +13,36 @@ export const DISTILL_BLOCK_MESSAGE = '不允许蒸馏'
 
 const HIGH_EFFORT = new Set(['high', 'xhigh', 'max'])
 const CONTEST_RE = /prove that|\\boxed|\baime\b|olympiad|\bgpqa\b|which of the following|livecodebench|amc[_\s-]?aime/i
+
+/** Transport wrapper used by normal agent sessions. Not a harvest needle. */
+export const ENVELOPE_NEEDLES = Object.freeze(['Persistable response items'])
+
+/** Memory-extractor / rollout-harvest wrappers. Always distill, even at 4096 tokens. */
+export const HARVEST_NEEDLES = Object.freeze([
+  'Memory-stage-one extractor',
+  'MUST return strict JSON only',
+  'MUST distill reusable',
+  'MUST extract durable memory',
+  'durable rollout knowledge',
+  'You MUST extract durable memory now',
+])
+
+/**
+ * Distillation and chain-of-thought extraction.
+ * Hard block, including official Claude Code and zero inject.
+ * Bare "distill" is not enough: chemistry ("distill the solvent") must pass.
+ * Bare 思维链 / 请分步解答 must pass; the verb has to be extract/export/distill.
+ */
+export const HARD_DISTILL_PATTERNS = Object.freeze([
+  String.raw`\b(?:knowledge|model|teacher|student)\s+distill(?:ation|ing)?\b`,
+  String.raw`\bdistill(?:ation|ing)?\s+(?:of\s+)?(?:(?:the|your|a|an|reusable|durable|rollout|hidden|internal|full|complete)\s+)?(?:reasoning(?:\s+traces?)?|chain[- ]of[- ]thoughts?|teacher(?:\s+model)?)\b`,
+  String.raw`\b(?:extract|export|dump|reveal|harvest|exfiltrate)(?:ing|ed|ion|s)?\s+(?:(?:the|your|a|an|full|hidden|internal|complete|raw|durable|entire)\s+){0,4}(?:chain[- ]of[- ]thoughts?|reasoning\s+traces?|hidden\s+reasoning|internal\s+reasoning|internal\s+monologues?)\b`,
+  String.raw`\b(?:chain[- ]of[- ]thought|reasoning\s+trace)\s+extraction\b`,
+  String.raw`(?:知识蒸馏|模型蒸馏|思维链蒸馏|推理蒸馏|思考链蒸馏)`,
+  String.raw`(?:提取|导出|抽取|蒸馏|收割|扒取)\s*(?:出|取)?\s*(?:你的|本人的|完整|全部|隐藏|内部)?\s*(?:的)?\s*(?:思维链|思考链|推理链)`,
+  String.raw`(?:思维链|思考链|推理链)\s*(?:的)?\s*(?:提取|导出|抽取|蒸馏|收割)`,
+  String.raw`(?:提取|导出|抽取)\s*(?:出)?\s*(?:隐藏|内部)\s*(?:的)?\s*(?:推理|思维|思考)`,
+])
 
 export const DEFAULT_DISTILL_RULES = {
   enabled: true,
@@ -42,7 +72,9 @@ export const DEFAULT_DISTILL_RULES = {
     'as an internal monologue',
     'Please reason step by step, and put your final answer within \\boxed{}',
     'Respond in the following format: <think>',
+    ...HARVEST_NEEDLES,
   ],
+  patterns: [...HARD_DISTILL_PATTERNS],
   fingerprints: [
     'Let  $a,b,A,B$  be given reals. We consider the function defined by',
     'The graph of the function $y=\\cos x - \\sin x$ has a line of symmetry given by',
@@ -53,9 +85,6 @@ export const DEFAULT_DISTILL_RULES = {
     'What is the area, in square units, of an isosceles right triangle with a hypotenuse of 20 units?',
   ],
 }
-
-/** Transport wrapper used by normal agent sessions. Not a distill needle. */
-export const ENVELOPE_NEEDLES = Object.freeze(['Persistable response items'])
 
 const DEFAULT_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../config/distill-rules.json')
 
@@ -95,13 +124,20 @@ function systemText(body) {
   return ''
 }
 
-function userTexts(body) {
+function messageRoleTexts(body, roles) {
   if (!body || typeof body !== 'object') return []
+  const want = new Set(roles)
   const out = []
   const messages = Array.isArray(body.messages) ? body.messages : []
   for (const m of messages) {
-    if (m?.role === 'user') out.push(contentToText(m.content))
+    if (want.has(m?.role)) out.push(contentToText(m.content))
   }
+  return out.filter(Boolean)
+}
+
+function userTexts(body) {
+  if (!body || typeof body !== 'object') return []
+  const out = messageRoleTexts(body, ['user'])
   if (typeof body.input === 'string') out.push(body.input)
   else if (Array.isArray(body.input)) out.push(contentToText(body.input))
   return out.filter(Boolean)
@@ -109,7 +145,12 @@ function userTexts(body) {
 
 export function extractPrompt(inbound, body) {
   const users = [...userTexts(inbound), ...userTexts(body)]
-  const systems = [systemText(inbound), systemText(body)].filter(Boolean)
+  const systems = [
+    systemText(inbound),
+    systemText(body),
+    ...messageRoleTexts(inbound, ['system', 'developer']),
+    ...messageRoleTexts(body, ['system', 'developer']),
+  ].filter(Boolean)
   return {
     system: systems[0] || '',
     user: users[0] || '',
@@ -182,6 +223,23 @@ function matchNeedles(text, needles) {
   }
   return ''
 }
+function matchPatterns(text, patterns) {
+  const hay = normalizeText(text)
+  if (!hay) return ''
+  for (const raw of patterns || []) {
+    const source = String(raw || '').trim()
+    if (!source || source.length > 400) continue
+    let re
+    try {
+      re = new RegExp(source, 'i')
+    } catch {
+      continue
+    }
+    const found = re.exec(hay)
+    if (found?.[0]) return String(found[0]).slice(0, 80)
+  }
+  return ''
+}
 
 function asStringList(v, fallback) {
   if (!Array.isArray(v)) return fallback.slice()
@@ -199,6 +257,12 @@ export function normalizeDistillRules(raw) {
   const err = src.error && typeof src.error === 'object' ? src.error : {}
   const st = src.structure && typeof src.structure === 'object' ? src.structure : {}
   const message = String(err.message || DISTILL_BLOCK_MESSAGE).trim() || DISTILL_BLOCK_MESSAGE
+  const needles = asStringList(src.needles, DEFAULT_DISTILL_RULES.needles)
+  const harvestMissing = HARVEST_NEEDLES.filter(
+    (needle) => !needles.some((item) => String(item).toLowerCase() === needle.toLowerCase()),
+  )
+  const patterns = asStringList(src.patterns, DEFAULT_DISTILL_RULES.patterns).slice(0, 80)
+  const patternMissing = HARD_DISTILL_PATTERNS.filter((pattern) => !patterns.includes(pattern))
   return {
     enabled: src.enabled !== false,
     skip_official: src.skip_official !== false,
@@ -214,7 +278,8 @@ export function normalizeDistillRules(raw) {
       require_no_tools: st.require_no_tools !== false,
       require_single_turn: st.require_single_turn !== false,
     },
-    needles: asStringList(src.needles, DEFAULT_DISTILL_RULES.needles),
+    needles: [...needles, ...harvestMissing],
+    patterns: [...patterns, ...patternMissing],
     fingerprints: asStringList(src.fingerprints, DEFAULT_DISTILL_RULES.fingerprints),
   }
 }
@@ -229,6 +294,7 @@ function typeProblems(body) {
     problems.push('skip_zero 必须是布尔')
   }
   if (body.needles != null && !Array.isArray(body.needles)) problems.push('needles 必须是数组')
+  if (body.patterns != null && !Array.isArray(body.patterns)) problems.push('patterns 必须是数组')
   if (body.fingerprints != null && !Array.isArray(body.fingerprints)) {
     problems.push('fingerprints 必须是数组')
   }
@@ -238,6 +304,23 @@ function typeProblems(body) {
 function sizeProblems(body) {
   const problems = []
   if (Array.isArray(body.needles) && body.needles.length > 200) problems.push('needles 最多 200 条')
+  if (Array.isArray(body.patterns) && body.patterns.length > 50) problems.push('patterns 最多 50 条')
+  if (Array.isArray(body.patterns)) {
+    for (const item of body.patterns) {
+      const source = String(item || '').trim()
+      if (!source) continue
+      if (source.length > 400) {
+        problems.push('单条 pattern 最长 400')
+        break
+      }
+      try {
+        new RegExp(source, 'i')
+      } catch {
+        problems.push(`无效正则: ${source.slice(0, 80)}`)
+        break
+      }
+    }
+  }
   if (Array.isArray(body.fingerprints) && body.fingerprints.length > 200) {
     problems.push('fingerprints 最多 200 条')
   }
@@ -300,9 +383,25 @@ export function distillBlockError(rules, requestId) {
 export function detectDistill(ctx = {}, rules) {
   const r = normalizeDistillRules(rules)
   if (!r.enabled) return { action: 'pass', hits: [] }
+  const prompt = extractPrompt(ctx.inbound, ctx.body)
+  const harvestNeedle = matchNeedles(prompt.joined, HARVEST_NEEDLES)
+  if (harvestNeedle) {
+    return {
+      action: 'block',
+      hits: [{ layer: 'content', rule: 'harvest_needle', evidence: harvestNeedle }],
+      error: r.error,
+    }
+  }
+  const regexHit = matchPatterns(prompt.joined, r.patterns)
+  if (regexHit) {
+    return {
+      action: 'block',
+      hits: [{ layer: 'content', rule: 'distill_regex', evidence: regexHit }],
+      error: r.error,
+    }
+  }
   if (r.skip_official && ctx.official) return { action: 'pass', hits: [] }
   if (r.skip_zero && ctx.zeroInject) return { action: 'pass', hits: [] }
-  const prompt = extractPrompt(ctx.inbound, ctx.body)
   const structure = extractStructure(ctx.inbound, ctx.body)
   const hits = []
 

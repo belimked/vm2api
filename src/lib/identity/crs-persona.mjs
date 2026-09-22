@@ -82,7 +82,7 @@ export const DEFAULT_PERSONA_MODE = 'rewrite'
 export const DEFAULT_PERSONA_PARK = true
 export const PERSONA_PARK_STYLES = Object.freeze(['user', 'append', 'messages'])
 export const DEFAULT_PERSONA_PARK_STYLE = 'user'
-export const DEFAULT_CACHE_CONTROL_TTL = '5m'
+export const DEFAULT_CACHE_CONTROL_TTL = '1h'
 export const PERSONA_AGENT_MODES = Object.freeze(['default', 'rewrite', 'minimal', 'required'])
 export const DEFAULT_PERSONA_AGENT = 'default'
 export const FINGERPRINT_SALT = '59cf53e54c78'
@@ -332,6 +332,37 @@ export function billingPromptId(sessionId = '', firstUserText = '', cliVersion =
   const ver = parseCliVersion(cliVersion)
   const fp = computeClaudeCodeFingerprint(firstUserText ?? '', ver)
   return uuidFromSeed(raw || `prompt:${ver}:${fp}`)
+}
+
+const BILLING_PROMPT_ID_RE = /cc_prompt_id=[^;\s]*/g
+
+/** Point an owned billing header at the outbound session. No-op if absent. */
+export function stampBillingPromptId(body, sessionId, firstUserText = '') {
+  if (!body || typeof body !== 'object') return body
+  const promptId = billingPromptId(sessionId, firstUserText)
+  const next = `cc_prompt_id=${promptId}`
+  const rewrite = (text) =>
+    String(text).includes('cc_prompt_id=') ? String(text).replace(BILLING_PROMPT_ID_RE, next) : text
+  if (typeof body.system === 'string') {
+    const system = rewrite(body.system)
+    return system === body.system ? body : { ...body, system }
+  }
+  if (!Array.isArray(body.system)) return body
+  let changed = false
+  const system = body.system.map((block) => {
+    if (typeof block === 'string') {
+      const text = rewrite(block)
+      if (text === block) return block
+      changed = true
+      return text
+    }
+    if (!block || typeof block.text !== 'string') return block
+    const text = rewrite(block.text)
+    if (text === block.text) return block
+    changed = true
+    return { ...block, text }
+  })
+  return changed ? { ...body, system } : body
 }
 
 export function buildBillingAttributionText(firstUserText, cliVersion = DEFAULT_CLI_VERSION, sessionId = '') {
@@ -1313,6 +1344,7 @@ export function personaPresetFromHopMode(mode) {
   )
     return 'official'
   if (raw === 'zero' || raw === 'zero_inject' || raw === '0inject' || raw === '0-inject') return 'zero'
+  if (raw === 'custom' || raw === 'diy' || raw === 'manual') return 'custom'
   return null
 }
 

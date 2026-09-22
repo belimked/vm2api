@@ -63,9 +63,9 @@ test('extractKey prefers metadata.user_id session over headers', () => {
   assert.equal(key, 'meta-sess')
 })
 
-test('persistable envelope from one API key shares one sticky key', () => {
+test('caller session wins over a persistable envelope', () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, mode: 'conversation' } } })
-  const a = r.extractKey(
+  const a = r.extractPoolKey(
     { apiKeyRecord: { id: 'key_f041' }, headers: { 'thread-id': '01a0b947-aaaa' } },
     {
       thread_id: '01a0b947-aaaa',
@@ -91,28 +91,27 @@ test('persistable envelope from one API key shares one sticky key', () => {
       ],
     },
   )
-  assert.equal(a, 'kkey_f041:envelope')
-  assert.equal(a, b)
+  assert.equal(a, 'kkey_f041:sess-aaaa')
+  assert.equal(b, 'kkey_f041:sess-bbbb')
+  assert.notEqual(a, b)
 })
 
-test('persistable envelope beats a per-hop device_id in extractPoolKey', () => {
+test('envelope without a session id stays one key per API key', () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, mode: 'conversation' } } })
-  const a = r.extractPoolKey(
-    { apiKeyRecord: { id: 'key_f041' } },
-    {
-      metadata: { user_id: { device_id: 'dev-aaaa', session_id: 'sess-aaaa' } },
-      messages: [{ role: 'user', content: 'Persistable response items (JSON):\n[{"text":"缓存修复"}]' }],
-    },
+  const body = {
+    messages: [{ role: 'user', content: 'Persistable response items (JSON):\n[{"text":"任务"}]' }],
+  }
+  assert.equal(r.extractPoolKey({ apiKeyRecord: { id: 'key_f041' } }, body), 'kkey_f041:envelope')
+  assert.equal(
+    r.extractPoolKey(
+      { apiKeyRecord: { id: 'key_f041' } },
+      {
+        metadata: { user_id: { device_id: 'dev-aaaa', session_id: 'sess-aaaa' } },
+        messages: [{ role: 'user', content: 'Persistable response items (JSON):\n[{"text":"缓存修复"}]' }],
+      },
+    ),
+    'kkey_f041:sess-aaaa',
   )
-  const b = r.extractPoolKey(
-    { apiKeyRecord: { id: 'key_f041' } },
-    {
-      metadata: { user_id: { device_id: 'dev-bbbb', session_id: 'sess-bbbb' } },
-      messages: [{ role: 'user', content: 'Persistable response items (JSON):\n[{"text":"套餐识别"}]' }],
-    },
-  )
-  assert.equal(a, 'kkey_f041:envelope')
-  assert.equal(a, b)
 })
 
 test('persistable envelope keys stay isolated per API key', () => {
@@ -164,6 +163,43 @@ test('extractKey ignores x-client-request-id and hashes first user', () => {
   assert.equal(a, b)
 })
 
+test('later blocks of the first user message stay on one session slot', () => {
+  const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
+  const req = { apiKeyRecord: { id: 'key_f041' }, headers: {} }
+  const first = {
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'stable preamble' },
+          { type: 'text', text: 'turn-1 transcript that grows' },
+        ],
+      },
+    ],
+  }
+  const next = {
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'stable preamble' },
+          { type: 'text', text: 'turn-2 a different transcript' },
+        ],
+      },
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'continue' },
+    ],
+  }
+  const other = {
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'a different conversation' }] }],
+  }
+  const a = r.extractPoolKey(req, first, { platform: 'anthropic' })
+  const b = r.extractPoolKey(req, next, { platform: 'anthropic' })
+  assert.equal(a, b)
+  assert.equal(r.collectPoolKeys(req, next, { platform: 'anthropic' }).length, 1)
+  assert.notEqual(a, r.extractPoolKey(req, other, { platform: 'anthropic' }))
+})
+
 test('extractKey mode=ip uses forwarded address', () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, mode: 'ip' } } })
   const key = r.extractKey({ headers: { 'x-forwarded-for': '203.0.113.9, 10.0.0.1' } }, {})
@@ -196,7 +232,7 @@ test('extractOfficialFamilyKey binds parent and child hops by device_id', () => 
   )
 })
 
-test('extractPoolKey pins local-agent sub-agent to parent device family', () => {
+test('parent and child session ids stay on separate slots', () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const parentReq = {
     headers: { 'user-agent': 'claude-cli/2.1.241 (external, sdk-cli)', 'x-claude-code-session-id': 'parent-sess' },
@@ -209,13 +245,30 @@ test('extractPoolKey pins local-agent sub-agent to parent device family', () => 
     },
   }
   const childBody = { metadata: { user_id: { device_id: 'aabbcc', session_id: 'child-sess' } } }
-  assert.equal(r.extractPoolKey(parentReq, parentBody), 'dev:aabbcc')
-  assert.equal(r.extractPoolKey(childReq, childBody), r.extractPoolKey(parentReq, parentBody))
-  assert.notEqual(r.extractKey(childReq, childBody), r.extractPoolKey(parentReq, parentBody))
-  assert.deepEqual(r.collectPoolKeys(childReq, childBody), ['dev:aabbcc', 'child-sess'])
+  assert.equal(r.extractPoolKey(parentReq, parentBody), 'parent-sess')
+  assert.equal(r.extractPoolKey(childReq, childBody), 'child-sess')
+  assert.deepEqual(r.collectPoolKeys(childReq, childBody), ['child-sess'])
+  r.bind('child-sess', { accountId: 'acc-2', vmId: 'vm-02' })
+  r.bind('child-sess', { accountId: 'acc-9', vmId: 'vm-09', sessionId: 'outbound-2' })
+  assert.equal(r.resolve('child-sess').vmId, 'vm-02')
+  assert.equal(r.resolve('child-sess').sessionId, 'outbound-2')
 })
 
-test('protocol aliases resolve one conversation to the same account', () => {
+test('anthropic and openai sticky keys do not share a session', () => {
+  const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
+  const req = { headers: { 'x-session-id': 'same-session' } }
+  const body = { metadata: { user_id: { session_id: 'same-session' } } }
+  const claude = r.extractPoolKey(req, body, { platform: 'anthropic' })
+  const gpt = r.extractPoolKey(req, body, { platform: 'openai' })
+  assert.equal(claude, 'p:anthropic:same-session')
+  assert.equal(gpt, 'p:openai:same-session')
+  r.bind(claude, { accountId: 'acc-claude', vmId: 'vm-claude' })
+  assert.equal(r.resolve(gpt), null)
+  assert.equal(r.extractPoolKey(req, body, { platform: 'openai' }), gpt)
+  assert.equal(r.resolve(r.extractPoolKey(req, body, { platform: 'anthropic' })).vmId, 'vm-claude')
+})
+
+test('a caller session does not stick through a content fingerprint', () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const firstUser = [{ role: 'user', content: '同一段跨协议会话的首条消息' }]
   const anthropic = {
@@ -227,12 +280,24 @@ test('protocol aliases resolve one conversation to the same account', () => {
 
   const primary = r.extractPoolKey(req, anthropic)
   const aliases = r.collectPoolKeys(req, anthropic)
-  assert.match(primary, /^kkey_cross_protocol:ch:/)
-  assert.equal(aliases[1], 'kkey_cross_protocol:anthropic-session')
-  for (const key of aliases) r.bind(key, { accountId: 'acc-1', vmId: 'vm-01' })
+  assert.equal(primary, 'kkey_cross_protocol:anthropic-session')
+  assert.deepEqual(aliases, ['kkey_cross_protocol:anthropic-session'])
+  r.bind(primary, { accountId: 'acc-1', vmId: 'vm-01', sessionId: 'out-1' })
+  r.bind(primary, { accountId: 'acc-2', vmId: 'vm-02', sessionId: 'out-2' })
+  assert.equal(r.resolve(primary).vmId, 'vm-01')
+  assert.equal(r.resolve(primary).sessionId, 'out-1')
+  assert.equal(r.resolve(r.extractPoolKey(req, openai)), null)
+})
 
-  assert.equal(r.extractPoolKey(req, openai), primary)
-  assert.equal(r.resolve(r.extractPoolKey(req, openai)).vmId, 'vm-01')
+test('explicit session is the stable lock when concurrent turns have different first messages', () => {
+  const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
+  const req = { apiKeyRecord: { id: 'key_lock' }, headers: { 'x-session-id': 'shared-session' } }
+  const first = { messages: [{ role: 'user', content: 'first visible turn' }] }
+  const second = { messages: [{ role: 'user', content: 'trimmed current turn' }] }
+  assert.equal(r.extractPoolKey(req, first), 'kkey_lock:shared-session')
+  assert.equal(r.extractPoolKey(req, second), 'kkey_lock:shared-session')
+  assert.deepEqual(r.collectPoolKeys(req, first), ['kkey_lock:shared-session'])
+  assert.deepEqual(r.collectPoolKeys(req, second), ['kkey_lock:shared-session'])
 })
 
 test('provisional bind does not increment hits', () => {

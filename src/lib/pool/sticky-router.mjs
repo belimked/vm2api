@@ -22,6 +22,25 @@ export const DEFAULT_STICKY_BODY_KEYS = ['conversation_id', 'session_id', 'threa
 /** Per-request ids — never use as a conversation key. */
 export const EPHEMERAL_STICKY_KEYS = new Set(['x-client-request-id', 'x-request-id'])
 
+export function normalizeStickyPlatform(platform) {
+  const value = String(platform || '')
+    .trim()
+    .toLowerCase()
+  if (value === 'openai' || value === 'gpt' || value === 'codex') return 'openai'
+  if (value === 'anthropic' || value === 'claude') return 'anthropic'
+  return ''
+}
+
+/** Platform pools do not share a sticky row. Omitted platform keeps the legacy key. */
+export function scopeStickyKey(key, platform) {
+  const raw = String(key || '')
+  if (!raw) return null
+  const name = normalizeStickyPlatform(platform)
+  if (!name) return raw
+  const prefix = `p:${name}:`
+  return raw.startsWith(prefix) ? raw : `${prefix}${raw}`
+}
+
 function mergeStickyConfig(config) {
   const sticky = config?.sticky || {}
   const headerKeys = (
@@ -52,6 +71,10 @@ export function isPersistableEnvelope(body = {}, inbound = null) {
   return ENVELOPE_NEEDLES.some((item) => hay.includes(String(item).toLowerCase()))
 }
 
+/** First text block only. Later blocks of the same user message change every
+ * turn and must not open another VM session slot. This matches
+ * extractFirstUserText, which already seeds the outbound session id.
+ */
 export function firstUserFingerprint(body = {}) {
   const msgs = Array.isArray(body?.messages) ? body.messages : Array.isArray(body?.input) ? body.input : []
   const user = msgs.find((m) => String(m?.role || m?.type || '').toLowerCase() === 'user') || msgs[0]
@@ -60,7 +83,16 @@ export function firstUserFingerprint(body = {}) {
     const c = user.content ?? user.text ?? user.input
     if (typeof c === 'string') text = c
     else if (Array.isArray(c)) {
-      text = c.map((p) => (typeof p === 'string' ? p : p?.text || '')).join('\n')
+      for (const part of c) {
+        if (typeof part === 'string' && part) {
+          text = part
+          break
+        }
+        if (part?.type === 'text' && typeof part.text === 'string' && part.text) {
+          text = part.text
+          break
+        }
+      }
     }
   } else if (typeof body?.input === 'string') {
     text = body.input
@@ -80,6 +112,7 @@ export class StickyRouter {
     this.db = resolveStoreDb({ db, dataDir })
     this.repo = new StickyRepo(this.db)
     this.config = mergeStickyConfig(config)
+    this.repo.dropAliasKeys()
   }
 
   /** Kept for API compat + post-restore hook (state lives in DB). */
@@ -155,31 +188,44 @@ export class StickyRouter {
     return this.isolateKey(`dev:${device}`, req)
   }
 
-  /** Ordered aliases for one logical conversation across protocol adapters. */
-  collectPoolKeys(req, body = {}) {
+  /** Ordered aliases for one logical conversation. A caller session is the only key. */
+  collectPoolKeys(req, body = {}, opts = {}) {
     if (!this.config.enabled) return []
     const keys = []
+    const platform = normalizeStickyPlatform(opts?.platform)
     const add = (key) => {
-      if (key && !keys.includes(key)) keys.push(key)
+      const scoped = scopeStickyKey(key, platform)
+      if (scoped && !keys.includes(scoped)) keys.push(scoped)
+    }
+    const caller = extractCallerSession({ inbound: body, body, headers: req?.headers || {} })
+    if (caller && !EPHEMERAL_STICKY_KEYS.has(String(caller).toLowerCase())) {
+      add(this.isolateKey(caller, req))
+      return keys
     }
     const mode = this.config.mode || 'conversation'
     if (mode === 'conversation' && isPersistableEnvelope(body)) {
       const id = req?.apiKeyRecord?.id
       if (id != null && id !== '') add(`k${id}:envelope`)
+      if (keys.length) return keys
     }
-    add(this.extractOfficialFamilyKey(req, body))
-    if (mode === 'conversation') {
-      const fingerprint = firstUserFingerprint(body)
-      if (fingerprint) add(this.isolateKey(`ch:${fingerprint}`, req))
-    }
-    add(this.extractKey(req, body))
+    const fingerprint = firstUserFingerprint(body)
+    if (fingerprint) add(this.isolateKey(`ch:${fingerprint}`, req))
     return keys
   }
 
-  /** Prefer an already-bound alias, then the strongest available identity. */
-  extractPoolKey(req, body = {}) {
-    const keys = this.collectPoolKeys(req, body)
-    return keys.find((key) => this.resolve(key)) || keys[0] || null
+  /**
+   * One conversation, one pool key. An already-bound alias wins so a new
+   * per-hop session id cannot open a second VM session.
+   */
+  extractPoolKey(req, body = {}, opts = {}) {
+    const keys = this.collectPoolKeys(req, body, opts)
+    const bound = keys.find((key) => this.resolve(key))
+    if (bound) return bound
+    if (normalizeStickyPlatform(opts?.platform) === 'anthropic') {
+      const legacy = this.collectPoolKeys(req, body).find((key) => this.resolve(key))
+      if (legacy) return legacy
+    }
+    return keys[0] || null
   }
 
   /** @returns {{ accountId: string, vmId: string } | null } */
@@ -199,10 +245,11 @@ export class StickyRouter {
     if (!key || !this.config.enabled) return
     const ttl = (this.config.ttl_seconds || 86400) * 1000
     const prev = this.repo.get(key) || {}
+    const locked = prev.vm_id && vmId && prev.vm_id !== vmId
     this.repo.upsert(key, {
-      account_id: accountId,
-      vm_id: vmId,
-      session_id: sessionId || prev.session_id || null,
+      account_id: locked ? prev.account_id : accountId,
+      vm_id: locked ? prev.vm_id : vmId,
+      session_id: prev.session_id || sessionId || null,
       bound_at: Date.now(),
       expires_at: Date.now() + ttl,
       hits: (prev.hits || 0) + (countHit ? 1 : 0),

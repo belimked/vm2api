@@ -333,6 +333,19 @@ setImmediate(() => {
   }
 })
 
+// 首次安装的出口池是空的，槽没有可绑出口就起不来。本机出口永远成立，先补上。
+try {
+  if (!proxyPool.snapshot().proxies?.length) {
+    const seeded = proxyPool.ensureLocal()
+    if (seeded.created) {
+      ensureProxyEgress(cfg.paths.project, proxyPool.getProxyByIdWithAuth(seeded.proxy.id))
+      console.log('[bootstrap] seeded local egress px-local')
+    }
+  }
+} catch (e) {
+  console.warn('[bootstrap] local egress seed failed', e?.message || e)
+}
+
 initPoolRuntime()
 try {
   applyRoutingTierConcurrency(routingConfig.tiers)
@@ -576,7 +589,7 @@ async function refreshWorkerCredentialForVm({ vmId, vmPath, homeDir, vm, force =
   return published
 }
 
-const { json, writeSSEHeaders, readBody } = createRespond(cfg, {
+const { json, writeSSEHeaders, readBody, readRawBody } = createRespond(cfg, {
   tcpNodelay: () => routingConfig?.inference?.tcp_nodelay !== false,
 })
 
@@ -761,6 +774,7 @@ const { handleProtocol } = createHandleProtocol({
 const handlePanel = createPanelHandler({
   json,
   readBody,
+  readRawBody,
   requireAuth,
   cfg,
   routingConfigPath,

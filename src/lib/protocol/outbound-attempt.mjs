@@ -23,6 +23,7 @@ import { resolveCrsHeaders } from '../identity/crs-headers.mjs'
 import { hasClaudeCode1mSuffix } from './context-1m.mjs'
 import {
   refreshOfficialSystemEnvironment,
+  stampBillingPromptId,
   CRS_OFFICIAL_SYSTEM,
   CRS_OFFICIAL_CLI_SYSTEM,
   CRS_COMPACT_IDENTITY,
@@ -37,6 +38,7 @@ import {
   applyCacheTtlToBody,
   applyCacheBreakpoints,
   enforceCacheTtlOrder,
+  forceEphemeralCacheTtl,
   normalizeCacheBreakpoints,
   stripIllegalCacheControlFields,
 } from './cache-ttl.mjs'
@@ -81,7 +83,8 @@ export const CLI_HOP_CACHE_BREAKPOINTS = Object.freeze({
   messages: 'rewrite',
 })
 
-/** Wrap CLI and kernel emit ttl-less ephemeral markers, which Anthropic treats as 5m. */
+/** Wrap CLI tools/system omit ttl, which Anthropic treats as 5m and processes first.
+ * A later message 1h is the messages.N 400, so the hop wire value is 5m. */
 export const CLI_HOP_CACHE_TTL = '5m'
 
 function dropNodeCacheControl(node) {
@@ -110,6 +113,30 @@ function dropLastMessageBreakpoint(body) {
   return { ...body, messages: next }
 }
 
+/** A CLI hop must end on a conversational user/assistant turn. Preserve older
+ * role=system leftovers in place, but lift only a trailing run to system[]. */
+function liftTrailingSystemMessages(body) {
+  const messages = Array.isArray(body?.messages) ? body.messages : []
+  let firstTrailing = messages.length
+  while (firstTrailing > 0 && messages[firstTrailing - 1]?.role === 'system') firstTrailing--
+  if (firstTrailing === messages.length) return body
+  const lifted = messages.slice(firstTrailing).flatMap((message) => {
+    const content = message?.content
+    if (typeof content === 'string') return content.trim() ? [{ type: 'text', text: content }] : []
+    if (!Array.isArray(content)) return []
+    return content
+      .map((block) => (typeof block === 'string' ? { type: 'text', text: block } : block))
+      .filter((block) => block?.type === 'text' && String(block.text || '').trim())
+  })
+  if (!lifted.length) return { ...body, messages: messages.slice(0, firstTrailing) }
+  const system = Array.isArray(body.system)
+    ? body.system
+    : body.system == null
+      ? []
+      : [{ type: 'text', text: String(body.system) }]
+  return { ...body, system: [...system, ...lifted], messages: messages.slice(0, firstTrailing) }
+}
+
 /** Caller fields only. CLI owns UA / billing / metadata / layoutSystemBlocks. */
 export function prepareCliHopBody(
   canonicalBody,
@@ -118,6 +145,7 @@ export function prepareCliHopBody(
     repaired = false,
     cacheBreakpoints = CLI_HOP_CACHE_BREAKPOINTS,
     cacheControlLimit = 4,
+    cacheTtl = CLI_HOP_CACHE_TTL,
     unofficial: _unofficial = false,
   } = {},
 ) {
@@ -126,6 +154,8 @@ export function prepareCliHopBody(
   const leftover = stripCliOwnedSystem(body.system)
   if (leftover == null) delete body.system
   else body.system = leftover
+  body = liftTrailingSystemMessages(body)
+
   if (!repaired) {
     body = ensureUnofficialAdaptiveThinking(body)
     normalizeThinkingForModel(body)
@@ -135,14 +165,15 @@ export function prepareCliHopBody(
   }
   body = stripInvalidThinkingBlocks(body)
   body = alignSamplingWithThinking(body)
+  const ttl = CLI_HOP_CACHE_TTL
+  if (cacheTtl == null) return forceEphemeralCacheTtl(body, ttl)
   body = stripIllegalCacheControlFields(body)
-  // Node rewrites last + penultimate user, then removes the current tail so
-  // the kernel can restamp it after transport conversion. Keep every Node
-  // marker at 5m because wrap-owned tools/system markers are ttl-less (=5m).
+  // Node owns the stable previous-user boundary; the kernel receives the same
+  // resolved TTL and owns the current tail plus wrap-owned markers.
   if (cacheBreakpoints) {
     const cfg = normalizeCacheBreakpoints(cacheBreakpoints)
     body = applyCacheBreakpoints(body, {
-      ttl: CLI_HOP_CACHE_TTL,
+      ttl,
       config: {
         enabled: cfg.enabled,
         preserve_client: cfg.preserve_client,
@@ -155,12 +186,7 @@ export function prepareCliHopBody(
   }
   body = dropCliOwnedBreakpoints(body)
   body = dropLastMessageBreakpoint(body)
-  // enforceCacheTtlOrder only downgrades a 1h marker that sits AFTER a 5m one.
-  // An official client can send a 1h marker with nothing earlier in the Node
-  // body to outrank it, so ordering lets it through; the kernel then prepends
-  // its 5m tools/system markers and Anthropic 400s on the 1h-after-5m. Pin
-  // every marker to 5m unconditionally instead (dofastted/vm2api#32).
-  body = applyCacheTtlToBody(body, CLI_HOP_CACHE_TTL)
+  body = forceEphemeralCacheTtl(enforceCacheTtlOrder(body), ttl)
   enforceCacheLimit(body, cacheControlLimit)
   return body
 }
@@ -184,27 +210,50 @@ export function prepareOutboundAttempt({
   reqHeaders = {},
   officialClient,
   sessionId: sessionIdOverride,
+  accountId = '',
+  boundSessionId = '',
+  boundAccountId = '',
+  clientDiscriminator = undefined,
+  clientIp = '',
+  userAgent = '',
+  apiKeyId = '',
+  firstUserText = '',
   authScheme,
   credentialMode,
 } = {}) {
   const inferenceOnly = isSetupTokenMode(credentialMode) || isApiKeyMode(credentialMode)
   const keepCallerSession = officialClient === true || (officialClient == null && !unofficial)
+  const sessionContext = {
+    officialClient: keepCallerSession,
+    accountId,
+    boundSessionId,
+    boundAccountId,
+    clientDiscriminator,
+    clientIp,
+    userAgent: userAgent || reqHeaders?.['user-agent'] || '',
+    apiKeyId,
+    firstUserText,
+  }
   const sessionId =
     String(sessionIdOverride || '').trim() ||
-    resolveOutboundSessionId(extractCallerSession({ inbound, body: canonicalBody, headers: reqHeaders }), {
-      officialClient: keepCallerSession,
-    })
+    resolveOutboundSessionId(
+      extractCallerSession({ inbound, body: canonicalBody, headers: reqHeaders }),
+      sessionContext,
+    )
   let identified = applyCrsIdentityReplace(
     officialMessagesBody(canonicalBody, { stream }),
     identity,
     inbound,
     reqHeaders,
-    { officialClient: keepCallerSession, sessionId },
+    { officialClient: keepCallerSession, sessionId, ...sessionContext },
   )
   const callerSessionId = sessionIdFromOutboundBody(identified)
   if (identity && callerSessionId) identity.callerSessionId = callerSessionId
   if (identity) {
     identified = refreshOfficialSystemEnvironment(identified, identity, identified.model)
+  }
+  if (!keepCallerSession && String(sessionIdOverride || '').trim()) {
+    identified = stampBillingPromptId(identified, sessionId, firstUserText)
   }
   // Official Claude Code places its own breakpoints; adding ours would shift the
   // prefix it already caches.
@@ -248,6 +297,14 @@ export function prepareOutboundEnvelope({
   homeDir = '',
   officialClient,
   sessionId,
+  accountId = '',
+  boundSessionId = '',
+  boundAccountId = '',
+  clientDiscriminator,
+  clientIp = '',
+  userAgent = '',
+  apiKeyId = '',
+  firstUserText = '',
   authScheme,
   credentialMode,
   want1m,
@@ -265,6 +322,14 @@ export function prepareOutboundEnvelope({
     reqHeaders,
     officialClient,
     sessionId,
+    accountId,
+    boundSessionId,
+    boundAccountId,
+    clientDiscriminator,
+    clientIp,
+    userAgent,
+    apiKeyId,
+    firstUserText,
     authScheme,
     credentialMode,
   })

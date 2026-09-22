@@ -58,6 +58,24 @@ function poolError(code, message, details = {}) {
   }
 }
 
+function fableRequiresMaxError(details = {}) {
+  return {
+    ok: false,
+    status: 429,
+    via: 'pool-failover',
+    terminalState: 'exhausted',
+    body: {
+      type: 'error',
+      error: {
+        type: 'rate_limit_error',
+        code: 'fable_requires_max',
+        message: 'Fable requires an available Max account',
+        details,
+      },
+    },
+  }
+}
+
 function selectedHasRefresh(selected) {
   if (selected?.hasRefresh === true || selected?.hasRefresh === false) return selected.hasRefresh
   const cred = selected?.workerStatus?.credential || selected?.state?.worker_status?.credential || {}
@@ -199,7 +217,7 @@ function canRetrySameAccount(policy, used, config, hopMs) {
 }
 
 function applyCooldown(scheduler, selected, policy, model, stickyRouter = null, { diagnosticPin = false } = {}) {
-  if (policy?.action !== 'continue-and-cooldown' && policy?.action !== 'disable') return
+  if (policy?.action !== 'continue-and-cooldown' && policy?.action !== 'disable' && policy?.action !== 'pause') return
   // VM / master pin is a diagnostic. A 401 from the wrong inbound class
   // must not forever-park a Setup Token that has no refresh by design.
   if (diagnosticPin && (policy.reason === 'oauth_no_refresh' || policy.reason === 'oauth_revoked')) {
@@ -217,9 +235,10 @@ function applyCooldown(scheduler, selected, policy, model, stickyRouter = null, 
         ? 'disabled'
         : 'cooldown',
   })
-  // Account-level cooldown must drop every conversation pin, otherwise the
-  // next request waits on the cooling slot and never rotates.
-  if (policy.scope === 'account') {
+  // A 5xx pause keeps the conversation pin. Dropping it is how one session
+  // lands on the next VM. RPM cooldown waits on the same slot. Auth and
+  // quota cooldowns still rotate.
+  if (policy.scope === 'account' && policy.action !== 'pause' && policy.reason !== 'rate_limited') {
     stickyRouter?.unbindByAccount?.({
       accountId: selected?.accountId,
       vmId: selected?.vmId,
@@ -304,10 +323,22 @@ export class FailoverRunner {
     const excluded = new Set()
     const sameAccountRetries = new Map()
     const bindKeys = uniqueStickyKeys(stickyKey, stickyKeys)
+    let outboundSessionId = ''
+    let outboundSessionAccountId = ''
     const bindAll = (account, opts) => {
       if (!this.stickyRouter?.bind || !account) return
+      const sessions = this.scheduler?.accountQuota?.sessions
+      const sessionId = account.sessionId || (account.accountId === outboundSessionAccountId ? outboundSessionId : '')
+      const payload = { accountId: account.accountId, vmId: account.vmId }
+      if (sessionId) payload.sessionId = sessionId
       for (const key of bindKeys) {
-        this.stickyRouter.bind(key, account, opts)
+        const prev = this.stickyRouter.resolve?.(key)
+        if (prev?.accountId && prev.accountId !== account.accountId) {
+          try {
+            sessions?.drop?.(prev.accountId, key)
+          } catch {}
+        }
+        this.stickyRouter.bind(key, payload, opts)
       }
     }
     let lastResult = null
@@ -355,6 +386,15 @@ export class FailoverRunner {
         }
         throw error
       }
+      if (!selected?.ok && selected?.reason === 'fable_requires_max') {
+        return fableRequiresMaxError({
+          wait_ms: selected?.waitMs ?? selected?.wait_ms ?? 0,
+          eligible: selected?.eligible ?? 0,
+          available: selected?.available ?? 0,
+          attempt_count: attemptNo - 1,
+        })
+      }
+
       if (!selected?.ok) {
         return preferLastResult(
           lastResult,
@@ -405,6 +445,14 @@ export class FailoverRunner {
           Object.prototype.hasOwnProperty.call(prepared, 'meta')
         const body = wrappedAttempt ? prepared.body : prepared
         const attemptMeta = wrappedAttempt ? prepared.meta : null
+        if (attemptMeta?.sessionId) {
+          outboundSessionId = String(attemptMeta.sessionId)
+          outboundSessionAccountId = selected.accountId
+          bindAll(
+            { accountId: selected.accountId, vmId: selected.vmId, sessionId: outboundSessionId },
+            { countHit: false },
+          )
+        }
         result = await callAttempt({
           candidate: selected,
           body,
@@ -517,6 +565,27 @@ export class FailoverRunner {
           }
           continue
         }
+        // A terminal 2xx without a complete assistant message is request/CLI
+        // state, not account health. One same-slot recovery is useful; replaying
+        // the same conversation across the pool breaks affinity and multiplies cost.
+        if (policy.reason === 'incomplete_assistant') {
+          const sessions = this.scheduler?.accountQuota?.sessions
+          for (const key of bindKeys) {
+            try {
+              sessions?.drop?.(selected.accountId, key)
+            } catch {}
+          }
+          return {
+            ...incompleteAssistantClientError(result),
+            via: result?.via || 'pool-failover',
+            accountId: selected.accountId,
+            vmId: selected.vmId,
+            attemptCount: attemptNo,
+            finalState: 'incomplete',
+            policy,
+          }
+        }
+
         excluded.add(selected.accountId)
         excluded.add(selected.vmId)
         accountSwitches++

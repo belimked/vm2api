@@ -5,6 +5,7 @@ import {
   rewritePoolErrorForClient,
   isPoolCapacityError,
   isWrapConnectionError,
+  isUsagePolicyErrorMessage,
   isAssistantMessageBody,
   isCompleteAssistantMessage,
   isIncompleteAssistantMessage,
@@ -48,6 +49,22 @@ test('rewritePoolErrorForClient strips leftover pool details', () => {
   assert.equal(rewritten.body.error.code, 'server_overloaded')
   assert.equal(rewritten.body.error.message, CLIENT_POOL_BUSY_MESSAGE)
   assert.equal(rewritten.body.error.details, undefined)
+})
+
+test('fable_requires_max remains a dedicated HTTP 429', () => {
+  const mapped = mapUpstreamError(429, {
+    type: 'error',
+    error: {
+      type: 'rate_limit_error',
+      code: 'fable_requires_max',
+      message: 'Fable requires an available Max account',
+    },
+  })
+  const rewritten = rewritePoolErrorForClient(mapped)
+  assert.equal(rewritten.status, 429)
+  assert.equal(rewritten.body.error.type, 'rate_limit_error')
+  assert.equal(rewritten.body.error.code, 'fable_requires_max')
+  assert.equal(rewritten.body.error.message, 'Fable requires an available Max account')
 })
 
 test('incomplete upstream stream maps to 502, not api_error 500', () => {
@@ -178,6 +195,18 @@ test('wrap Connection error is not upstream', () => {
   assert.equal(mapped.status, 503)
   assert.equal(mapped.body.error.code, 'wrap_connection_error')
   assert.notEqual(mapped.body.error.type, 'upstream_error')
+})
+
+test('Claude Code AUP wrap error stays 502, not content_filter 403', () => {
+  const msg =
+    'provider error: provider error: API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). Try rephrasing the request'
+  assert.equal(isUsagePolicyErrorMessage(msg), true)
+  const mapped = mapUpstreamError(502, {
+    type: 'error',
+    error: { type: 'api_error', message: msg },
+  })
+  assert.equal(mapped.status, 502)
+  assert.notEqual(mapped.body.error.code, 'content_filter_refusal')
 })
 
 test('kernel slot_busy is overloaded, not upstream', () => {
