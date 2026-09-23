@@ -59,7 +59,13 @@ fi
 mkdir -p "$ROOT/share/wrap-cli"
 WRAP_CHANGED=0
 if [ -d /opt/vm2api/image-wrap-cli ]; then
-  for name in kin-kernel.bin kin-kernel; do
+  # Refresh the slot dataplane binaries from the image on EVERY start, cli-node
+  # included. Upstream only seeded cli-node when missing, so a bind-mounted
+  # ./share pinned whatever was first written and a pulled image could never
+  # move it — control plane advanced while cli-node stayed behind (the split
+  # brain that broke prompt-cache reads). kin-kernel.bin was already refreshed
+  # this way; cli-node now matches it.
+  for name in kin-kernel.bin kin-kernel cli-node; do
     src="/opt/vm2api/image-wrap-cli/$name"
     dest="$ROOT/share/wrap-cli/$name"
     if [ -f "$src" ]; then
@@ -71,7 +77,8 @@ if [ -d /opt/vm2api/image-wrap-cli ]; then
       mv -f "$dest.new" "$dest"
     fi
   done
-  if [ ! -f "$ROOT/share/wrap-cli/cli-node" ]; then
+  # First-run seed of the remainder (glibc shim, SAMPLE.json) when fresh.
+  if [ ! -d "$ROOT/share/wrap-cli/glibc239" ]; then
     cp -a /opt/vm2api/image-wrap-cli/. "$ROOT/share/wrap-cli/"
     WRAP_CHANGED=1
   fi
