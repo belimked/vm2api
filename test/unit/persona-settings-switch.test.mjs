@@ -28,6 +28,7 @@ import {
   personaOptionsFromRoutingFile,
   wrapMandatoryConstraint,
 } from '../../src/lib/identity/crs-persona.mjs'
+import { workstationKernel } from '../../src/lib/identity/workstation-profile.mjs'
 
 const SETTINGS_RADIOS = Object.freeze(['rewrite', 'official_prompt', 'overwrite', 'zero', 'none'])
 
@@ -137,7 +138,7 @@ test('settings save rewrite/official_prompt/overwrite/zero/none hot-reads withou
     assert.deepEqual(overwrite.system[2].cache_control, { type: 'ephemeral', ttl: DEFAULT_CACHE_CONTROL_TTL })
     assert.match(envText(overwrite), /You have been invoked/)
     assert.match(envText(overwrite), /Timezone: America\/Los_Angeles/)
-    assert.match(envText(overwrite), /OS Version: Linux 6\.8\.0-51-generic/)
+    assert.ok(envText(overwrite).includes(`OS Version: Linux ${workstationKernel({})}`))
     assert.match(firstUser(overwrite), /MANDATORY constraints for this turn/)
 
     persistSettings(file, { persona_inject: 'zero', persona_agent: 'default' })
