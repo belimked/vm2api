@@ -114,7 +114,7 @@ test('openai.chat / messages / responses convert to the same cacheable block sha
   assert.deepEqual(rewriteStamps(responses), rewriteStamps(messages))
 })
 
-test('unofficial cli-hop of converted openai.chat matches converted messages stamps', () => {
+test('unofficial cli-hop keeps converted openai.chat and messages shapes marker-free', () => {
   const turns = [
     { role: 'user', content: 'u1' },
     { role: 'assistant', content: 'a1' },
@@ -130,11 +130,15 @@ test('unofficial cli-hop of converted openai.chat matches converted messages sta
     toClaudeMessages('anthropic.messages', { model: MODEL, max_tokens: 256, messages: turns }).claude,
     { unofficial: true },
   )
-  assert.deepEqual(stampMap(fromChat), stampMap(fromMessages))
-  assert.deepEqual(stampMap(fromChat), ['messages[2].content[0]'])
+  assert.deepEqual(stampMap(fromChat), [])
+  assert.deepEqual(stampMap(fromMessages), [])
+  assert.deepEqual(
+    fromChat.messages.map((message) => message.role),
+    fromMessages.messages.map((message) => message.role),
+  )
 })
 
-test('openai.chat multi-turn cli-hop keeps its leftover marker at wrap-compatible 5m', () => {
+test('openai.chat multi-turn cli-hop leaves current-tail boundary to native CLI', () => {
   const chat = toClaudeMessages('openai.chat', {
     model: MODEL,
     max_tokens: 256,
@@ -147,6 +151,6 @@ test('openai.chat multi-turn cli-hop keeps its leftover marker at wrap-compatibl
     ],
   }).claude
   const body = prepareCliHopBody(chat, { unofficial: true })
-  assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '5m' })
+  assert.equal(body.messages[2].content[0].cache_control, undefined)
   assert.equal(body.messages[4].content[0].cache_control, undefined)
 })

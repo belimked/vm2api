@@ -10,7 +10,6 @@ import {
   ensureClearThinkingContextManagement,
   stripInvalidThinkingBlocks,
   alignSamplingWithThinking,
-  enforceCacheLimit,
 } from './anthropic-policy.mjs'
 import { ensureUnofficialAdaptiveThinking, ensureUnofficialEffortHigh, normalizeThinkingForModel } from './thinking.mjs'
 import {
@@ -36,13 +35,12 @@ import {
 } from '../identity/official-cc-system-2.1.241.mjs'
 import {
   applyCacheTtlToBody,
-  applyCacheBreakpoints,
   enforceCacheTtlOrder,
-  forceEphemeralCacheTtl,
-  normalizeCacheBreakpoints,
+  removeCacheControlFields,
   stripIllegalCacheControlFields,
 } from './cache-ttl.mjs'
 import { apiKeyBetaHeader, setupTokenBetaHeader } from './claude-code-betas.mjs'
+import { applyOpus55RequestRules } from './model-policy.mjs'
 import { isApiKeyMode, isSetupTokenMode } from '../oauth/credential-mode.mjs'
 
 export const INFERENCE_UA = 'kin-inference/1.0'
@@ -74,43 +72,81 @@ export function stripCliOwnedSystem(system) {
   return kept.length ? kept : undefined
 }
 
-/** Wrap CLI owns tools + system + current tail; Node owns the stable previous-user boundary. */
-export const CLI_HOP_CACHE_BREAKPOINTS = Object.freeze({
-  enabled: true,
-  preserve_client: true,
-  system_tail: false,
-  tools_tail: false,
-  messages: 'rewrite',
-})
+/** Official Claude Code 2.1.278 context block. A live counter here changes the cached prefix. */
+const OFFICIAL_CONTEXT_BUDGET = '<total_tokens>15000000 tokens left</total_tokens>'
+const VOLATILE_CONTEXT_BUDGET = /<total_tokens>\d+ tokens left<\/total_tokens>/g
 
-/** Wrap CLI tools/system omit ttl, which Anthropic treats as 5m and processes first.
- * A later message 1h is the messages.N 400, so the hop wire value is 5m. */
-export const CLI_HOP_CACHE_TTL = '5m'
-
-function dropNodeCacheControl(node) {
-  if (!node || typeof node !== 'object' || !node.cache_control) return node
-  const { cache_control: _drop, ...rest } = node
-  return rest
+function stabilizeOfficialContextBudget(text) {
+  const raw = String(text ?? '')
+  if (!raw.includes('<total_tokens>')) return raw
+  return raw.replace(VOLATILE_CONTEXT_BUDGET, OFFICIAL_CONTEXT_BUDGET)
 }
 
-function dropCliOwnedBreakpoints(body) {
-  const out = { ...body }
-  if (Array.isArray(out.tools)) out.tools = out.tools.map(dropNodeCacheControl)
-  if (Array.isArray(out.system)) out.system = out.system.map(dropNodeCacheControl)
-  return out
+/** system[] is before every message breakpoint. A per-turn token counter there
+ * makes the next turn rewrite the whole prefix instead of reading it. */
+function stabilizeSystemBudget(body) {
+  if (!body || body.system == null) return body
+  if (typeof body.system === 'string') {
+    const text = stabilizeOfficialContextBudget(body.system)
+    return text === body.system ? body : { ...body, system: text }
+  }
+  if (!Array.isArray(body.system)) return body
+  let changed = false
+  const system = body.system.map((block) => {
+    if (typeof block === 'string') {
+      const text = stabilizeOfficialContextBudget(block)
+      if (text === block) return block
+      changed = true
+      return text
+    }
+    if (!block || typeof block !== 'object' || typeof block.text !== 'string') return block
+    const text = stabilizeOfficialContextBudget(block.text)
+    if (text === block.text) return block
+    changed = true
+    return { ...block, text }
+  })
+  return changed ? { ...body, system } : body
 }
 
-/** Kernel restamps the current tail, so keep only Node's stable previous-user marker. */
-function dropLastMessageBreakpoint(body) {
-  const messages = body?.messages
-  if (!Array.isArray(messages) || messages.length === 0) return body
-  const idx = messages.length - 1
-  const last = messages[idx]
-  if (!last || !Array.isArray(last.content)) return body
-  const content = last.content.map(dropNodeCacheControl)
-  const next = messages.slice()
-  next[idx] = { ...last, content }
-  return { ...body, messages: next }
+function stabilizeBlockBudget(block) {
+  if (typeof block === 'string') return stabilizeOfficialContextBudget(block)
+  if (!block || typeof block !== 'object') return block
+  let next = block
+  if (typeof block.text === 'string') {
+    const text = stabilizeOfficialContextBudget(block.text)
+    if (text !== block.text) next = { ...next, text }
+  }
+  if (typeof block.content === 'string') {
+    const content = stabilizeOfficialContextBudget(block.content)
+    if (content !== block.content) next = { ...next, content }
+  }
+  return next
+}
+
+/** Historical role=system reminders sit inside the next lookup prefix. */
+function stabilizeMessageBudgets(body) {
+  if (!Array.isArray(body?.messages)) return body
+  let changed = false
+  const messages = body.messages.map((message) => {
+    const content = message?.content
+    if (typeof content === 'string') {
+      const text = stabilizeOfficialContextBudget(content)
+      if (text === content) return message
+      changed = true
+      return { ...message, content: text }
+    }
+    if (!Array.isArray(content)) return message
+    let touched = false
+    const next = content.map((block) => {
+      const stabilized = stabilizeBlockBudget(block)
+      if (stabilized !== block) touched = true
+      return stabilized
+    })
+    if (!touched) return message
+    changed = true
+    return { ...message, content: next }
+  })
+  return changed ? { ...body, messages } : body
 }
 
 /** A CLI hop must end on a conversational user/assistant turn. Preserve older
@@ -119,7 +155,7 @@ function liftTrailingSystemMessages(body) {
   const messages = Array.isArray(body?.messages) ? body.messages : []
   let firstTrailing = messages.length
   while (firstTrailing > 0 && messages[firstTrailing - 1]?.role === 'system') firstTrailing--
-  if (firstTrailing === messages.length) return body
+  if (firstTrailing === messages.length) return stabilizeSystemBudget(body)
   const lifted = messages.slice(firstTrailing).flatMap((message) => {
     const content = message?.content
     if (typeof content === 'string') return content.trim() ? [{ type: 'text', text: content }] : []
@@ -128,33 +164,36 @@ function liftTrailingSystemMessages(body) {
       .map((block) => (typeof block === 'string' ? { type: 'text', text: block } : block))
       .filter((block) => block?.type === 'text' && String(block.text || '').trim())
   })
-  if (!lifted.length) return { ...body, messages: messages.slice(0, firstTrailing) }
+  if (!lifted.length) {
+    return stabilizeSystemBudget({ ...body, messages: messages.slice(0, firstTrailing) })
+  }
   const system = Array.isArray(body.system)
     ? body.system
     : body.system == null
       ? []
       : [{ type: 'text', text: String(body.system) }]
-  return { ...body, system: [...system, ...lifted], messages: messages.slice(0, firstTrailing) }
+  return stabilizeSystemBudget({
+    ...body,
+    system: [...system, ...lifted],
+    messages: messages.slice(0, firstTrailing),
+  })
 }
 
 /** Caller fields only. CLI owns UA / billing / metadata / layoutSystemBlocks. */
-export function prepareCliHopBody(
-  canonicalBody,
-  {
-    stream = true,
-    repaired = false,
-    cacheBreakpoints = CLI_HOP_CACHE_BREAKPOINTS,
-    cacheControlLimit = 4,
-    cacheTtl = CLI_HOP_CACHE_TTL,
-    unofficial: _unofficial = false,
-  } = {},
-) {
+export function prepareCliHopBody(canonicalBody, { stream = true, repaired = false } = {}) {
   let body = officialMessagesBody(canonicalBody, { stream })
   delete body.metadata
+  // Wrap CLI (Claude Code) throws a fatal "max_output_tokens" error if response reaches max_tokens.
+  // Probes, ping tests, and third-party UI connection checks send max_tokens: 1 (or small numbers).
+  // Ensure a safe minimum for cli-hop so output finishes with end_turn rather than hitting max_tokens.
+  if (body.max_tokens != null && Number(body.max_tokens) < 64) {
+    body.max_tokens = 1024
+  }
   const leftover = stripCliOwnedSystem(body.system)
   if (leftover == null) delete body.system
   else body.system = leftover
   body = liftTrailingSystemMessages(body)
+  body = stabilizeMessageBudgets(body)
 
   if (!repaired) {
     body = ensureUnofficialAdaptiveThinking(body)
@@ -164,30 +203,10 @@ export function prepareCliHopBody(
     body = ensureClearThinkingContextManagement(body)
   }
   body = stripInvalidThinkingBlocks(body)
+  body = applyOpus55RequestRules(body)
   body = alignSamplingWithThinking(body)
-  const ttl = CLI_HOP_CACHE_TTL
-  if (cacheTtl == null) return forceEphemeralCacheTtl(body, ttl)
   body = stripIllegalCacheControlFields(body)
-  // Node owns the stable previous-user boundary; the kernel receives the same
-  // resolved TTL and owns the current tail plus wrap-owned markers.
-  if (cacheBreakpoints) {
-    const cfg = normalizeCacheBreakpoints(cacheBreakpoints)
-    body = applyCacheBreakpoints(body, {
-      ttl,
-      config: {
-        enabled: cfg.enabled,
-        preserve_client: cfg.preserve_client,
-        system_tail: false,
-        tools_tail: false,
-        messages: cfg.enabled ? 'rewrite' : 'off',
-      },
-      inbound: body,
-    })
-  }
-  body = dropCliOwnedBreakpoints(body)
-  body = dropLastMessageBreakpoint(body)
-  body = forceEphemeralCacheTtl(enforceCacheTtlOrder(body), ttl)
-  enforceCacheLimit(body, cacheControlLimit)
+  body = removeCacheControlFields(body)
   return body
 }
 /** Wrap CLI process is spawned as sonnet-5/adaptive. Haiku rejects thinking. */

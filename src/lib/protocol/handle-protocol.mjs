@@ -68,7 +68,7 @@ import {
 } from '../core/errors.mjs'
 import { resolveWorkspaceMode, isOfficialClaudeClient } from './workspace-mode.mjs'
 import { officialMessagesBody } from './anthropic-messages.mjs'
-import { prepareOutboundEnvelope, prepareCliHopBody, CLI_HOP_CACHE_TTL } from './outbound-attempt.mjs'
+import { prepareOutboundEnvelope, prepareCliHopBody } from './outbound-attempt.mjs'
 import { loadVmIdentity, OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
 import { touchTelemetrySession } from '../vm/worker-telemetry.mjs'
 import {
@@ -94,7 +94,12 @@ import {
   personaHideForUnofficial,
   personaHideForCliZero,
 } from '../identity/crs-persona-usage.mjs'
-import { applyCacheTtlToUsage, cacheBreakpointsFromRoutingFile, resolveCacheTtl } from './cache-ttl.mjs'
+import {
+  applyCacheTtlToUsage,
+  cacheBreakpointsFromRoutingFile,
+  pinConversationCacheTtl,
+  resolveCacheTtl,
+} from './cache-ttl.mjs'
 import { ensureClaudeWebSearch, shouldInjectClaudeWebSearch } from './web-search.mjs'
 import { dispatchStreamInference } from '../transport/kernel-router.mjs'
 import { syncClaudeKernelConfigsFromFile } from '../transport/rust-kernel-supervisor.mjs'
@@ -247,6 +252,7 @@ export function createHandleProtocol(deps) {
     deliveryMode,
     toolNames = {},
     want1m = false,
+    preserveCacheBreakpoints = false,
     routing = {},
     noGoFallback = false,
   }) {
@@ -262,6 +268,7 @@ export function createHandleProtocol(deps) {
       deliveryMode,
       want1m,
       routing,
+      preserveCacheBreakpoints,
       slotWaitMs: candidate.slotWaitMs,
       noGoFallback,
       ensureCredential: (exec) => ensureWorkerCredential(exec),
@@ -573,13 +580,12 @@ export function createHandleProtocol(deps) {
       boundSessionId: stickyBound?.sessionId || '',
       boundAccountId: stickyBound?.accountId || '',
     })
-    const requestedCacheTtl = resolveCacheTtl({
-      headers: req.headers,
-      body: inbound,
-      routingFile: routingConfigPath,
-      officialTraffic,
-    })
+    const requestedCacheTtl = pinConversationCacheTtl(
+      outboundSessionId,
+      resolveCacheTtl({ headers: req.headers, body: inbound, routingFile: routingConfigPath }),
+    )
     let cacheTtl = requestedCacheTtl
+    let preserveCacheBreakpoints = false
     const cacheBreakpoints = cacheBreakpointsFromRoutingFile(routingConfigPath)
     const openaiCompat = String(protocol || '').startsWith('openai.')
     syncClaudeKernelConfigsFromFile(cfg.paths?.project, routingConfigPath)
@@ -791,10 +797,11 @@ export function createHandleProtocol(deps) {
           const cliHop = resolveOfficialCcInference(selected.vm, routingNow) === 'cli-hop'
           let hopBody = body
           if (cliHop) {
-            cacheTtl = CLI_HOP_CACHE_TTL
             const repaired = extra.repaired === true
             const resolvedPersona = resolveSlotPersonaPreset(selected.vm, routingNow)
-            if (!officialTraffic) {
+            const cliAppliesNodePersona =
+              !officialTraffic && resolvedPersona !== 'zero' && resolvedPersona !== 'official_full'
+            if (cliAppliesNodePersona) {
               hopBody = applyCrsUnofficialPersona(structuredClone(personaIn), {
                 officialClient: false,
                 routingFile: routingConfigPath,
@@ -806,14 +813,9 @@ export function createHandleProtocol(deps) {
                 identity,
               })
             }
-            const cliAppliesNodePersona = !officialTraffic && resolvedPersona !== 'zero'
             hopBody = prepareCliHopBody(repaired ? body : hopBody, {
               stream: upstreamStream,
               repaired,
-              cacheBreakpoints,
-              cacheControlLimit: Number(getRouting()?.compatibility?.cache_control_limit) || 4,
-              cacheTtl,
-              unofficial: !officialTraffic,
             })
             hopBody = await materializeRemoteImageSources(hopBody)
             if (identity) {
@@ -904,6 +906,7 @@ export function createHandleProtocol(deps) {
               deliveryMode: attemptDelivery,
               toolNames: attemptMeta?.toolNames || {},
               cacheTtl,
+              preserveCacheBreakpoints,
               want1m,
               routing: getRouting(),
               noGoFallback: !!pinVmId,
@@ -932,6 +935,7 @@ export function createHandleProtocol(deps) {
             return await dispatchStreamInference({
               exec: candidate.exec,
               cacheTtl,
+              preserveCacheBreakpoints,
               body,
               reqHeaders: req.headers,
               timeoutMs: cfg.limits.upstream_timeout_ms,

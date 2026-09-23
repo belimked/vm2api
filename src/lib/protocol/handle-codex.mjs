@@ -20,8 +20,7 @@ import { streamCodexKernel } from '../transport/codex-kernel-client.mjs'
 import { ensureCodexKernel, writeCodexKernelConfig } from '../transport/codex-kernel-supervisor.mjs'
 import { boundProxyUrl } from '../vm/egress.mjs'
 import { orderCodexSessionSlots, isCodexFailoverError, CODEX_FAILOVER_MAX } from '../pool/codex-slot-pool.mjs'
-import { readCodexAccounts } from '../vm/codex-slot.mjs'
-import { applyCodexRotate, observeHopTurnState, scheduleCodexRotateCollect } from './codex-rotate.mjs'
+import { acquireOpenAISlot, releaseOpenAISlot, reportOpenAIAttempt } from '../pool/openai-account-runtime.mjs'
 import { applyOpenaiWashLog } from './openai-wash.mjs'
 
 function sessionFrom(req, body) {
@@ -89,14 +88,6 @@ function execFor(projectRoot, vm) {
     vmId: vm.id,
     homeDir: path.join(projectRoot, 'vms', vm.id, 'cli-home'),
     vm,
-  }
-}
-
-function firstCodexAccount(projectRoot, vmId) {
-  const acc = readCodexAccounts(projectRoot, vmId)[0] || {}
-  return {
-    access_token: String(acc.access_token || acc.accessToken || '').trim(),
-    chatgpt_account_id: String(acc.chatgpt_account_id || acc.chatgptAccountId || '').trim(),
   }
 }
 
@@ -207,15 +198,25 @@ export async function handleCodexProtocol({
       },
     })
   }
-  if (picked.error === 'session_window_full') {
+  if (
+    picked.error === 'session_window_full' ||
+    picked.error === 'quota_exhausted' ||
+    picked.error === 'capacity_unavailable'
+  ) {
     stats.errors++
     logBag.via = 'codex-kernel'
-    logBag.error_code = 'session_window_full'
+    logBag.error_code = picked.error
+    const message =
+      picked.error === 'session_window_full'
+        ? 'OpenAI 号池的会话窗口已满'
+        : picked.error === 'quota_exhausted'
+          ? 'OpenAI 号池额度已耗尽'
+          : 'OpenAI 号池并发已满'
     return json(res, 503, {
       error: {
         type: 'api_error',
-        code: 'session_window_full',
-        message: 'OpenAI 号池的会话窗口已满',
+        code: picked.error,
+        message,
       },
     })
   }
@@ -287,112 +288,90 @@ export async function handleCodexProtocol({
       logBag.error_code = 'codex_kernel_unavailable'
       return json(res, 503, last.body)
     }
-    const account = firstCodexAccount(projectRoot, vm.id)
-    const applied = applyCodexRotate({
-      body: outboundBody,
-      routing: { codex },
-      account: account.chatgpt_account_id,
-      model: outboundBody.model,
-      vmId: vm.id,
-    })
-    if (applied.needCollect) {
-      const collect = ops.collectCodexRotate || scheduleCodexRotateCollect
-      collect({
-        cfg: applied.cfg,
-        vm,
-        vmId: vm.id,
-        account: account.chatgpt_account_id,
-        accessToken: account.access_token,
-        model: outboundBody.model || applied.cfg.probe_model,
-        proxyUrl: boundProxyUrl(vm.proxy),
-        collectImpl: ops.collectTurnState,
-      })
-    }
-    const hopBody = applied.body
-    const chunks = []
-    const result = await runCodexKernelHop({
-      hop,
-      args: {
-        exec: execFor(projectRoot, vm),
-        body: hopBody,
-        reqHeaders: req.headers,
-        envelope: {
-          body: hopBody,
-          stream: true,
-          session,
-          ...(applied.injected && hopBody.turn_state ? { headers: { 'x-codex-turn-state': hopBody.turn_state } } : {}),
+    acquireOpenAISlot(vm.id)
+    let attemptKind = 'failed'
+    try {
+      const chunks = []
+      const result = await runCodexKernelHop({
+        hop,
+        args: {
+          exec: execFor(projectRoot, vm),
+          body: outboundBody,
+          reqHeaders: req.headers,
+          envelope: {
+            body: outboundBody,
+            stream: true,
+            session,
+          },
         },
-      },
-      onEvent: async (line) => {
+        onEvent: async (line) => {
+          if (!stream) {
+            chunks.push(line)
+            return
+          }
+          if (!res.headersSent) writeSSEHeaders(res)
+          if (protocol === 'openai.chat' || protocol === 'openai.completions') {
+            const mapped = responsesSseToChatChunk(line)
+            if (mapped) res.write(mapped)
+            return
+          }
+          if (protocol === 'anthropic.messages') {
+            const mapped = responsesSseToAnthropicEvents(line, anthropicSse)
+            if (mapped) res.write(mapped)
+            return
+          }
+          res.write(line.endsWith('\n') ? `${line}\n` : `${line}\n`)
+        },
+      })
+      ingestCodexHop(projectRoot, vm.id, result)
+      if (result?.transport_retried) logBag.transport_retried = true
+      last = result
+      if (result?.ok) {
+        attemptKind = 'succeeded'
+        bindSticky(vm)
+        const usage = result.usage || result.body?.usage || result.body?.response?.usage || null
+        const extracted = extractOpenaiUsage(usage)
+        logBag.usage = usage
+        logBag.input_tokens = extracted?.input_tokens ?? usage?.input_tokens ?? usage?.prompt_tokens ?? null
+        logBag.output_tokens = extracted?.output_tokens ?? usage?.output_tokens ?? usage?.completion_tokens ?? null
+        logBag.cache_read_tokens =
+          extracted?.cached_tokens ?? usage?.input_tokens_details?.cached_tokens ?? usage?.cache_read_tokens ?? null
+        logBag.cache_creation_tokens =
+          extracted?.cache_write_tokens ??
+          usage?.input_tokens_details?.cache_write_tokens ??
+          usage?.cache_creation_tokens ??
+          null
+        logBag.first_token_ms = result.ttftMs ?? null
+        reportOpenAIAttempt(vm.id, 'succeeded', result.ttftMs ?? null)
+        logBag.final_state = result.terminalState || 'verified'
+        logBag.upstream_model = converted.body.model
+        if (i > 0) logBag.codex_failed_over = true
         if (!stream) {
-          chunks.push(line)
-          return
+          const assembled = assembleCodexBodyFromSse(chunks, result.body || {})
+          const body =
+            protocol === 'anthropic.messages' ? codexBodyToAnthropicMessage(assembled, converted.body.model) : assembled
+          return json(res, 200, body)
         }
         if (!res.headersSent) writeSSEHeaders(res)
-        if (protocol === 'openai.chat' || protocol === 'openai.completions') {
-          const mapped = responsesSseToChatChunk(line)
-          if (mapped) res.write(mapped)
-          return
-        }
-        if (protocol === 'anthropic.messages') {
-          const mapped = responsesSseToAnthropicEvents(line, anthropicSse)
-          if (mapped) res.write(mapped)
-          return
-        }
-        res.write(line.endsWith('\n') ? `${line}\n` : `${line}\n`)
-      },
-    })
-    ingestCodexHop(projectRoot, vm.id, result)
-    if (applied.cfg.enabled) {
-      observeHopTurnState({
-        headers: result?.headers,
-        account: account.chatgpt_account_id,
-        model: outboundBody.model,
-        vmId: vm.id,
-        lengths: applied.cfg.state_lengths,
-      })
-    }
-    if (applied.injected) logBag.codex_rotate_injected = true
-    if (result?.transport_retried) logBag.transport_retried = true
-    last = result
-    if (result?.ok) {
-      bindSticky(vm)
-      const usage = result.usage || result.body?.usage || result.body?.response?.usage || null
-      const extracted = extractOpenaiUsage(usage)
-      logBag.usage = usage
-      logBag.input_tokens = extracted?.input_tokens ?? usage?.input_tokens ?? usage?.prompt_tokens ?? null
-      logBag.output_tokens = extracted?.output_tokens ?? usage?.output_tokens ?? usage?.completion_tokens ?? null
-      logBag.cache_read_tokens =
-        extracted?.cached_tokens ?? usage?.input_tokens_details?.cached_tokens ?? usage?.cache_read_tokens ?? null
-      logBag.cache_creation_tokens =
-        extracted?.cache_write_tokens ??
-        usage?.input_tokens_details?.cache_write_tokens ??
-        usage?.cache_creation_tokens ??
-        null
-      logBag.first_token_ms = result.ttftMs ?? null
-      logBag.final_state = result.terminalState || 'verified'
-      logBag.upstream_model = converted.body.model
-      if (i > 0) logBag.codex_failed_over = true
-      if (!stream) {
-        const assembled = assembleCodexBodyFromSse(chunks, result.body || {})
-        const body =
-          protocol === 'anthropic.messages' ? codexBodyToAnthropicMessage(assembled, converted.body.model) : assembled
-        return json(res, 200, body)
+        return res.end()
       }
-      if (!res.headersSent) writeSSEHeaders(res)
-      return res.end()
+      if (res.headersSent) {
+        reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
+        stats.errors++
+        logBag.error_code = result?.body?.error?.code || 'codex_upstream'
+        logBag.upstream_status = result?.status || 0
+        return res.end()
+      }
+      if (i + 1 < candidateIds.length && isCodexFailoverError(result)) {
+        reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
+        leaveSticky(vm)
+        continue
+      }
+      reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
+      break
+    } finally {
+      releaseOpenAISlot(vm.id)
     }
-    if (res.headersSent) {
-      stats.errors++
-      logBag.error_code = result?.body?.error?.code || 'codex_upstream'
-      logBag.upstream_status = result?.status || 0
-      return res.end()
-    }
-    if (i + 1 < candidateIds.length && isCodexFailoverError(result)) {
-      leaveSticky(vm)
-      continue
-    }
-    break
   }
   stats.errors++
   logBag.error_code = last?.body?.error?.code || 'codex_upstream'
