@@ -143,7 +143,7 @@ test('kernel upload rejects non-ELF payloads', async () => {
   }
 })
 
-function releaseFetch(elf, { assetBytes = elf, status = 200 } = {}) {
+function releaseFetch(elf, { assetBytes = elf, cliBytes = fakeElf64Amd64('github-cli-node'), status = 200 } = {}) {
   return async (url) => {
     const href = String(url)
     if (href.endsWith('/releases/latest')) {
@@ -156,6 +156,11 @@ function releaseFetch(elf, { assetBytes = elf, status = 200 } = {}) {
               size: assetBytes.length,
               url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/9',
             },
+            {
+              name: 'cli-node',
+              size: cliBytes.length,
+              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/10',
+            },
           ],
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -165,6 +170,12 @@ function releaseFetch(elf, { assetBytes = elf, status = 200 } = {}) {
       return new Response(assetBytes, {
         status,
         headers: { 'content-length': String(assetBytes.length) },
+      })
+    }
+    if (href.endsWith('/releases/assets/10')) {
+      return new Response(cliBytes, {
+        status,
+        headers: { 'content-length': String(cliBytes.length) },
       })
     }
     throw new Error(`unexpected ${href}`)
