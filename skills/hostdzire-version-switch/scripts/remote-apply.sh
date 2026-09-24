@@ -49,6 +49,14 @@ mkdir -p "$ROOT/share"
 cp -a "$STAGE/share/wrap-cli" "$ROOT/share/wrap-cli"
 chmod 755 "$ROOT/share/wrap-cli/cli-node" "$ROOT/share/wrap-cli/kin-kernel" "$ROOT/share/wrap-cli/kin-kernel.bin" || true
 
+if [ -f "$STAGE/share/crag/kin-kernel" ]; then
+  mkdir -p "$ROOT/share/crag" "$BAK/share/crag"
+  if [ -f "$ROOT/share/crag/kin-kernel" ]; then
+    cp -a "$ROOT/share/crag/kin-kernel" "$BAK/share/crag/"
+  fi
+  cp -a "$STAGE/share/crag/kin-kernel" "$ROOT/share/crag/kin-kernel"
+  chmod 755 "$ROOT/share/crag/kin-kernel"
+fi
 rsync -a --delete --exclude dl "$STAGE/web/dist/" /var/www/kin-console/
 ln -sfn /var/www/kin-console-dl /var/www/kin-console/dl
 chown -R kincli:kincli /var/www/kin-console

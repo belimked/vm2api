@@ -7,6 +7,11 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { SettingRow } from '@/components/setting-row'
+import {
+  DATAPLANE_HINT,
+  HOP_TRANSPORT_LABEL,
+  dataplaneLabel,
+} from '@/features/vm/dataplane-contract'
 
 const SESSION_SLOT_STEPS = [1, 2, 4, 8, 12, 16, 20]
 
@@ -24,16 +29,40 @@ export function KernelRoutingPane(props: {
         <CardTitle>Claude 内核</CardTitle>
       </CardHeader>
       <CardContent className='divide-y'>
-        <SettingRow label='推理路径'>
-          <span className='text-sm'>Rust · Claude Code cli-hop</span>
+        <SettingRow label='数据面' desc={DATAPLANE_HINT}>
+          <Select
+            value={String(props.value.dataplane || 'wrap')}
+            onValueChange={(value) =>
+              props.onChange({ ...props.value, dataplane: value })
+            }
+          >
+            <SelectTrigger className='w-56'>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value='wrap'>{dataplaneLabel('wrap')}</SelectItem>
+              <SelectItem value='crag'>{dataplaneLabel('crag')}</SelectItem>
+            </SelectContent>
+          </Select>
+        </SettingRow>
+        <SettingRow
+          label='推理路径'
+          desc='Node 到槽内核的运输。真正跑 CLI 的是上面的数据面。'
+        >
+          <span className='text-sm'>{HOP_TRANSPORT_LABEL}</span>
         </SettingRow>
         <SettingRow label='凭证归属'>
           <span className='text-sm'>
-            宿主机写 credentials.json，槽内 kernel / CLI 只读
+            宿主机写 credentials.json，槽内 kernel 与 wrap cli-node / 官方
+            claude 只读
           </span>
         </SettingRow>
         <SettingRow label='预开 native 位'>
-          <span className='text-sm tabular-nums'>20（固定）</span>
+          <span className='text-sm tabular-nums'>
+            {String(props.value.dataplane || 'wrap') === 'crag'
+              ? '最多 20（懒启动）'
+              : '20（固定）'}
+          </span>
         </SettingRow>
         <SettingRow
           label='默认 session 槽位'

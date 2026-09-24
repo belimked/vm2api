@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.3.45 — 2026-09-24
+
+- 透明出口 DNS 自动 fallback：kin-egress 按 CF DoH → Google DoH → 8.8.8.8:53 → 1.1.1.1:53 依次尝试（单个 4s），记住上次成功的上游。出口连不上 1.1.1.1:443 时槽位不再整体解析失败。
+- 代理页新增「出口 DNS」下拉：选择优先使用的 DNS，其余自动排在后面兜底；保存后重载已绑定出口，不重建槽。
+
+已部署机升级：覆盖控制面、前端和 `bin/kin-egress`，重启 Node 一次。已运行的 kin-egress 需在面板切换一次出口 DNS 或重启出口后才用上新二进制。不要 `docker rm` 槽。
+
+## 1.3.44 — 2026-09-24
+
+- 测试对话、设置 → 协议、虚拟机详情、内核页文案区分运输（Rust cli-hop）和数据面（wrap `cli-node` / crag 官方 Claude）。
+- 测试日志不再把 rust cli-hop 一律写成 wrap。
+
+已部署机升级：覆盖控制面和前端并重启 Node 一次。不改槽 ELF。不要 `docker rm` 槽。
+
+## 1.3.43 — 2026-09-24
+
+- 内核页两个对等卡片：wrap（`cli-node`）和 crag（官方 Claude Code）。点卡片确认后切换，槽表显示每槽内核。Codex 不动。
+- crag wrapper 在槽内有 `glibc239` 时用它加载 ELF（debian-12 没有 GLIBC 2.39）。
+- HostDzire overlay 现在会铺 `share/crag/kin-kernel`。
+
+已部署机升级：覆盖控制面和前端并重启 Node 一次。内核页可在 wrap / crag 之间切换。不要 `docker rm` 槽。
+
+## 1.3.42 — 2026-09-24
+
+- 内核页可切换数据面：wrap（`cli-node` 一进程 20 native 槽）或 crag（官方 Claude Code，一槽一 `claude -p`，懒启动）。
+- `POST /api/panel/dataplane` 写 `routing.inference.dataplane`、铺对应 ELF、`writeKernelConfig`、重启槽内核。不改凭证，不删容器。
+- GitHub 拉取现在会顺带下载 Release 附件 `kin-kernel-crag`（没有就跳过）。仓内路径 `share/crag/kin-kernel`。
+- 切 crag 要求槽内已有官方 `/home/kincli/.local/bin/claude`。
+
+已部署机升级：覆盖控制面和前端并重启 Node 一次。要用 crag：内核页切数据面，或 `wrap-cli/sync` 后重启槽 dataplane。不要 `docker rm` 槽。
+
+## 1.3.41 — 2026-09-24
+
+- 槽内核加 job 看门狗。CLI 超过 `KIN_JOB_IDLE_SECS`（默认 180 秒）没有任何输出帧，就给客户端回 `job idle timeout` 并发 `kin_cancel`，slot 在 CLI 回 ack 后释放。以前这种静默 job 会永久占住 slot，20 个占满后整个槽一直 `slot_busy`。
+- `kin_cancel` 超过 `KIN_CANCEL_ACK_SECS`（默认 30 秒）仍无 ack，该 slot 标为不可用并计入 `/internal/health` 的 `wedged_slots`。迟到的 ack 会让它恢复。
+- 客户端在 CLI 静默期间断开，现在立即取消 job，不再等下一帧。
+- 控制面：`ready_slots=0` 且 `wedged_slots>0` 视为内核坏了，不再当“忙”一直等，按原有路径重启槽内核。
+- 文档：`502 incomplete_response` 的含义、常见原因和自查命令写进 [docs/API.md](docs/API.md)。同一个槽全部失败、每次约 20–30 秒、面板代理探测却是绿的，多半是宿主机防火墙拦住了槽容器到 `kin-egress` 网关这一跳。
+- 部署：[docs/DEPLOY.md](docs/DEPLOY.md) 新增「防火墙（UFW / firewalld）」。绑远程 SOCKS5 的槽要放行 `keg*` 网卡到 20000–35999 端口（TCP + UDP）的入站；vm2api 不改宿主 INPUT 规则。本地出口不涉及。
+
+已部署机升级：覆盖控制面并重启 Node 一次，再 `wrap-cli/sync` 把新 `kin-kernel.bin` 铺到槽并重启槽内 dataplane。不要 `docker rm` 槽。开了 UFW / firewalld 入站默认拒绝的机器，按 DEPLOY.md 放行一次。
+
+## 1.3.40 — 2026-09-24
+
+- 额度、刷新、profile、models、count-tokens 改到槽内 `kin-worker oauth`。Node 不再直连 Anthropic。
+- hello 之后在槽里跑 CLI `/usage`，失败再试 2 次。账号等级以官方 `/api/oauth/profile` 为准。
+- 去掉 `quota_via`、`cli_stats`、`usage_fallback`、`stats_prompt`。旧键读入时丢弃。删除宿主 `host-anthropic` 与 `host-token-refresh`。
+- `kin-worker` 带上 oauth 子命令。发布的 `kin-kernel` 仍是仓内动态 ELF，不是 v1.3.39 附件上那份 UPX。
+
+已部署机升级：覆盖控制面并重启 Node 一次。`kin-worker` 按文件挂进槽，已有槽要 `docker restart` 才能看到新二进制，不要 `docker rm`。不要覆盖 `routing.json`。内核不用 `wrap-cli/sync`。
+
 ## 1.3.39 — 2026-09-24
 
 - cch 对齐 Claude Code 2.1.280。种子 `0x4D659218E32A3268`。哈希原文字符串：第一处 `cch` 回到 `00000`，清空所有 `"model"` 值，切掉 `fallbacks`、`fallback_credit_token` 和数字 `max_tokens`。发出去的 body 仍保留原值。

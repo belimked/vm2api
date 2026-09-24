@@ -175,6 +175,8 @@ export type Vm = {
   resolved_inference_engine?: 'go' | 'rust' | null
   persona_preset?: string | null
   resolved_persona_preset?: string | null
+  dataplane?: 'wrap' | 'crag' | null
+  resolved_dataplane?: 'wrap' | 'crag' | null
   kernel?: string
   region?: string
   /** 槽位环境时区（容器 `TZ` + persona `# Environment`）。 */
@@ -315,6 +317,10 @@ export type OfficialCcStatus = {
   hello_ok?: boolean
   usage_ok?: boolean
   account_tier?: string
+  /** `profile` = 官方 /api/oauth/profile；`usage` = /usage 推断兜底。 */
+  account_tier_source?: string
+  /** 槽内 GET /v1/models 返回的模型 id。 */
+  available_models?: string[]
   exit_code?: number | null
   resident?: boolean
   resident_ok?: boolean

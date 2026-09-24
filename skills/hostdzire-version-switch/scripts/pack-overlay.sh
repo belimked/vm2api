@@ -35,6 +35,11 @@ for b in kin-kernel kin-codex-kernel kin-cookie-auth kin-egress kin-worker; do
 done
 cp -a share/wrap-cli "$OUT/share/"
 rm -rf "$OUT/share/wrap-cli/cli-dist" "$OUT/share/wrap-cli/bun"
+if [ -f share/crag/kin-kernel ]; then
+  mkdir -p "$OUT/share/crag"
+  cp -a share/crag/kin-kernel "$OUT/share/crag/"
+  chmod 755 "$OUT/share/crag/kin-kernel"
+fi
 cp -a web/dist "$OUT/web/"
 tar -C "$OUT" -czf "$TGZ" .
 echo "$TGZ"
