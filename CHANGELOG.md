@@ -1,9 +1,55 @@
 # Changelog
 
+## 1.3.39 — 2026-09-24
+
+- cch 对齐 Claude Code 2.1.280。种子 `0x4D659218E32A3268`。哈希原文字符串：第一处 `cch` 回到 `00000`，清空所有 `"model"` 值，切掉 `fallbacks`、`fallback_credit_token` 和数字 `max_tokens`。发出去的 body 仍保留原值。
+- 主 Messages beta 对齐 2.1.280 linux-x64 sdk-cli 抓包。`advanced-tool-use` 与 `thinking-binding-controls` 一起发，并带上 `mid-conversation-system-clear-at`、`extended-cache-ttl`、`cache-diagnosis`。不加 `context-1m`。
+- 重编 `share/wrap-cli/cli-node`，UPX 5.0.1，124MB 压到 33MB。
+- GitHub 拉取和一键内核重装同时下载 Release 里的 `kin-kernel` 和 `cli-node`，写进仓内后再铺到槽。缺 `cli-node` 附件就失败，不再只用仓内旧母本。
+
+已部署机升级：覆盖控制面并重启 Node 一次。槽内二进制这次没有新文件，不必 `wrap-cli/sync`。不要 `docker rm` 槽。
+
+## 1.3.38 — 2026-09-24
+
+- 额度用尽现在会挡住调度（对齐 sub2api `RateLimitService`）。kernel cli-hop 先回 200 再流出 `event: error`，也会把额度用尽包成 502 `provider_error`。传输层按报错内容还原成 429 / 529 / 401，不再落进 `http_200` 直接停止。
+- `You've hit your limit · resets 11am (America/New_York)` 按原文时区解析出 reset，写进 `rate_limit_reset_at`。解析不出就冷却 30 分钟，并触发一次 `/usage` 探测。529 写 `overload_until`，10 分钟。不再沿用已过期的旧 reset。
+- 调度先看 `rate_limit_reset_at` / `overload_until`。被动用量、选号时的额度同步、成功请求都不能提前解除。只有到了 reset，或上游再回 `5h-status=allowed`，才解除。被挡住的号会解掉会话绑定。
+- 空跳（没有任何可见输出）先同号重试一次，仍然失败就暂停该号 60 秒并切号，不再直接回 502。诊断固定 vm 时保持原来的行为。额度用尽、过载、鉴权错误不再 SIGKILL 槽内 CLI。
+- 面板显示“限流中 / 过载冷却”和解除时间。新配置 `rate_limit.fallback_cooldown_min` / `overload_cooldown_min` / `empty_response_cooldown_sec` 有默认值，不用改 `routing.json`。
+
+已部署机升级：覆盖控制面并重启 Node 一次，不需要 `wrap-cli/sync`。二进制未变。不要 `docker rm` 槽。
+
+
+## 1.3.37 — 2026-09-23
+
+- 播种默认 `grove_enabled: false`（`settings.json` / `kin-seed.json` 一起）。调用方传 `true` 也会被压回 false。不向 Anthropic 账号发 PATCH。
+- 遥测开：写 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`，`disable_nonessential_traffic: true`，其它 kill switch 仍删除。遥测关：该项写 `0`，旗标 false。面板预设、遥测页、官方初装 env、播种对齐脚本同一极性。
+- 官方 Claude Code 把该变量的任何已设值（包括 `"0"`）都当成 essential-traffic。已有槽的磁盘文件要等下一次播种或官方初装才变。
+
+已部署机升级：覆盖控制面和前端并重启 Node 一次，不需要 `wrap-cli/sync`。二进制未变。不要 `docker rm` 槽。
+
+## 1.3.36 — 2026-09-23
+
+- Setup Token 导入选择 session 时，`curl: (97) User was rejected by the SOCKS5 server (1 1)` 是槽位 SOCKS5 拒绝了用户名或密码。sessionKey 还没发出去。面板改为 `proxy_auth_rejected`（400），不再把这段 curl 报错当成 sessionKey 失效或 Cloudflare。
+
+已部署机升级：只覆盖控制面并重启 Node 一次，不需要 `wrap-cli/sync`。二进制未变。不要 `docker rm` 槽。
+
+## 1.3.35 — 2026-09-23
+
+- 加强经中继转发的官方 Claude Code 识别。sub2api 只在 body 还带着 billing 块时认 `Go-http-client`；有的中继会把 billing 头剥掉，只留下 `anthropic-beta: claude-code-20250219`、官方 `user_id` 和官方 system 正文。这类请求现在也算官方流量：不注入 persona、不改 system 前缀。只有身份那一行、没有这个 beta 的第三方请求仍然不认。
+
+已部署机升级：只覆盖控制面并重启 Node 一次，不需要 `wrap-cli/sync`。二进制未变。不要 `docker rm` 槽。
+
+## 1.3.34 — 2026-09-23
+
+- 修正 1.3.33：结尾的 `role=system` 提醒对所有 cli-hop 请求都保持原位，不再只限被识别为官方 Claude Code 的请求。经中继转发的官方客户端 UA 被改成 `Go-http-client`、billing 头也被剥掉，会落到第三方分支，第 2 轮仍然整段重写缓存（线上 `6cd037a8`，`cache_prefix` 断在 `system`）。不支持 `role=system` 的模型（Haiku）仍然搬移。
+
+已部署机升级：只覆盖控制面并重启 Node 一次，不需要 `wrap-cli/sync`。二进制未变。不要 `docker rm` 槽。
+
 ## 1.3.33 — 2026-09-23
 
 - 修复官方 Claude Code 走 cli-hop 时 prompt cache 只写不读。Node 按 VM 的 HTTP beta（不含 `mid-conversation-system`）把每轮的 `role=system` 提醒（`<total_tokens>` 等）搬进 `system[]`，`system` 每轮都变长，缓存前缀从 system 开始就对不上。但 cli-node 发出的请求自带这个 beta，内核也不转发 envelope 头。现在 cli-hop 的 envelope 不再按这组 beta 改写 body；只有不支持 `role=system` 的模型（Haiku）仍在 `prepareCliHopBody` 里搬移。第三方请求路径不变。
-- 官方 Claude Code 结尾的 `role=system` 提醒（首轮是 SessionStart 上下文，之后是 `<total_tokens>`）不再搬进 `system[]`，按原位置发出。原先 cli-node 把它拼进主提示词那个 system 块，第 2 轮以及每次提醒内容变化的那一轮都会整段重写缓存。第三方请求仍然搬移，保证以 user/assistant 结尾。
+- 官方 Claude Code 结尾的 `role=system` 提醒（首轮是 SessionStart 上下文，之后是 `<total_tokens>`）不再搬进 `system[]`，按原位置发出。原先 cli-node 把它拼进主提示词那个 system 块，第 2 轮以及每次提醒内容变化的那一轮都会整段重写缓存。第三方请求当时仍然搬移，后续版本起也保持原位。
 - 新增缓存前缀检测：同一账号、同一出站会话的每一轮，和上一轮比较 tools → system → messages，第一处不同写进调试日志的 `cache_prefix`，并在 Node 日志打 `[cache-prefix] … broke at …`。之前只看 token 数，只写不读的问题好几天都没被发现。客户端 `/compact` 后报一次断点属正常。
 - `/wrap` 改为槽更新页：从 GitHub 拉取或本地上传，都只更新仓内 kernel；cli-hop 重装按勾选的槽或全部槽逐个执行并显示进度，「替换此槽」只改一台。右侧卡片新增「一键全部重装最新内核」，把最新 `cli-node` 和 cli-hop `kin-kernel` 装进全部槽。
 

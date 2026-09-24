@@ -5,7 +5,7 @@
 services:
   vm2api:
     # Default to OUR fork's prebuilt image, not upstream's (which lacks our patches).
-    image: ${VM2API_IMAGE:-ghcr.io/belimked/vm2api}:${VM2API_IMAGE_TAG:-cus-v1.3.33}
+    image: ${VM2API_IMAGE:-ghcr.io/belimked/vm2api}:${VM2API_IMAGE_TAG:-cus-v1.3.39}
     container_name: ${VM2API_CONTAINER_NAME:-vm2api}
     restart: unless-stopped
     init: true

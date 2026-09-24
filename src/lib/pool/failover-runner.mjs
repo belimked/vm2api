@@ -1,4 +1,9 @@
-import { classifyUpstreamResult, repairAnthropicRequest, shouldContinue } from './upstream-error-policy.mjs'
+import {
+  classifyUpstreamResult,
+  isFableModel,
+  repairAnthropicRequest,
+  shouldContinue,
+} from './upstream-error-policy.mjs'
 import { listQuotaFromHeaders } from './quota-window.mjs'
 import {
   isCompleteAssistantMessage,
@@ -212,8 +217,16 @@ function canRetrySameAccount(policy, used, config, hopMs) {
   const maxRetries = Number(config.max_same_account_retries ?? 0)
   const maxHopMs = Number(config.same_account_retry_max_hop_ms ?? 10_000)
   if (!policy?.retrySameAccount || used >= maxRetries) return false
-  if (policy.reason === 'incomplete_assistant') return true
+  if (policy.reason === 'incomplete_assistant' || policy.reason === 'empty_response') return true
   return hopMs < maxHopMs
+}
+
+/**
+ * Same-account budget spent on an empty / thinking-only hop: park the slot
+ * briefly and switch (sub2api TempUnscheduleRetryableError → tempUnscheduleEmptyResponse).
+ */
+function isRetryableEmptyHop(policy) {
+  return policy?.reason === 'incomplete_assistant' || policy?.reason === 'empty_response'
 }
 
 function dropIncompleteSession(scheduler, selected, bindKeys, result, policy) {
@@ -267,18 +280,22 @@ export class FailoverRunner {
     scheduler,
     stickyRouter = null,
     attemptsRepo = null,
+    rateLimitService = null,
     config = {},
     onProxyFailure = null,
     onCredentialFailure = null,
     onFablePlanDenied = null,
+    onFableSuccess = null,
   } = {}) {
     this.scheduler = scheduler
     this.stickyRouter = stickyRouter
     this.attemptsRepo = attemptsRepo
+    this.rateLimitService = rateLimitService
     this.config = { ...DEFAULTS, ...(config || {}) }
     this.onProxyFailure = onProxyFailure
     this.onCredentialFailure = onCredentialFailure
     this.onFablePlanDenied = onFablePlanDenied
+    this.onFableSuccess = onFableSuccess
     this.sessionTails = new Map()
   }
 
@@ -495,6 +512,20 @@ export class FailoverRunner {
         )
         dropIncompleteSession(this.scheduler, selected, bindKeys, result, policy)
 
+        // One writer for rate_limit_reset_at / overload_until (sub2api HandleUpstreamError).
+        const hardBlock =
+          !result?.committed && !pinVmId
+            ? this.rateLimitService?.handleUpstreamError?.({
+                accountId: selected.accountId,
+                vmId: selected.vmId,
+                result,
+                policy,
+              }) || null
+            : null
+        if (hardBlock?.until && policy.action === 'continue-and-cooldown' && policy.scope === 'account') {
+          policy = { ...policy, cooldownUntil: hardBlock.until }
+        }
+
         lastResult = result
         lastPolicy = policy
         notifyProxyFailure(this.onProxyFailure, selected, policy)
@@ -535,6 +566,11 @@ export class FailoverRunner {
         }
         if (verifiedSuccess(result)) {
           this.scheduler.markSuccess(selected, { workerStatus: result.workerStatus || null, countUsage })
+          if (isFableModel(model) && typeof this.onFableSuccess === 'function') {
+            try {
+              this.onFableSuccess({ selected, model })
+            } catch {}
+          }
           bindAll({
             accountId: selected.accountId,
             vmId: selected.vmId,
@@ -583,19 +619,24 @@ export class FailoverRunner {
           }
           continue
         }
-        // A terminal 2xx without a complete assistant message is request/CLI
-        // state, not account health. One same-slot recovery is useful; replaying
-        // the same conversation across the pool breaks affinity and multiplies cost.
-        if (policy.reason === 'incomplete_assistant') {
-          return {
-            ...incompleteAssistantClientError(result),
-            via: result?.via || 'pool-failover',
-            accountId: selected.accountId,
-            vmId: selected.vmId,
-            attemptCount: attemptNo,
-            finalState: 'incomplete',
-            policy,
+        // Same-account budget spent on an empty / thinking-only hop: park this
+        // slot briefly and move on (sub2api tempUnscheduleEmptyResponse). Pinned
+        // diagnostics keep the old stop so a master pin never hops.
+        if (isRetryableEmptyHop(policy)) {
+          if (pinVmId) {
+            return {
+              ...incompleteAssistantClientError(result),
+              via: result?.via || 'pool-failover',
+              accountId: selected.accountId,
+              vmId: selected.vmId,
+              attemptCount: attemptNo,
+              finalState: 'incomplete',
+              policy,
+            }
           }
+          try {
+            this.rateLimitService?.tempUnschedule?.({ accountId: selected.accountId, vmId: selected.vmId })
+          } catch {}
         }
 
         excluded.add(selected.accountId)

@@ -13,6 +13,7 @@ import { accountTierKey, mergeTierMaps, normalizeTiers } from '../pool/quota-tie
 import { setManualScheduleWins } from '../pool/schedule-policy.mjs'
 import { PoolScheduler } from '../pool/pool-scheduler.mjs'
 import { FailoverRunner } from '../pool/failover-runner.mjs'
+import { RateLimitService } from '../pool/rate-limit-service.mjs'
 import { AccountRuntimeRepo } from '../db/repos/account-runtime-repo.mjs'
 import { RequestAttemptsRepo } from '../db/repos/request-attempts-repo.mjs'
 import { normalizeOfficialCcConfig } from '../oauth/official-cc-bootstrap.mjs'
@@ -382,26 +383,44 @@ export function createRoutingRuntime(ctx) {
         poolScheduler.notifyCapacity()
       } catch {}
     }
+    const rateLimitService = new RateLimitService({
+      runtimeRepo,
+      accountQuota: ctx.accountQuota,
+      config: routingConfig.rate_limit || {},
+      onUsageProbe: ({ vmId }) => {
+        if (!vmId || typeof ctx.probeUsageOne !== 'function') return
+        Promise.resolve(ctx.probeUsageOne(vmId)).catch(() => {})
+      },
+    })
+    poolScheduler.rateLimitService = rateLimitService
     const failoverRunner = new FailoverRunner({
       scheduler: poolScheduler,
       stickyRouter: ctx.stickyRouter,
       attemptsRepo,
+      rateLimitService,
       config: routingConfig.failover || {},
       onProxyFailure: (vmId, reason) => {
         ctx.proxyPool.reportRuntimeFailure(vmId, reason)
       },
       onFablePlanDenied: ({ selected }) => {
         const accountId = selected?.accountId
-        const vmId = selected?.vmId
-        if (storedAccountTier({ accountId, vmId, vm: selected?.vm }) === 'max') return
-        if (accountId) {
+        if (accountId && selected?.model) {
           try {
-            ctx.accountQuota.setAccountTier(accountId, 'pro')
+            ctx.accountQuota.markModelUnsupported(accountId, selected.model)
           } catch {}
         }
-        if (vmId) {
+      },
+      onFableSuccess: ({ selected, model }) => {
+        const accountId = selected?.accountId
+        if (accountId) {
           try {
-            persistAccountTier(ctx.cfg.paths.project, vmId, 'pro')
+            ctx.accountQuota.setAccountTier(accountId, 'max')
+            ctx.accountQuota.clearModelUnsupported(accountId, model)
+          } catch {}
+        }
+        if (selected?.vmId) {
+          try {
+            persistAccountTier(ctx.cfg.paths.project, selected.vmId, 'max')
           } catch {}
         }
       },
