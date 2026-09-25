@@ -47,7 +47,7 @@ done
 rm -rf "$ROOT/share/wrap-cli"
 mkdir -p "$ROOT/share"
 cp -a "$STAGE/share/wrap-cli" "$ROOT/share/wrap-cli"
-chmod 755 "$ROOT/share/wrap-cli/cli-node" "$ROOT/share/wrap-cli/kin-kernel" "$ROOT/share/wrap-cli/kin-kernel.bin" || true
+chmod 755 "$ROOT/share/wrap-cli/cc-node" "$ROOT/share/wrap-cli/cli-node" "$ROOT/share/wrap-cli/kin-kernel" "$ROOT/share/wrap-cli/kin-kernel.bin" || true
 
 if [ -f "$STAGE/share/crag/kin-kernel" ]; then
   mkdir -p "$ROOT/share/crag" "$BAK/share/crag"

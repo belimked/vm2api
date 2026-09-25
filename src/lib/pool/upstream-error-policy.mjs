@@ -8,6 +8,7 @@ import {
   isWrapConnectionError,
 } from '../core/errors.mjs'
 import { isPlanLimitMessage, parseLimitResetFromMessage, parseResetMs } from './quota-window.mjs'
+import { attachFailureDecision } from './unit-decision.mjs'
 
 const ENTITLEMENT_PATTERNS = [
   /extra usage required/i,
@@ -229,7 +230,48 @@ export function clampOauth401CooldownMs(ms) {
   return Math.min(MAX_OAUTH_401_COOLDOWN_MS, Math.max(5_000, n))
 }
 
-export function classifyUpstreamResult(
+const GRANT_DEAD = /token has been revoked|oauth_revoked|invalid_grant/i
+
+function classifyOAuth401(hasRefresh, hay) {
+  if (hasRefresh === false) {
+    return {
+      scope: 'account',
+      action: 'continue-and-cooldown',
+      reason: 'oauth_no_refresh',
+      cooldownUntil: Number.MAX_SAFE_INTEGER,
+      retrySameAccount: false,
+    }
+  }
+  if (GRANT_DEAD.test(String(hay || ''))) {
+    return {
+      scope: 'account',
+      action: 'continue-and-cooldown',
+      reason: 'oauth_revoked',
+      cooldownUntil: Number.MAX_SAFE_INTEGER,
+      retrySameAccount: false,
+    }
+  }
+  return {
+    scope: 'credential',
+    action: 'continue',
+    reason: 'oauth_refresh_required',
+    cooldownUntil: null,
+    retrySameAccount: true,
+  }
+}
+
+function overloadedUnit(now) {
+  return {
+    scope: 'provider',
+    action: 'continue',
+    reason: 'provider_overloaded',
+    cooldownUntil: null,
+    retrySameAccount: false,
+    circuit: true,
+  }
+}
+
+function classifyUpstreamResultRaw(
   result = {},
   {
     model = null,
@@ -281,20 +323,7 @@ export function classifyUpstreamResult(
         cooldownUntil: null,
       }
     }
-    if (hasRefresh === false) {
-      return {
-        scope: 'account',
-        action: 'continue-and-cooldown',
-        reason: 'oauth_no_refresh',
-        cooldownUntil: Number.MAX_SAFE_INTEGER,
-      }
-    }
-    return {
-      scope: 'account',
-      action: 'continue-and-cooldown',
-      reason: 'oauth_revoked',
-      cooldownUntil: Number.MAX_SAFE_INTEGER,
-    }
+    return classifyOAuth401(hasRefresh, hay)
   }
 
   if (result.committed) {
@@ -402,24 +431,7 @@ export function classifyUpstreamResult(
     }
     return { scope: 'request', action: 'stop', reason: 'invalid_request', cooldownUntil: null }
   }
-  if (status === 401) {
-    if (hasRefresh === false) {
-      return {
-        scope: 'account',
-        action: 'continue-and-cooldown',
-        reason: 'oauth_no_refresh',
-        cooldownUntil: Number.MAX_SAFE_INTEGER,
-      }
-    }
-    // Worker Ensure already ran on this hop. One 401 is enough — do not park
-    // 120s and send the same access token again.
-    return {
-      scope: 'account',
-      action: 'continue-and-cooldown',
-      reason: 'oauth_revoked',
-      cooldownUntil: Number.MAX_SAFE_INTEGER,
-    }
-  }
+  if (status === 401) return classifyOAuth401(hasRefresh, hay)
   if (status === 403) {
     if (ORGANIZATION_DISABLED_PATTERNS.some((pattern) => pattern.test(message))) {
       return {
@@ -494,11 +506,13 @@ export function classifyUpstreamResult(
     }
   }
   if (status === 529) {
+    // Original gate: RateLimitService writes overload_until. Do not also open the unit circuit.
     return {
       scope: 'provider',
-      action: 'continue-and-cooldown',
+      action: 'continue',
       reason: 'provider_overloaded',
-      cooldownUntil: now + 15_000,
+      cooldownUntil: null,
+      retrySameAccount: false,
     }
   }
   if (status === 408 || status === 502 || status === 503 || status === 504 || status >= 500) {
@@ -535,15 +549,27 @@ export function classifyUpstreamResult(
         refusalTtlMs: PROVIDER_PAUSE_MS,
       }
     }
-    return {
-      scope: 'provider',
-      action: 'continue-and-cooldown',
-      reason: 'provider_overloaded',
-      cooldownUntil: now + 15_000,
-      retrySameAccount: false,
+    // A 2xx stream that died before visible output used to be rewritten to 502.
+    // Kernel may also send that 502 with terminal incomplete. Neither is overload.
+    if (
+      result.terminalState === 'incomplete' &&
+      !result.committed &&
+      !isUsagePolicyMessage(message) &&
+      !/overload/i.test(message)
+    ) {
+      return continueWithoutCooldown({
+        scope: 'stream',
+        reason: 'empty_response',
+        retrySameAccount: true,
+      })
     }
+    return overloadedUnit(now)
   }
   return { scope: 'request', action: 'stop', reason: `http_${status}`, cooldownUntil: null }
+}
+
+export function classifyUpstreamResult(result, opts) {
+  return attachFailureDecision(classifyUpstreamResultRaw(result, opts))
 }
 
 export function shouldContinue(policy) {

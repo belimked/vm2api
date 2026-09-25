@@ -6,11 +6,13 @@ import { expiresAtToMs, fmtResetClock } from '@/lib/fable-status'
 import { fmtNum, fmtUsd, usedPctOf } from '@/lib/format'
 import { tierVisual } from '@/lib/tier-visual'
 import { cn } from '@/lib/utils'
-import { isCodexVm } from '@/lib/vm-kind'
+import { isCodexVm, slotNameLabel } from '@/lib/vm-kind'
 import {
   credentialStatus,
   fleetGroup,
   poolStatus,
+  vmCircuit,
+  vmCircuitTitle,
   vmCooldown,
   vmCooldownTitle,
 } from '@/lib/vm-status'
@@ -95,15 +97,28 @@ function healthModel(vm: Vm): { dots: DotTone[]; text: string; tone: DotTone } {
 
 function StatusReason({ vm, tone }: { vm: Vm; tone: StatusTone }) {
   const mark = <StatusMark tone={tone} variant='pill' className='text-sm' />
-  if (!vmCooldown(vm)) return mark
+  const title =
+    tone.key === 'circuit'
+      ? vmCircuitTitle(vm)
+      : vmCooldown(vm)
+        ? vmCooldownTitle(vm)
+        : null
+  if (!title) return mark
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span>{mark}</span>
       </TooltipTrigger>
-      <TooltipContent>{vmCooldownTitle(vm)}</TooltipContent>
+      <TooltipContent>{title}</TooltipContent>
     </Tooltip>
   )
+}
+
+/** 冷却或熔断未关闭时显示「清冷却」；提示按实际原因给。 */
+function clearableTitle(vm: Vm): string | null {
+  if (vmCircuit(vm)) return vmCircuitTitle(vm)
+  if (vmCooldown(vm)) return vmCooldownTitle(vm)
+  return null
 }
 
 function UsageTrack({
@@ -409,7 +424,7 @@ function CostCell({ vm, week }: { vm: Vm; week: VmWeekOutcome }) {
 }
 
 function SlotCell({ vm }: { vm: Vm }) {
-  const name = vm.name || vm.id
+  const name = slotNameLabel(vm)
   const email = String(vm.email || '').trim()
   return (
     <div className={cn(LIST_COL.vm, 'min-w-0 overflow-hidden')}>
@@ -418,7 +433,7 @@ function SlotCell({ vm }: { vm: Vm }) {
         className='truncate text-[12px] text-muted-foreground'
         title={email ? name : undefined}
       >
-        {email ? name : '未绑定账号'}
+        {name}
       </div>
     </div>
   )
@@ -508,11 +523,11 @@ export function VmTable({
               </div>
               <div className={LIST_COL.actions}>
                 <div className='flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100'>
-                  {onClearCooldown && vmCooldown(vm) ? (
+                  {onClearCooldown && clearableTitle(vm) ? (
                     <Button
                       size='sm'
                       variant='ghost'
-                      title={vmCooldownTitle(vm)}
+                      title={clearableTitle(vm) || undefined}
                       className='h-8 px-2 text-sm text-muted-foreground'
                       data-row-actions
                       onClick={(e) => {

@@ -19,10 +19,31 @@ import {
 import { isApiKeyMode } from '../oauth/credential-mode.mjs'
 import { runSlotOauth } from './slot-oauth.mjs'
 import { applyClaudeSSELineToMessage, createClaudeMessageAssembler } from '../protocol/convert.mjs'
-import { isCompleteAssistantMessage } from '../core/errors.mjs'
+import { isCompleteAssistantMessage, isWrapConnectionError } from '../core/errors.mjs'
 import { extraHeadersFromLimitError, isPlanLimitMessage } from '../pool/quota-window.mjs'
 
 const MAX_BODY = 64 * 1024 * 1024
+const credentialRefreshTail = new Map()
+
+function withCredentialRefreshLock(key, fn) {
+  const prev = credentialRefreshTail.get(key) || Promise.resolve()
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const tail = prev.catch(() => {}).then(() => gate)
+  credentialRefreshTail.set(key, tail)
+  return prev
+    .catch(() => {})
+    .then(async () => {
+      try {
+        return await fn()
+      } finally {
+        release()
+        if (credentialRefreshTail.get(key) === tail) credentialRefreshTail.delete(key)
+      }
+    })
+}
 
 export function workerPaths(exec = {}) {
   const slotRoot = exec.homeDir ? path.dirname(exec.homeDir) : null
@@ -257,32 +278,44 @@ export function restoreKernelErrorStatus(result = {}, { now = Date.now() } = {})
 }
 
 /**
- * Uncommitted hop that streamed an error, or ended with no visible output,
- * gets a real status. A thinking/text hop already committed and never lands here.
+ * Uncommitted hop that streamed a real provider error gets that status.
+ * A hop that ended with no visible output stays on its 2xx status and is an
+ * empty hop. Promoting it to 502 makes a healthy VM look overloaded.
  */
+function unfinishedEmptyHop(result) {
+  return {
+    ...result,
+    ok: false,
+    terminalState: 'incomplete',
+    body: {
+      type: 'error',
+      error: {
+        type: 'api_error',
+        code: 'empty_response',
+        message: 'Upstream stream ended without visible output',
+      },
+    },
+  }
+}
+
 export function restoreUncommittedHop(result = {}, { now = Date.now() } = {}) {
   if (!result || result.committed || result.ok) return result
   if (Number(result.status) < 200 || Number(result.status) >= 300) return result
   const body = result.body
   if (body?.type === 'error' || body?.error) {
     const status = semanticStatusForStreamError(body)
+    const message = String(body?.error?.message || body?.message || '')
+    if (status === 502 && !/overload|usage policy/i.test(message)) {
+      if (isWrapConnectionError(message)) return { ...result, ok: false, terminalState: 'incomplete' }
+      return unfinishedEmptyHop(result)
+    }
     const headers =
-      status === 429
-        ? extraHeadersFromLimitError(String(body?.error?.message || ''), result.headers || {}, now)
-        : result.headers
-    // A generic 502 stream error may have left the CLI slot busy; keep it incomplete so it recycles.
+      status === 429 ? extraHeadersFromLimitError(String(message), result.headers || {}, now) : result.headers
     const terminalState = status === 502 ? result.terminalState : 'rejected'
     return { ...result, status, headers, terminalState, streamError: status !== 502 }
   }
   if (Array.isArray(body?.content) && body.content.length) return result
-  return {
-    ...result,
-    status: 502,
-    body: {
-      type: 'error',
-      error: { type: 'api_error', code: 'empty_response', message: 'Upstream stream ended without visible output' },
-    },
-  }
+  return unfinishedEmptyHop(result)
 }
 
 function dumpSessionEnvelope(envelope) {
@@ -794,19 +827,44 @@ export async function ensureWorkerCredential(exec, { force = false } = {}) {
     }
   }
 
-  const result = await runSlotOauth(exec, 'refresh', { force: !!force })
-  const body = result?.body || {}
-  const refreshedCredential = readWorkerCredentialFile(exec.homeDir)
-  const mapped = {
-    ok: !!result?.ok,
-    status: result?.status || 0,
-    refreshed: !!body.refreshed,
-    refresh_class: result?.ok ? (body.refreshed ? 'rotated' : 'already_fresh') : undefined,
-    credential: result?.ok ? credentialSummary({ ...(refreshedCredential || {}), ...body }, Date.now()) : undefined,
-    error: result?.ok ? undefined : body.error,
-  }
-  if (!mapped.ok) mapped.refresh_class = classifyCredentialRefresh(mapped)
-  return mapped
+  const snapshotRefresh = String(credential.refresh_token || '')
+  const lockKey = String(exec.homeDir || exec.vm?.id || 'credential')
+  return withCredentialRefreshLock(lockKey, async () => {
+    const live = readWorkerCredentialFile(exec.homeDir) || credential
+    const liveRefresh = String(live?.refresh_token || '')
+    if (snapshotRefresh && liveRefresh && snapshotRefresh !== liveRefresh) {
+      return {
+        ok: true,
+        status: 200,
+        refreshed: false,
+        refresh_class: 'already_fresh',
+        credential: credentialSummary(live, Date.now()),
+      }
+    }
+    const liveNow = Date.now()
+    if (!force && !needsRefresh(live.expires_at, liveNow, REFRESH_SKEW_MS) && !isApiKeyMode(live.type || live.mode)) {
+      return {
+        ok: true,
+        status: 200,
+        refreshed: false,
+        refresh_class: 'already_fresh',
+        credential: credentialSummary(live, liveNow),
+      }
+    }
+    const result = await runSlotOauth(exec, 'refresh', { force: !!force })
+    const body = result?.body || {}
+    const refreshedCredential = readWorkerCredentialFile(exec.homeDir)
+    const mapped = {
+      ok: !!result?.ok,
+      status: result?.status || 0,
+      refreshed: !!body.refreshed,
+      refresh_class: result?.ok ? (body.refreshed ? 'rotated' : 'already_fresh') : undefined,
+      credential: result?.ok ? credentialSummary({ ...(refreshedCredential || {}), ...body }, Date.now()) : undefined,
+      error: result?.ok ? undefined : body.error,
+    }
+    if (!mapped.ok) mapped.refresh_class = classifyCredentialRefresh(mapped)
+    return mapped
+  })
 }
 
 function credentialSummary(credential, now = Date.now()) {

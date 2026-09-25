@@ -6,11 +6,13 @@ import { resetCountdown } from '@/lib/fable-status'
 import { fmtNum, fmtUsd, usedPctOf } from '@/lib/format'
 import { tierVisual } from '@/lib/tier-visual'
 import { cn } from '@/lib/utils'
-import { isCodexVm, platformLabel } from '@/lib/vm-kind'
+import { isCodexVm, platformLabel, slotNameLabel } from '@/lib/vm-kind'
 import {
   claudeTier,
   credentialStatus,
   fleetGroup,
+  vmCircuit,
+  vmCircuitTitle,
   vmCooldown,
   vmCooldownTitle,
   vmCredDead,
@@ -153,7 +155,8 @@ function VmCard({
   const cd5 = hasToken ? resetCountdown(vm.reset_5h, now) : null
   const cd7 = hasToken ? resetCountdown(vm.reset_7d, now) : null
   const cdFable = hasToken ? resetCountdown(vm.reset_7d_oi, now) : null
-  const cooling = Boolean(vmCooldown(vm))
+  const tripped = Boolean(vmCircuit(vm))
+  const cooling = tripped || Boolean(vmCooldown(vm))
   const hasActions = Boolean(onClearCooldown || onReset || onDelete)
   const fiveLabel = '5h 用量'
   const sevenLabel = '7d 用量'
@@ -188,7 +191,7 @@ function VmCard({
                   skin.muted
                 )}
               >
-                {vm.email ? vm.name || vm.id : '未绑定账号'}
+                {slotNameLabel(vm)}
               </p>
             </div>
             {skin.key === 'none' ? null : (
@@ -302,7 +305,7 @@ function VmCard({
                   <Button
                     size='sm'
                     variant='ghost'
-                    title={vmCooldownTitle(vm)}
+                    title={tripped ? vmCircuitTitle(vm) : vmCooldownTitle(vm)}
                     className={cn('h-6 px-1.5 text-[11px]', skin.muted)}
                     onClick={() => onClearCooldown(vm)}
                   >

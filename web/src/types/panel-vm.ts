@@ -91,6 +91,16 @@ export type VmKernelSnapshot = {
   codex_health?: VmKernelHealth | null
 }
 
+export type VmCircuit = {
+  account_id?: string
+  state: 'closed' | 'open' | 'half_open'
+  failures: number
+  threshold: number
+  /** 毫秒时间戳；仅 open 时有值 */
+  open_until: number | null
+  open_ms: number
+}
+
 export type Vm = {
   id: string
   name?: string
@@ -133,6 +143,8 @@ export type Vm = {
   schedule_state?: 'on' | 'restricted' | 'off'
   restriction_reason?: string | null
   restriction_until?: number | null
+  /** Claude 单元熔断（Codex 为 null）。连续 5xx 达阈值后打开，到期只放 1 个探测。 */
+  circuit?: VmCircuit | null
   cooldown_until?: number
   cooldown_reason?: string
   utilization_5h?: number
@@ -176,8 +188,8 @@ export type Vm = {
   resolved_inference_engine?: 'go' | 'rust' | null
   persona_preset?: string | null
   resolved_persona_preset?: string | null
-  dataplane?: 'wrap' | 'crag' | null
-  resolved_dataplane?: 'wrap' | 'crag' | null
+  dataplane?: 'wrap' | 'cc' | 'crag' | null
+  resolved_dataplane?: 'wrap' | 'cc' | 'crag' | null
   kernel?: string
   region?: string
   /** 槽位环境时区（容器 `TZ` + persona `# Environment`）。 */
@@ -269,12 +281,30 @@ export type Vm = {
   [key: string]: unknown
 }
 
+/** `billing.by_model` 一行：同一上游模型按计费档位（tier / speed / 长上下文）拆开。 */
+export type VmBillingModelRow = {
+  model: string
+  /** 规范化后的 OpenAI 档位：`fast`（含 priority）、`flex` 或其它原值；标准档为 null */
+  service_tier?: string | null
+  /** Anthropic fast 模式为 `fast`，否则 null */
+  speed?: string | null
+  long_context?: number
+  requests: number
+  unpriced_requests?: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  total_cost: number
+}
+
 export type VmDetailPayload = {
   vm?: Vm
   kernel?: VmKernelSnapshot | null
   proxy?: VmProxySnap | null
   account?: Record<string, unknown> | null
-  billing?: Record<string, unknown> | null
+  billing?:
+    (Record<string, unknown> & { by_model?: VmBillingModelRow[] }) | null
   [key: string]: unknown
 }
 

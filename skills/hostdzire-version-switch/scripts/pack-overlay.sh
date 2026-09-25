@@ -18,10 +18,12 @@ for b in kin-kernel kin-codex-kernel kin-cookie-auth kin-egress kin-worker; do
     exit 1
   fi
 done
-if [ ! -x share/wrap-cli/cli-node ]; then
-  echo "pack-overlay: share/wrap-cli/cli-node missing" >&2
-  exit 1
-fi
+for name in cli-node cc-node; do
+  if [ ! -x "share/wrap-cli/$name" ]; then
+    echo "pack-overlay: share/wrap-cli/$name missing" >&2
+    exit 1
+  fi
+done
 
 rm -rf "$OUT"
 mkdir -p "$OUT/src/config" "$OUT/bin" "$OUT/share" "$OUT/web"

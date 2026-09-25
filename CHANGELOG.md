@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.3.52 — 2026-09-25
+
+- 空跳或只有 thinking、没有 `stop_reason` 的请求，同号重试一次后返回 502 `incomplete_response`。这一次请求不再停调、不换号。同一个号在另一次请求里再次空跳，才暂停该号 60 秒。（#131）
+- 入站体上限默认 128MB。超限在选号前返回 413 `body_too_large`。（#131）
+- Codex 模型同步带上 `gpt-6-sol` 和 `gpt-6-luna`。（#131）
+- Haiku 的 cli-hop 在 thinking 关闭时丢掉 `context_management`，避免旁路请求把槽打成 502 后拖垮号池。（#121）
+- 「不要透露隐藏推理」这类否定句不再被蒸馏守卫拦成 403。（#129）
+
+已部署机升级：只覆盖控制面并重启 Node 一次。二进制未变，不必 `wrap-cli/sync`。不要 `docker rm` 槽。
+
+## 1.3.51 — 2026-09-25
+
+- crag 不再把写死的 “persistent Crag request slot” 当作 agent 提示词。系统内容改跟槽位人设：0 注入、官方提示词、完整官方提示词。
+- 本版 `kin-kernel-crag` 换成去掉该提示词的内核。`cli-node` 和 `cc-node` 未变。
+
+已部署机升级：只换 crag kernel。内核页拉取 GitHub 后，按 crag + cc-node 重装。不要 `docker rm` 槽。
+
+## 1.3.50 — 2026-09-25
+
+- 内核页三种搭配：默认 `cli-node + kernel`；`cc-node + kernel` 用同一份 wrap kernel；`crag + cc-node` 用 crag kernel，`claude_bin` 指向仓内 `cc-node`。
+- GitHub 拉取必须同时下载 `kin-kernel`、`cli-node`、`cc-node`、`kin-kernel-crag`。本版 Release 带上 `cc-node`（Claude Code 2.1.281，UPX）和更新后的 crag kernel。
+- 计费回填不再把故意未标价的行按标准价重算，面板显示计费档。（#125）
+- 面板显示 Claude 槽位熔断，并可以手动复位。扫描候选槽不再吃掉半开探测。（#126）
+- Codex 对话的工具调用继续走 Responses 清洗。Codex 故障切换仍只用自己的错误集。
+
+已部署机升级：`cc-node` 是新二进制，crag kernel 也换了。镜像安装拉新镜像并重启控制面。源码安装覆盖控制面、`share/wrap-cli/cli-node`、`share/wrap-cli/cc-node` 和 `share/crag/kin-kernel`，重启 Node 一次，然后到内核页重装。不要 `docker rm` 槽。
+
+## 1.3.49 — 2026-09-24
+
+- `share/wrap-cli/cli-node` 改为 Bun `bun-linux-x64-baseline` 重编（同 patch、同 Bun 1.3.14，UPX 5.0.1）。不支持 AVX2 / BMI2 的 CPU 不再在槽内 SIGILL，也不再只报 `wrap cli-hop 未就绪`。（#122）
+- 控制面容器启动时，镜像内 `cli-node` 与 `share/wrap-cli/cli-node` 不同就覆盖，并在 `KIN_AUTO_SYNC_WRAP=1` 时同步到各槽。
+- 没有可见输出的跳不再改写成 502。按空跳留在原 VM 重试，不再记成过载，也不再写 `overload_until`。（#123）
+- Codex 的 200 流只要带了 token 就写入用量、`service_tier` 和费用，不再记成 `codex_upstream`。日志和 VM 计量条因此能显示实际计费。（#123）
+- 自定义槽位 id 在虚拟机列表和日志里显示真实名字，不再显示「未绑定账号」。（#123）
+
+已部署机升级：`cli-node` 二进制变了。镜像安装拉新镜像并重启控制面，启动脚本会覆盖 `cli-node`，`KIN_AUTO_SYNC_WRAP=1` 时自动 `wrap-cli/sync`。源码安装覆盖控制面和 `share/wrap-cli/cli-node`，重启 Node 一次，然后 `wrap-cli/sync`。不要 `docker rm` 槽。
+
+## 1.3.48 — 2026-09-24
+
+- 账号被额度硬闸踢出后，会话的全部粘滞别名一起解开，并让出该账号的会话窗座位，下一轮可以绑到别的 VM。
+- 选号失败不再被上一跳未完成的 assistant 改写成 502 `incomplete_response`。空池对客户端仍是 503 `overloaded_error`。空池日志不再打印 `soonest=0s`。
+- Haiku 子代理认母会话改为入站 `metadata.user_id.device_id`。同一 API key 上另一台设备的最近会话不再被占用。同一 `device_id` 两分钟内的母会话是这条主体 session；没有母会话时，该 `device_id` 的这批请求仍只占一个位。
+
+已部署机升级：只覆盖控制面并重启 Node 一次。二进制未变，不必 `wrap-cli/sync`。不要 `docker rm` 槽。
+
 ## 1.3.47 — 2026-09-24
 
 - Haiku 子代理（技能路由短请求）不再各自占一个 session。同一 API key 两分钟内有母会话时，跟母会话的 VM 和同一个 session 位；没有母会话时，同一 `device_id` 的这批请求只占一个位。

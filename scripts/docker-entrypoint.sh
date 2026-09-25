@@ -59,13 +59,13 @@ fi
 mkdir -p "$ROOT/share/wrap-cli"
 WRAP_CHANGED=0
 if [ -d /opt/vm2api/image-wrap-cli ]; then
-  # Refresh the slot dataplane binaries from the image on EVERY start, cli-node
-  # included. Upstream only seeded cli-node when missing, so a bind-mounted
-  # ./share pinned whatever was first written and a pulled image could never
-  # move it — control plane advanced while cli-node stayed behind (the split
-  # brain that broke prompt-cache reads). kin-kernel.bin was already refreshed
-  # this way; cli-node now matches it.
-  for name in kin-kernel.bin kin-kernel cli-node; do
+  # 首装先整目录落地（glibc239 / SAMPLE.json），再由下面的循环按内容覆盖可执行文件。
+  if [ ! -f "$ROOT/share/wrap-cli/cli-node" ]; then
+    cp -a /opt/vm2api/image-wrap-cli/. "$ROOT/share/wrap-cli/"
+    WRAP_CHANGED=1
+  fi
+  # cli-node 也随镜像覆盖：只在缺失时复制会让升级用户一直留着旧 ELF（#120 baseline 换不进去）。
+  for name in kin-kernel.bin kin-kernel cli-node cc-node; do
     src="/opt/vm2api/image-wrap-cli/$name"
     dest="$ROOT/share/wrap-cli/$name"
     if [ -f "$src" ]; then
@@ -77,11 +77,6 @@ if [ -d /opt/vm2api/image-wrap-cli ]; then
       mv -f "$dest.new" "$dest"
     fi
   done
-  # First-run seed of the remainder (glibc shim, SAMPLE.json) when fresh.
-  if [ ! -d "$ROOT/share/wrap-cli/glibc239" ]; then
-    cp -a /opt/vm2api/image-wrap-cli/. "$ROOT/share/wrap-cli/"
-    WRAP_CHANGED=1
-  fi
 fi
 
 if [ ! -S /var/run/docker.sock ]; then
