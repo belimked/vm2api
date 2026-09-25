@@ -109,9 +109,11 @@ function opsModelFamilyRows(byModel: OpsModelRow[]): {
 export function TrafficOps({
   ops,
   showModels = false,
+  windowLabel = '近 1 小时',
 }: {
   ops: OpsWindow | undefined
   showModels?: boolean
+  windowLabel?: string
 }) {
   const o = ops && !ops.error ? ops : {}
   const sla = o.sla != null ? o.sla * 100 : null
@@ -205,7 +207,7 @@ export function TrafficOps({
 
   return (
     <div className='space-y-3'>
-      <PanelCard title='服务质量' meta='近 1 小时'>
+      <PanelCard title='服务质量' meta={windowLabel}>
         {/* 10 格：2 列与 5 列都整除，避免 gap-px 网格尾行漏底色。 */}
         <div className='grid grid-cols-2 gap-px bg-border/60 xl:grid-cols-5'>
           {cells.map((c) => (
@@ -220,7 +222,7 @@ export function TrafficOps({
         </div>
       </PanelCard>
       {models.length ? (
-        <PanelCard title='模型家族' meta='近 1 小时'>
+        <PanelCard title='模型家族' meta={windowLabel}>
           <div className='flex h-8 items-center bg-muted/30 px-4 text-[11px] font-medium text-muted-foreground/80'>
             <div className='flex-[2]'>模型家族</div>
             <div className='flex-1 text-right'>请求</div>

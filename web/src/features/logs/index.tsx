@@ -102,7 +102,7 @@ export function LogsPage() {
   const [hiddenColumns, setHiddenColumns] = useState<HideableLogColumn[]>(() =>
     readHiddenLogColumns()
   )
-  const [logWindow, setLogWindow] = useState<'1h' | '24h'>('1h')
+  const [logWindow, setLogWindow] = useState<'1h' | '6h' | '24h'>('1h')
   const [modelDraft, setModelDraft] = useState('')
   const [modelQuery, setModelQuery] = useState('')
   const [mismatchOnly, setMismatchOnly] = useState(false)
@@ -146,7 +146,7 @@ export function LogsPage() {
     (mode === 'debug' ? 1 : 0) +
     (modelQuery ? 1 : 0) +
     (mismatchOnly ? 1 : 0) +
-    (logWindow === '24h' ? 1 : 0)
+    (logWindow !== '1h' ? 1 : 0)
 
   const saveMuted = useMutation({
     mutationFn: (next: string[]) =>
@@ -441,7 +441,7 @@ export function LogsPage() {
             <Select
               value={logWindow}
               onValueChange={(value) =>
-                setLogWindow(value === '24h' ? '24h' : '1h')
+                setLogWindow(value as '1h' | '6h' | '24h')
               }
             >
               <SelectTrigger className='w-32'>
@@ -449,6 +449,7 @@ export function LogsPage() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value='1h'>近 1 小时</SelectItem>
+                <SelectItem value='6h'>近 6 小时</SelectItem>
                 <SelectItem value='24h'>近 24 小时</SelectItem>
               </SelectContent>
             </Select>

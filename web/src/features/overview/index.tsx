@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { VIEW_TITLES } from '@/config/nav'
@@ -21,6 +22,13 @@ import {
 } from '@/lib/vm-status'
 import { cacheHitPct } from '@/lib/vm-usage'
 import { Card, CardContent } from '@/components/ui/card'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { PageHeader } from '@/components/page-header'
 import { QueryGate } from '@/components/query-gate'
 import { logStatsQueryOptions } from '@/features/logs/queries'
@@ -41,6 +49,14 @@ import {
 } from '@/features/overview/queries'
 import { StatisticsChartCard } from '@/features/overview/statistics-chart-card'
 import { TrafficOps } from '@/features/overview/traffic-ops'
+
+type OverviewOpsWindow = '1h' | '3h' | '6h' | '24h'
+const OPS_WINDOW_LABEL: Record<OverviewOpsWindow, string> = {
+  '1h': '近 1 小时',
+  '3h': '近 3 小时',
+  '6h': '近 6 小时',
+  '24h': '近 24 小时',
+}
 
 type AlertTone = 'caution' | 'warn' | 'bad'
 
@@ -73,7 +89,8 @@ function AlertChip({
 export function OverviewPage() {
   const dash = useQuery(dashboardQueryOptions())
   const usage = useQuery(usageQueryOptions())
-  const since = opsSince('1h')
+  const [opsWindow, setOpsWindow] = useState<OverviewOpsWindow>('1h')
+  const since = opsSince(opsWindow)
   const stats = useQuery(logStatsQueryOptions(since))
   const d = dash.data || {}
   const vms: Vm[] = d.vms || []
@@ -248,7 +265,33 @@ export function OverviewPage() {
             fallbackTotal={Number(summary.total_cost ?? totals.total_cost ?? 0)}
           />
 
-          <TrafficOps ops={ops} showModels />
+          <div className='flex items-center justify-between'>
+            <span className='text-sm font-medium text-muted-foreground'>
+              流量与服务质量
+            </span>
+            <Select
+              value={opsWindow}
+              onValueChange={(value) =>
+                setOpsWindow(value as OverviewOpsWindow)
+              }
+            >
+              <SelectTrigger className='w-32'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value='1h'>近 1 小时</SelectItem>
+                <SelectItem value='3h'>近 3 小时</SelectItem>
+                <SelectItem value='6h'>近 6 小时</SelectItem>
+                <SelectItem value='24h'>近 24 小时</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <TrafficOps
+            ops={ops}
+            showModels
+            windowLabel={OPS_WINDOW_LABEL[opsWindow]}
+          />
 
           <ErrorCollectionSummary
             collection={ops?.error_collection}
