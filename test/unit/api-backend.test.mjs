@@ -54,7 +54,14 @@ test('API backend applies the global official_full persona setting', async () =>
     kernel.once('error', reject)
     kernel.listen(socketPath, resolve)
   })
-  const response = { headersSent: false, on() {}, write() {}, end() {} }
+  const response = {
+    headersSent: false,
+    on() {},
+    once() {},
+    off() {},
+    write() {},
+    end() {},
+  }
   const stats = { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 }
   const handler = createHandleProtocol({
     json: (_res, status, body) => {
@@ -140,7 +147,14 @@ test('OAuth cli-hop applies the resolved Protocol custom persona template', asyn
     },
   }
   let prepared = null
-  const response = { headersSent: false, on() {}, write() {}, end() {} }
+  const response = {
+    headersSent: false,
+    on() {},
+    once() {},
+    off() {},
+    write() {},
+    end() {},
+  }
   const stats = { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 }
   const handler = createHandleProtocol({
     json: (_res, status, body) => {
@@ -206,7 +220,14 @@ test('OpenAI chat carrying claude-opus-4-8 uses the Claude pool', async () => {
   fs.writeFileSync(routingFile, JSON.stringify({ compatibility: { persona_preset: 'zero' } }))
   let poolCalls = 0
   let requestedModel = null
-  const response = { headersSent: false, on() {}, write() {}, end() {} }
+  const response = {
+    headersSent: false,
+    on() {},
+    once() {},
+    off() {},
+    write() {},
+    end() {},
+  }
   const handler = createHandleProtocol({
     json: (_res, status, body) => {
       response.status = status

@@ -77,9 +77,21 @@ test('identity replace is stable for the same inbound session', () => {
 
 test('parseUserId accepts JSON, object, and legacy underscore formats', () => {
   const json = parseUserId(JSON.stringify({ device_id: 'd', account_uuid: 'a', session_id: 's' }))
-  assert.deepEqual(json, { device_id: 'd', account_uuid: 'a', session_id: 's' })
+  assert.deepEqual(json, {
+    device_id: 'd',
+    account_uuid: 'a',
+    session_id: 's',
+    parent_session_id: '',
+    root_session_id: '',
+  })
   const obj = parseUserId({ deviceId: 'd2', accountUuid: 'a2', sessionId: 's2' })
-  assert.deepEqual(obj, { device_id: 'd2', account_uuid: 'a2', session_id: 's2' })
+  assert.deepEqual(obj, {
+    device_id: 'd2',
+    account_uuid: 'a2',
+    session_id: 's2',
+    parent_session_id: '',
+    root_session_id: '',
+  })
   const legacy = parseUserId('user_dev1_account_acc1_session_sess1')
   assert.deepEqual(legacy, { device_id: 'dev1', account_uuid: 'acc1', session_id: 'sess1' })
   assert.equal(parseUserId(''), null)
