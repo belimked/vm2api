@@ -19,7 +19,12 @@ import {
 import { isApiKeyMode } from '../oauth/credential-mode.mjs'
 import { runSlotOauth } from './slot-oauth.mjs'
 import { applyClaudeSSELineToMessage, createClaudeMessageAssembler } from '../protocol/convert.mjs'
-import { isCompleteAssistantMessage, isWrapConnectionError } from '../core/errors.mjs'
+import {
+  clientCancelledResult,
+  isClientCancelledResult,
+  isCompleteAssistantMessage,
+  isWrapConnectionError,
+} from '../core/errors.mjs'
 import { extraHeadersFromLimitError, isPlanLimitMessage } from '../pool/quota-window.mjs'
 
 const MAX_BODY = 64 * 1024 * 1024
@@ -299,12 +304,23 @@ function unfinishedEmptyHop(result) {
 }
 
 export function restoreUncommittedHop(result = {}, { now = Date.now() } = {}) {
-  if (!result || result.committed || result.ok) return result
+  if (!result || result.committed || result.ok || isClientCancelledResult(result)) return result
   if (Number(result.status) < 200 || Number(result.status) >= 300) return result
   const body = result.body
   if (body?.type === 'error' || body?.error) {
     const status = semanticStatusForStreamError(body)
     const message = String(body?.error?.message || body?.message || '')
+    const code = String(body?.error?.code || '')
+    if (code && code !== 'empty_response') {
+      const headers = status === 429 ? extraHeadersFromLimitError(message, result.headers || {}, now) : result.headers
+      return {
+        ...result,
+        status,
+        headers,
+        terminalState: status === 502 ? result.terminalState || 'incomplete' : 'rejected',
+        streamError: status !== 502,
+      }
+    }
     if (status === 502 && !/overload|usage policy/i.test(message)) {
       if (isWrapConnectionError(message)) return { ...result, ok: false, terminalState: 'incomplete' }
       return unfinishedEmptyHop(result)
@@ -639,6 +655,7 @@ export async function streamGoWorker({
         sseRateHeaders = { ...sseRateHeaders, ...event.headers }
       }
       if (event.type === 'error') lastError = event
+      if (event.type === 'message_stop') sawMessageStop = true
       const evUsage = usageFromSseEvent(event)
       if (evUsage) sseUsage = mergeUsage(sseUsage, evUsage)
       if (event.message?.model) sseModel = event.message.model
@@ -650,6 +667,7 @@ export async function streamGoWorker({
     const idleMs = Math.max(0, Number(idleTimeoutMs) || 0)
     let lastChunkAt = Date.now()
     let sawChunk = false
+    let sawMessageStop = false
     let idleTimer = null
     if (firstByteMs > 0 || idleMs > 0) {
       idleTimer = setInterval(() => {
@@ -664,6 +682,9 @@ export async function streamGoWorker({
       idleTimer.unref?.()
     }
     try {
+      // message_stop is the protocol terminal event, but the kernel still sends
+      // kin_job_done and its trailers afterward. Keep reading until the worker
+      // closes the response so a normal completion is not mistaken for cancel.
       for await (const chunk of response) {
         sawChunk = true
         lastChunkAt = Date.now()
@@ -708,7 +729,7 @@ export async function streamGoWorker({
       const meta = streamMetaFromHeaders({ ...headers, ...trailers })
       const assembled = assembler.message
       const stopReason = meta.stopReason || sseStop || assembled?.stop_reason || null
-      const complete = !lastError && isCompleteAssistantMessage({ body: assembled, stopReason })
+      const complete = !lastError && isCompleteAssistantMessage({ body: assembled, stopReason, sawMessageStop })
       if (!committed && complete) await flushCommit()
       const terminalState = complete ? 'verified' : 'incomplete'
       const rateHeaders = mergeRateLimitHeaders({ ...sseRateHeaders, ...headers, ...trailers })
@@ -724,6 +745,7 @@ export async function streamGoWorker({
         usage: mergeUsage(mergeUsage(assembled?.usage || null, sseUsage), meta.usage),
         model: meta.model || sseModel || assembled?.model || null,
         stopReason,
+        sawMessageStop,
         ttftMs,
         committed,
         terminalState,
@@ -733,6 +755,13 @@ export async function streamGoWorker({
       if (idleTimer) clearInterval(idleTimer)
     }
   } catch (error) {
+    if (signal?.aborted) {
+      return clientCancelledResult({
+        via: 'go-worker-stream',
+        ttftMs,
+        committed,
+      })
+    }
     return {
       ok: false,
       status: 0,
