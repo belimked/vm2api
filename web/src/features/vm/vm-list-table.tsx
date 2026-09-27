@@ -214,7 +214,10 @@ function PlanCell({ vm, now }: { vm: Vm; now: number }) {
       </div>
     )
   }
-  const label = skin.key === 'pro' || skin.key === 'max' ? skin.label : null
+  const label =
+    skin.key === 'pro' || skin.key === 'max' || skin.key === 'unknown'
+      ? skin.label
+      : null
   return (
     <div className='flex flex-col items-start gap-1'>
       {label ? (
@@ -227,7 +230,7 @@ function PlanCell({ vm, now }: { vm: Vm; now: number }) {
           {label}
         </span>
       ) : (
-        <span className='text-muted-foreground'>—</span>
+        <span className='text-muted-foreground'>{skin.label}</span>
       )}
       {due ? (
         <span className={cn('font-mono text-sm tabular-nums', due.cls)}>
@@ -546,49 +549,49 @@ export function VmTable({
                     <OpenaiQuotaActions vm={vm} compact />
                   ) : null}
                   <div className='flex items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100'>
-                  {onClearCooldown && clearableTitle(vm) ? (
-                    <Button
-                      size='sm'
-                      variant='ghost'
-                      title={clearableTitle(vm) || undefined}
-                      className='h-8 px-2 text-sm text-muted-foreground'
-                      data-row-actions
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onClearCooldown(vm)
-                      }}
-                    >
-                      清冷却
-                    </Button>
-                  ) : null}
-                  {onReset ? (
-                    <Button
-                      size='sm'
-                      variant='ghost'
-                      className='h-8 px-2 text-sm text-muted-foreground'
-                      data-row-actions
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onReset(vm)
-                      }}
-                    >
-                      重置
-                    </Button>
-                  ) : null}
-                  {onDelete ? (
-                    <Button
-                      size='sm'
-                      variant='ghost'
-                      className='h-8 px-2 text-sm text-destructive'
-                      data-row-actions
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onDelete(vm)
-                      }}
-                    >
-                      删除
-                    </Button>
-                  ) : null}
+                    {onClearCooldown && clearableTitle(vm) ? (
+                      <Button
+                        size='sm'
+                        variant='ghost'
+                        title={clearableTitle(vm) || undefined}
+                        className='h-8 px-2 text-sm text-muted-foreground'
+                        data-row-actions
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onClearCooldown(vm)
+                        }}
+                      >
+                        清冷却
+                      </Button>
+                    ) : null}
+                    {onReset ? (
+                      <Button
+                        size='sm'
+                        variant='ghost'
+                        className='h-8 px-2 text-sm text-muted-foreground'
+                        data-row-actions
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onReset(vm)
+                        }}
+                      >
+                        重置
+                      </Button>
+                    ) : null}
+                    {onDelete ? (
+                      <Button
+                        size='sm'
+                        variant='ghost'
+                        className='h-8 px-2 text-sm text-destructive'
+                        data-row-actions
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onDelete(vm)
+                        }}
+                      >
+                        删除
+                      </Button>
+                    ) : null}
                   </div>
                 </div>
               </div>

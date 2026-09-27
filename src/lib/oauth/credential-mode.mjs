@@ -2,6 +2,8 @@
  * Slot credential kinds: full OAuth, Setup Token (inference-only OAuth),
  * and Anthropic Console API Key.
  */
+import { flattenOauthIdentity } from './oauth-identity.mjs'
+
 export const CREDENTIAL_OAUTH = 'oauth'
 export const CREDENTIAL_SETUP_TOKEN = 'setup-token'
 export const CREDENTIAL_APIKEY = 'apikey'
@@ -28,8 +30,10 @@ export function canOfficialCc(raw) {
   return normalizeCredentialMode(raw) === CREDENTIAL_OAUTH
 }
 
+/** Official GET /api/oauth/usage|/profile. Setup-token oat is the same short-lived grant. */
 export function canOfficialUsage(raw) {
-  return normalizeCredentialMode(raw) === CREDENTIAL_OAUTH
+  const mode = normalizeCredentialMode(raw)
+  return mode === CREDENTIAL_OAUTH || mode === CREDENTIAL_SETUP_TOKEN
 }
 
 export function canCountTokens(raw) {
@@ -57,14 +61,16 @@ export function credentialModeFromOauth(oauth = {}) {
   const typed = oauth.type || oauth.mode || oauth.credential_mode
   const labeled = typed ? normalizeCredentialMode(typed) : ''
   if (labeled === CREDENTIAL_APIKEY) return CREDENTIAL_APIKEY
-  if (labeled === CREDENTIAL_SETUP_TOKEN) return CREDENTIAL_SETUP_TOKEN
   if (looksLikeConsoleApiKey(oauth.api_key || oauth.apiKey || oauth.access_token || oauth.accessToken)) {
     return CREDENTIAL_APIKEY
   }
   const scope = String(oauth.scope || (Array.isArray(oauth.scopes) ? oauth.scopes.join(' ') : ''))
-  if (scope && /user:inference/.test(scope) && !/user:profile|user:sessions:claude_code/.test(scope)) {
-    return CREDENTIAL_SETUP_TOKEN
-  }
+  // Some account exports label a full OAuth grant as setup-token. The actual
+  // scope set is authoritative: preserve profile/session scopes instead of
+  // rewriting the grant to inference-only during worker credential import.
+  if (/user:profile|user:sessions:claude_code/.test(scope)) return CREDENTIAL_OAUTH
+  if (labeled === CREDENTIAL_SETUP_TOKEN) return CREDENTIAL_SETUP_TOKEN
+  if (scope && /user:inference/.test(scope)) return CREDENTIAL_SETUP_TOKEN
   if (oauth.flavor === 'setup_token' || oauth.flavor === 'setup-token') return CREDENTIAL_SETUP_TOKEN
   return labeled || CREDENTIAL_OAUTH
 }
@@ -90,15 +96,16 @@ export function liveOauthToSetupToken(oauth = {}) {
   ) {
     throw fail('credential_kind_mismatch', 'Console API Key 不能转为 Setup Token')
   }
+  const identity = flattenOauthIdentity(oauth)
   return {
     type: CREDENTIAL_SETUP_TOKEN,
     mode: CREDENTIAL_SETUP_TOKEN,
     access_token: access,
     refresh_token: String(oauth.refresh_token || oauth.refreshToken || ''),
     expires_at: oauth.expires_at || oauth.expiresAt || null,
-    email: oauth.email || oauth.email_address || null,
-    account_uuid: oauth.account_uuid || oauth.accountUuid || null,
-    org_uuid: oauth.org_uuid || oauth.orgUuid || null,
+    email: identity.email,
+    account_uuid: identity.account_uuid,
+    org_uuid: identity.org_uuid,
     scope: 'user:inference',
     scopes: ['user:inference'],
     source: 'oauth-to-setup-token',

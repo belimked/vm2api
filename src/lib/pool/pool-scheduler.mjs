@@ -143,7 +143,8 @@ function maxSessionsOf(vm, accountQuota, account) {
 }
 
 function vmTierOf(vm) {
-  return vm?.claude?.account_tier || vm?.account_tier || null
+  if (vm?.claude?.account_tier || vm?.account_tier) return vm.claude?.account_tier || vm.account_tier
+  return vm?.claude?.has_access || vm?.has_token ? 'pro' : null
 }
 
 function priorityOf(vm, account, now) {
@@ -236,6 +237,8 @@ export class PoolScheduler {
     allowWait = true,
     pinVmId = null,
     familyVmId = null,
+    deviceVmId = null,
+    skipSessionSlot = false,
     ownerScope = PLATFORM_SCOPE,
     stickyKeys = null,
   } = {}) {
@@ -279,16 +282,30 @@ export class PoolScheduler {
         signal,
         pinVmId,
         familyVmId,
+        deviceVmId,
+        skipSessionSlot,
         sessionKey: stickyKey,
         ownerScope,
       })
       const available = candidates.filter((candidate) => this.isReservable(candidate))
-      let selected = this.pick(available, { model, stickyKey, eligible: candidates, spilled: spill, stickyKeys })
+      let selected = this.pick(available, {
+        model,
+        stickyKey,
+        eligible: candidates,
+        spilled: spill,
+        stickyKeys,
+        deviceVmId,
+      })
       if (this.lastStickyCleared) stickyCleared = true
       const reserveMisses = []
       const attempted = new Set()
       while (selected) {
-        const reservation = this.reserve(selected, { sessionKey: stickyKey, skipQuota: pinned, pinned })
+        const reservation = this.reserve(selected, {
+          sessionKey: stickyKey,
+          skipQuota: pinned,
+          pinned,
+          skipSessionSlot,
+        })
         if (reservation) return finishReserve(selected, reservation)
         // A sticky hit that loses the race stays on that account and waits.
         // Dropping the key here is how one conversation lands on a second session.
@@ -300,7 +317,7 @@ export class PoolScheduler {
             !attempted.has(candidate.accountId) && !blocked.has(candidate.accountId) && !blocked.has(candidate.vmId),
         )
         if (!remaining.length) break
-        selected = this.pick(remaining, { model, stickyKey: null, eligible: candidates })
+        selected = this.pick(remaining, { model, stickyKey: null, eligible: candidates, deviceVmId })
       }
       const effectiveCandidates = reserveMisses.length
         ? candidates.map((candidate) => {
@@ -386,6 +403,8 @@ export class PoolScheduler {
     signal,
     pinVmId = null,
     familyVmId = null,
+    deviceVmId = null,
+    skipSessionSlot = false,
     sessionKey = null,
     ownerScope = PLATFORM_SCOPE,
   } = {}) {
@@ -395,6 +414,7 @@ export class PoolScheduler {
     const candidates = []
     const pin = pinVmId ? String(pinVmId).trim() : ''
     const familyVm = familyVmId ? String(familyVmId).trim() : ''
+    const deviceVm = deviceVmId ? String(deviceVmId).trim() : ''
     for (const summary of summaries) {
       if (signal?.aborted) throw makeAbortError()
       if (pin && summary.id !== pin) continue
@@ -415,6 +435,7 @@ export class PoolScheduler {
         signal,
         pinned: !!pin,
         sessionKey,
+        skipSessionSlot,
       })
       if (!eligibility.ok) continue
       const maxConcurrency = this.effectiveMaxConcurrency(
@@ -426,6 +447,7 @@ export class PoolScheduler {
       candidates.push({
         ok: true,
         vmId: vm.id,
+        deviceAffinity: !!deviceVm && vm.id === deviceVm,
         accountId,
         vm,
         state,
@@ -435,8 +457,11 @@ export class PoolScheduler {
         inflight,
         maxConcurrency,
         sessionSlots: sessionSlotsOf(vm, this.config.default_session_slots),
-        slotHeld: this.assignedSlot(summary.id, sessionKey),
-        slotHeldBusy: this.slotInflight(summary.id, this.assignedSlot(summary.id, sessionKey)),
+        skipSessionSlot: !!skipSessionSlot,
+        slotHeld: skipSessionSlot ? null : this.assignedSlot(summary.id, sessionKey),
+        slotHeldBusy: skipSessionSlot
+          ? false
+          : this.slotInflight(summary.id, this.assignedSlot(summary.id, sessionKey)),
         usedSlots: this.usedSlotCount(summary.id),
         loadRatio: (inflight + this.waiterCount(accountId)) / maxConcurrency,
         lastUsedAt: this.lastUsed.get(accountId) || state?.last_used_at || 0,
@@ -451,7 +476,17 @@ export class PoolScheduler {
     return candidates
   }
 
-  async checkEligibility({ vm, accountId, state, model, now, signal, pinned = false, sessionKey = null }) {
+  async checkEligibility({
+    vm,
+    accountId,
+    state,
+    model,
+    now,
+    signal,
+    pinned = false,
+    sessionKey = null,
+    skipSessionSlot = false,
+  }) {
     // sub2api IsSchedulable: rate_limit_reset_at / overload_until gate before any
     // passive Extra reading or health hop. Pins are diagnostics and still reach the slot.
     const hardBlock = pinned ? null : hardBlockOf(state, now)
@@ -527,7 +562,7 @@ export class PoolScheduler {
             : {},
           policy,
           sessionKey,
-          sessionLimit: this.accountQuota?.sessions,
+          sessionLimit: skipSessionSlot ? null : this.accountQuota?.sessions,
           cooldownUntil:
             state?.cooldown_until || vm.claude?.temp_unschedulable_until || vm.temp_unschedulable_until || null,
           cooldownReason:
@@ -612,7 +647,7 @@ export class PoolScheduler {
     }
     const inflight = this.inflight.get(accountId) || 0
     const sessionSlots = sessionSlotsOf(vm, this.config.default_session_slots)
-    if (sessionKey && !pinned && this.accountQuota?.sessions?.canAccept) {
+    if (!skipSessionSlot && sessionKey && !pinned && this.accountQuota?.sessions?.canAccept) {
       let idleMin = 5
       try {
         const policy = this.accountQuota.policyFor?.(account, { tier: vmTierOf(vm) })
@@ -630,7 +665,7 @@ export class PoolScheduler {
     }
 
     if (circuitProbeUntil) markWait('circuit_probe', circuitProbeUntil)
-    if (this.usedSlotCount(vm.id) >= sessionSlots) markWait('session_slots_full')
+    if (!skipSessionSlot && this.usedSlotCount(vm.id) >= sessionSlots) markWait('session_slots_full')
     if (inflight >= maxConcurrency) markWait('concurrency_limit')
     const fableCap = Number(this.config.fable_max_per_account)
     if (isFableModel(modelKey) && Number.isFinite(fableCap) && fableCap > 0) {
@@ -793,7 +828,10 @@ export class PoolScheduler {
    * `spilled`: accounts this request skipped only for capacity (wait queue
    * full, kernel slot_busy). The session pin survives; the next turn returns.
    */
-  pick(candidates, { model, stickyKey, eligible = candidates, spilled = null, stickyKeys = null } = {}) {
+  pick(
+    candidates,
+    { model, stickyKey, eligible = candidates, spilled = null, stickyKeys = null, deviceVmId = null } = {},
+  ) {
     this.lastStickyCleared = false
     if (!candidates.length && !eligible?.length) return null
     const bound = stickyKey ? this.stickyRouter?.resolve?.(stickyKey) : null
@@ -814,6 +852,11 @@ export class PoolScheduler {
       }
     }
     if (!candidates.length) return null
+    const deviceVm = deviceVmId ? String(deviceVmId).trim() : ''
+    if (deviceVm) {
+      const preferred = candidates.find((candidate) => candidate.vmId === deviceVm && this.isReservable(candidate))
+      if (preferred) return { ...preferred, selectionReason: 'device-affinity' }
+    }
     const highestPriority = Math.max(...candidates.map((candidate) => candidate.priority))
     let pool = candidates.filter((candidate) => candidate.priority === highestPriority)
     const minLoad = Math.min(...pool.map((candidate) => candidate.loadRatio))
@@ -929,11 +972,11 @@ export class PoolScheduler {
     this.config = normalizePoolConfig(config)
   }
 
-  reserve(candidate, { sessionKey = null, skipQuota = false, pinned = false } = {}) {
+  reserve(candidate, { sessionKey = null, skipQuota = false, pinned = false, skipSessionSlot = false } = {}) {
     const requestInflight = this.inflight.get(candidate.accountId) || 0
     if (!candidate.maxConcurrency || requestInflight >= candidate.maxConcurrency) return null
-    const slot = this.acquireSlot(candidate.vmId, sessionKey, candidate.sessionSlots)
-    if (candidate.sessionSlots > 0 && !slot) return null
+    const slot = skipSessionSlot ? null : this.acquireSlot(candidate.vmId, sessionKey, candidate.sessionSlots)
+    if (!skipSessionSlot && candidate.sessionSlots > 0 && !slot) return null
     const family = isFableModel(candidate.model) ? FABLE_FAMILY_KEY : null
     const fableCap = Number(this.config.fable_max_per_account)
     if (
@@ -954,7 +997,7 @@ export class PoolScheduler {
       if (slot?.created) this.releaseSlotHold(candidate.vmId, slot.holdKey)
       return null
     }
-    if (sessionKey) {
+    if (!skipSessionSlot && sessionKey) {
       try {
         this.accountQuota?.sessions?.touch?.(candidate.accountId, sessionKey)
       } catch {}
@@ -963,7 +1006,7 @@ export class PoolScheduler {
     const circuitHold = pinned ? null : this.unitCircuit?.admit?.(candidate.accountId)
     if (circuitHold && !circuitHold.ok) {
       if (slot?.created) this.releaseSlotHold(candidate.vmId, slot.holdKey)
-      if (sessionKey) {
+      if (!skipSessionSlot && sessionKey) {
         try {
           this.accountQuota?.sessions?.release?.(candidate.accountId, sessionKey)
         } catch {}
@@ -984,7 +1027,7 @@ export class PoolScheduler {
         if (next === 0) this.inflight.delete(candidate.accountId)
         else this.inflight.set(candidate.accountId, next)
         this.bumpFamily(candidate.accountId, family, -1)
-        if (sessionKey) {
+        if (!skipSessionSlot && sessionKey) {
           try {
             this.accountQuota?.sessions?.release?.(candidate.accountId, sessionKey)
           } catch {}
@@ -1174,7 +1217,7 @@ export class PoolScheduler {
     const seats = Number(candidate.sessionSlots) || 0
     const conc = Number(candidate.maxConcurrency) || 0
     const usedSlots = Number(candidate.usedSlots) || 0
-    if (seats > 0 && usedSlots >= seats) return false
+    if (!candidate.skipSessionSlot && seats > 0 && usedSlots >= seats) return false
     if (conc > 0 && inflight >= conc) return false
     if (!candidate.busy) return true
     return candidate.waitReason === 'slot_busy'

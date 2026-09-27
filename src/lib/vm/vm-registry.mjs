@@ -83,7 +83,8 @@ export function summarizeVm(vm, projectRoot = null) {
     auth_scheme: kind.kind === 'codex' ? null : vm.claude?.auth_scheme || null,
     has_refresh: kind.kind === 'codex' ? !!codex?.has_refresh : hasRefreshPresence(vm.claude),
     refresh_error: kind.kind === 'codex' ? null : vm.claude?.refresh_error || null,
-    account_tier: kind.kind === 'codex' ? 'codex' : vm.claude?.account_tier || null,
+    account_tier:
+      kind.kind === 'codex' ? 'codex' : vm.claude?.account_tier || (hasAccessPresence(vm.claude) ? 'pro' : null),
     has_session_key: false,
     max_concurrency: vm.policy?.maxConcurrency ?? 2,
     max_rpm: vm.policy?.maxRpm ?? 0,
@@ -124,6 +125,7 @@ export function summarizeVm(vm, projectRoot = null) {
     status_7d: quota.status_7d ?? null,
     codex_usage: codex?.usage || null,
     reset_credits: codex?.reset_credits || null,
+    plan_type: codex?.plan_type || null,
   }
 }
 
@@ -143,8 +145,7 @@ export function persistAccountTier(projectRoot, vmId, tier, { source = null } = 
   if (!fs.existsSync(file)) return null
   const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
   vm.claude = vm.claude || {}
-  // Official /api/oauth/profile is authoritative; only a newer profile read may change it.
-  if (vm.claude.account_tier_source === 'profile' && source !== 'profile') return vm
+  if (vm.claude.account_tier_source === 'profile' && source !== 'profile' && source !== 'usage') return vm
   if (vm.claude.account_tier === key && (vm.claude.account_tier_source || null) === source) return vm
   vm.claude.account_tier = key
   vm.claude.account_tier_source = source

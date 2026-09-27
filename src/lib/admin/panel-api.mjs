@@ -19,7 +19,7 @@ import {
   isCodexVm,
   setVmSchedulable,
 } from '../vm/vm-registry.mjs'
-import { clearRecoverableVmCooldown } from '../oauth/oauth-credentials.mjs'
+import { clearRecoverableVmCooldown, markVmRefreshError } from '../oauth/oauth-credentials.mjs'
 import {
   resolveInferenceEngine,
   resolveKernelDataplane,
@@ -28,7 +28,7 @@ import {
 } from '../vm/slot-engine.mjs'
 import { probeAccount } from '../oauth/usage-probe.mjs'
 import { queryOpenaiQuota, resetOpenaiQuota } from '../oauth/openai-quota.mjs'
-import { canOfficialUsage, credentialModeOfVm } from '../oauth/credential-mode.mjs'
+import { canOfficialUsage, credentialModeOfVm, isSetupTokenMode } from '../oauth/credential-mode.mjs'
 import { getUsageCache } from '../oauth/usage-cache.mjs'
 import { makeError, ErrorType, ErrorCode } from '../core/errors.mjs'
 import { filterVmsForPanel } from './resource-owner.mjs'
@@ -50,6 +50,7 @@ import { isLeftoverGrantRevokeRuntime, viewRuntimeWithoutLeftoverRevoke } from '
 import {
   isOfficialUsageRateLimited,
   PASSIVE_HEADER_SOURCE,
+  probeFableEntitlement,
   probeFromPassiveHeaders,
   shouldHopOfficialUsage,
   shouldProbeFable,
@@ -439,7 +440,7 @@ export async function buildDashboard({
     vms,
     (() => {
       try {
-        return attachBillingMeta(requestLog?.billingStats?.(), accounts)
+        return attachBillingMeta(panelBillingStats(requestLog, accountQuota, vms), accounts)
       } catch {
         return null
       }
@@ -578,19 +579,19 @@ export async function buildVmDetail({
   const acc = findAccount(accountQuota, summary)
   const billing = (() => {
     try {
-      return requestLog?.billingStats?.() || null
+      return panelBillingStats(requestLog, accountQuota, [summary])
     } catch {
       return null
     }
   })()
   const cost = lookupBilling(indexBillingAccounts(billing), acc || summary)
-  applyCostFields(summary, cost)
+  const gpt = isCodexVm(vm)
+  applyCostFields(summary, cost, { scheme: gpt ? 'openai' : 'anthropic' })
   const detail = buildAccountBilling(cost, billing, {
     vmId: summary.id,
     accountId: acc?.account_id || summary.account_uuid,
     requestLog,
   })
-  const gpt = isCodexVm(vm)
   const inferenceEngine = gpt ? null : summary.resolved_inference_engine || 'rust'
   let goHealth = null
   let rustHealth = null
@@ -722,7 +723,47 @@ export async function buildOpenaiQuotaReset({ cfg, id, rotate = true } = {}) {
   })
 }
 
-export async function buildProbeOne({ cfg, accountQuota, id, force = false, usageCache = null, hop = true } = {}) {
+function applyFableProbeResult(accountQuota, accountId, found) {
+  if (found?.tier !== 'pro' && found?.tier !== 'max') return null
+  const saved = accountQuota.repo.get(accountId)
+  if (!saved || !found.fable) return found.tier
+  const prev = saved.unified?.fable || {}
+  saved.unified = saved.unified || {}
+  saved.unified.fable = {
+    ...prev,
+    ok: prev.ok === true,
+    plan_denied: prev.plan_denied === true,
+    limited: !!found.fable.limited && found.tier !== 'max',
+    banned: false,
+    status: found.fable.status || 0,
+    model: found.fable.model || prev.model || null,
+    error: found.fable.error || prev.error || null,
+    utilization: found.fable.utilization ?? prev.utilization ?? null,
+    reset: found.fable.reset_at || prev.reset || null,
+    probed_at: new Date().toISOString(),
+  }
+  accountQuota.repo.save(saved)
+  return found.tier
+}
+function fatalUsageCredentialFailure(result = {}) {
+  if (result?.ok === true || result?.usage_scope_missing) return false
+  const status = Number(result?.usage_status || result?.status || 0)
+  const text = String(result?.usage_error || result?.error || result?.fable?.error || '').toLowerCase()
+  return (
+    status === 401 ||
+    /oauth_revoked|token has been revoked|invalid_grant|oauth_invalid_grant|refresh token not found/.test(text)
+  )
+}
+
+export async function buildProbeOne({
+  cfg,
+  accountQuota,
+  id,
+  force = false,
+  usageCache = null,
+  hop = true,
+  fableProbe = probeFableEntitlement,
+} = {}) {
   const vm = getVm(cfg.paths.project, id)
   if (!vm) {
     return fail(
@@ -779,6 +820,11 @@ export async function buildProbeOne({ cfg, accountQuota, id, force = false, usag
     vm,
   }
   const accountId = vm.claude?.account_uuid || vm.id
+  if (vm.claude?.account_uuid) {
+    try {
+      accountQuota.rebindToVm(vm.claude.account_uuid, vm.id, { email: vm.claude?.email || null })
+    } catch {}
+  }
   accountQuota.ensure({
     account_id: accountId,
     vm_id: vm.id,
@@ -808,7 +854,22 @@ export async function buildProbeOne({ cfg, accountQuota, id, force = false, usag
         ...(headerProbe ? { ...headerProbe, error: null } : {}),
       }
     : await cache.load(accountId, () => probeAccount({ exec, vm, includeFable }), { force: !!force })
+  if (fatalUsageCredentialFailure(result)) {
+    try {
+      markVmRefreshError(path.join(cfg.paths.project, 'vms', `${id}.json`), {
+        error: {
+          code: result.usage_status === 401 ? 'oauth_revoked' : 'invalid_grant',
+          message: result.usage_error || result.error || 'OAuth credential was rejected',
+        },
+      })
+    } catch {}
+  }
   if (!skipHop) accountQuota.ingestOAuthUsage(accountId, result)
+  if (isSetupTokenMode(credentialModeOfVm(vm)) && (force || includeFable) && !result.usage_scope_missing) {
+    try {
+      await applyFableProbeResult(accountQuota, accountId, await fableProbe({ exec, timeoutMs: 20000 }))
+    } catch {}
+  }
   const after = accountQuota.repo.get(accountId)
   const qAfter = quotaFromAccount(after)
   const rateLimited = isOfficialUsageRateLimited(result)
@@ -821,7 +882,7 @@ export async function buildProbeOne({ cfg, accountQuota, id, force = false, usag
   const tier = inferClaudeTier(
     {
       has_token: true,
-      account_tier: after?.unified?.account_tier || storedTier,
+      account_tier: after?.unified?.account_tier || null,
       fable: qAfter.fable,
       utilization_7d_oi: qAfter.utilization_7d_oi,
       reset_7d_oi: qAfter.reset_7d_oi,
@@ -830,9 +891,13 @@ export async function buildProbeOne({ cfg, accountQuota, id, force = false, usag
     },
     qAfter,
   ).key
-  if (tier === 'pro' || tier === 'max') {
-    accountQuota.setAccountTier(accountId, tier)
-    persistAccountTier(cfg.paths.project, id, tier)
+  const completeUsage = result.ok === true && result.limits_present === true
+  if (completeUsage && (result.account_tier === 'pro' || result.account_tier === 'max')) {
+    accountQuota.setAccountTier(accountId, result.account_tier, { source: 'usage' })
+    persistAccountTier(cfg.paths.project, id, result.account_tier, { source: 'usage' })
+  } else if (completeUsage && (tier === 'pro' || tier === 'max')) {
+    accountQuota.setAccountTier(accountId, tier, { source: 'usage' })
+    persistAccountTier(cfg.paths.project, id, tier, { source: 'usage' })
   }
   const availability = evaluateAccount({
     vm,
@@ -884,16 +949,21 @@ export async function buildProbeOne({ cfg, accountQuota, id, force = false, usag
     quota: {
       utilization_5h: qAfter.utilization_5h,
       utilization_7d: qAfter.utilization_7d,
+      utilization_7d_oi: qAfter.utilization_7d_oi,
       status_5h: qAfter.status_5h,
       status_7d: qAfter.status_7d,
+      status_7d_oi: qAfter.status_7d_oi,
       reset_5h: qAfter.reset_5h,
       reset_7d: qAfter.reset_7d,
+      reset_7d_oi: qAfter.reset_7d_oi,
+      account_tier: tier,
+      usage_has_fable: qAfter.usage_has_fable,
     },
     availability,
     cred_status: credStatusFromAvailability(availability),
-    fable: after?.unified?.fable || result.fable || q.fable || null,
-    fable_probed: includeFable && !skipHop,
-    account_tier: tier,
+    fable: result.usage_scope_missing ? q.fable || null : after?.unified?.fable || result.fable || q.fable || null,
+    fable_probed: includeFable && !skipHop && !result.usage_scope_missing,
+    account_tier: completeUsage ? result.account_tier || tier : tier,
     probed_at: result.probed_at,
     ok: !!(result.ok || passive || (rateLimited && cachedWindow)),
     rate_limited: rateLimited,
@@ -903,6 +973,8 @@ export async function buildProbeOne({ cfg, accountQuota, id, force = false, usag
         : rateLimited
           ? '官方 /usage 限流，请稍后再试'
           : result.error || result.usage_error || null,
+    usage_scope_missing: result.usage_scope_missing === true,
+    credential_scope_required: result.credential_scope_required || null,
   }
   // Display metadata is separate from the authoritative usage/auth probe.
   // Reading cached headers must not heal credential failures or clear backoff.
@@ -920,13 +992,14 @@ export async function buildProbeOne({ cfg, accountQuota, id, force = false, usag
   return ok(data)
 }
 
-export async function buildProbeAll({ cfg, accountQuota, hop = false, force = false } = {}) {
+export async function buildProbeAll({ cfg, accountQuota, hop = true, force = true } = {}) {
   const vms = listVms(cfg.paths.project)
   const items = []
   for (const s of vms) {
     const one = await buildProbeOne({ cfg, accountQuota, id: s.id, hop, force })
     if (one.ok === false || one.status) {
-      items.push({ vm_id: s.id, ok: false, error: one.body?.error || one })
+      const err = one.body?.error || one
+      items.push({ vm_id: s.id, ok: false, error: err?.message || err?.code || String(err || 'probe_failed') })
     } else {
       items.push(one.data)
     }
@@ -936,9 +1009,10 @@ export async function buildProbeAll({ cfg, accountQuota, hop = false, force = fa
 
 export function buildUsage({ accountQuota, cfg, requestLog = null }) {
   const snap = accountQuota.snapshot()
+  const listed = listVms(cfg?.paths?.project)
   const billing = (() => {
     try {
-      return requestLog?.billingStats?.() || null
+      return panelBillingStats(requestLog, accountQuota, listed)
     } catch {
       return null
     }
@@ -978,6 +1052,12 @@ export function buildUsage({ accountQuota, cfg, requestLog = null }) {
       today: cost?.today || null,
       window_5h: cost?.window_5h || null,
       window_7d: cost?.window_7d || null,
+      cache_hit_rate: cacheHitStats({
+        input_tokens: cost?.today_input_tokens || cost?.today?.input_tokens || 0,
+        cache_read_tokens: cost?.today_cache_read_tokens || cost?.today?.cache_read_tokens || 0,
+        cache_creation_tokens: cost?.today_cache_creation_tokens || cost?.today?.cache_creation_tokens || 0,
+        scheme: isCodexVm(vm) ? 'openai' : 'anthropic',
+      }).cache_hit_rate,
       near_limit:
         accountQuota?.nearLimit?.(a) ??
         isNearLimit(
@@ -1077,7 +1157,7 @@ export async function snapshotAccountPool({
     vms,
     (() => {
       try {
-        return attachBillingMeta(requestLog?.billingStats?.(), accounts)
+        return attachBillingMeta(panelBillingStats(requestLog, accountQuota, vms), accounts)
       } catch {
         return null
       }
@@ -1148,7 +1228,7 @@ function quotaFromAccount(acc, quotaConfig) {
     last_probe_check: u.last_probe_check || null,
     probe_source: u.source || acc?.last_probe?.source || null,
     account_tier: u.account_tier || null,
-    usage_has_fable: u.usage_has_fable === true,
+    usage_has_fable: u.usage_has_fable ?? null,
   }
   const cfg = weeklySplitConfig(quotaConfig || {})
   const split = publicWeeklySplit(
@@ -1453,6 +1533,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     status_7d_oi: isCodex ? null : q.status_7d_oi,
     codex_usage: v.codex_usage || null,
     reset_credits: isCodex ? v.reset_credits || v.codex?.reset_credits || null : null,
+    plan_type: isCodex ? v.plan_type || null : null,
     ...(q.weekly_split ? { weekly_split: q.weekly_split } : {}),
     fable_inflight: fablePool.fable_inflight,
     fable_max: fablePool.fable_max,
@@ -1482,7 +1563,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
         }
       : null,
     account_tier: tierKey,
-    usage_has_fable: isCodex ? false : !!q.usage_has_fable,
+    usage_has_fable: isCodex ? null : q.usage_has_fable,
     availability,
     cred_status: credStatusFromAvailability(availability),
     cooldown_until: Number(restrictionUntil) > Date.now() ? Number(restrictionUntil) : null,
@@ -1738,11 +1819,57 @@ function attachBillingMeta(billing, accounts = []) {
   }
 }
 
+function accountWindowsForBilling(accountQuota, vms = []) {
+  const listed = Array.isArray(vms) ? vms : []
+  const byVm = new Map(listed.map((vm) => [vm.id, vm]))
+  const accounts = (() => {
+    try {
+      return accountQuota?.snapshot?.().accounts || []
+    } catch {
+      return []
+    }
+  })()
+  const windows = []
+  const seen = new Set()
+  for (const acc of accounts) {
+    const vm = byVm.get(acc.vm_id) || (acc.vm_id ? { id: acc.vm_id } : {})
+    const q = quotaFromAccount(acc)
+    const key = `${acc.account_id || ''}\0${acc.vm_id || ''}`
+    seen.add(key)
+    windows.push({
+      account_id: acc.account_id,
+      vm_id: acc.vm_id,
+      reset_5h: q.reset_5h,
+      reset_7d: q.reset_7d,
+      scheme: isCodexVm(vm) ? 'openai' : 'anthropic',
+    })
+  }
+  for (const vm of listed) {
+    const key = `${vm.account_uuid || vm.id}\0${vm.id}`
+    if (seen.has(key) || seen.has(`${vm.account_uuid || ''}\0${vm.id}`)) continue
+    const acc = findAccount(accountQuota, vm)
+    const q = quotaFromAccount(acc)
+    windows.push({
+      account_id: acc?.account_id || vm.account_uuid || vm.id,
+      vm_id: vm.id,
+      reset_5h: q.reset_5h || vm.reset_5h || null,
+      reset_7d: q.reset_7d || vm.reset_7d || null,
+      scheme: isCodexVm(vm) ? 'openai' : 'anthropic',
+    })
+  }
+  return windows
+}
+
+function panelBillingStats(requestLog, accountQuota, vms) {
+  if (!requestLog?.billingStats) return null
+  return requestLog.billingStats({ accountWindows: accountWindowsForBilling(accountQuota, vms) })
+}
+
 function stampVmBilling(vms, billing) {
   if (!billing) return null
   const index = indexBillingAccounts(billing)
   for (const vm of vms || []) {
-    applyCostFields(vm, lookupBilling(index, vm))
+    applyCostFields(vm, lookupBilling(index, vm), { scheme: isCodexVm(vm) ? 'openai' : 'anthropic' })
   }
   return billing
 }
@@ -1768,7 +1895,7 @@ function periodView(row) {
   }
 }
 
-function applyCostFields(target, cost) {
+function applyCostFields(target, cost, { scheme } = {}) {
   if (!target) return
   const today = cost?.today && typeof cost.today === 'object' ? cost.today : null
   const todayInput = Number(cost?.today_input_tokens ?? (today?.input_tokens || 0))
@@ -1786,6 +1913,7 @@ function applyCostFields(target, cost) {
     input_tokens: todayInput,
     cache_read_tokens: todayRead,
     cache_creation_tokens: todayWrite,
+    scheme: scheme || (isCodexVm(target) ? 'openai' : 'anthropic'),
   }).cache_hit_rate
   target.window_5h_cost = cost?.window_5h_cost || 0
   target.window_5h_requests = cost?.window_5h_requests || 0

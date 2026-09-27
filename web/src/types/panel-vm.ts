@@ -168,6 +168,8 @@ export type Vm = {
       utilization_7d?: number
     }
   } | null
+  /** Raw OpenAI `plan_type` from wham/usage (GPT slots only). */
+  plan_type?: string | null
   reset_credits?: {
     available_count?: number
     credits?: Array<{ expires_at?: string }>
@@ -177,8 +179,8 @@ export type Vm = {
   fable?: Record<string, unknown>
   weekly_split?: Record<string, unknown>
   account_tier?: string
-  /** Official /usage listed a Fable model. Overrides leftover Pro stamps. */
-  usage_has_fable?: boolean
+  /** Complete official usage: true = Max, false = Pro, null = unconfirmed. */
+  usage_has_fable?: boolean | null
   /** anthropic | openai。缺省按 Claude 槽展示。 */
   platform?: string | null
   /** claude | codex */

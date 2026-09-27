@@ -20,9 +20,9 @@ test('normalizeCredentialMode maps aliases', () => {
   assert.equal(normalizeCredentialMode(''), 'oauth')
 })
 
-test('setup-token cannot official-cc or usage, can refresh', () => {
+test('setup-token cannot official-cc, can official usage and refresh', () => {
   assert.equal(canOfficialCc('setup-token'), false)
-  assert.equal(canOfficialUsage('setup-token'), false)
+  assert.equal(canOfficialUsage('setup-token'), true)
   assert.equal(canCountTokens('setup-token'), true)
   assert.equal(canRefreshCredential('setup-token'), true)
 })
@@ -45,6 +45,8 @@ test('credentialModeFromOauth infers from type, prefix, and scope', () => {
   assert.equal(credentialModeFromOauth({ scope: 'user:inference' }), 'setup-token')
   assert.equal(credentialModeFromOauth({ type: 'oauth', scope: 'user:inference' }), 'setup-token')
   assert.equal(credentialModeFromOauth({ scope: 'user:profile user:inference' }), 'oauth')
+  assert.equal(credentialModeFromOauth({ type: 'setup-token', scopes: ['user:profile', 'user:inference'] }), 'oauth')
+  assert.equal(credentialModeFromOauth({ mode: 'setup-token', scope: 'user:inference user:sessions:claude_code' }), 'oauth')
   assert.equal(looksLikeConsoleApiKey('sk-ant-api03-abc'), true)
   assert.equal(looksLikeOauthAccessToken('sk-ant-oat01-abc'), true)
   assert.equal(looksLikeOauthAccessToken('sk-ant-api03-abc'), false)

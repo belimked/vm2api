@@ -455,6 +455,7 @@ usageProbeMonitor = createUsageProbeMonitor({
 })
 notifyMonitor = createNotifyMonitor({
   config: routingConfig.notify,
+  baseUrl: cfg.base_url,
   snapshot: () =>
     panel.snapshotAccountPool({
       cfg,

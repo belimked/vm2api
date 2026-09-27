@@ -166,11 +166,12 @@ function parkedGrantDeath(vm: Vm | undefined): boolean {
 }
 
 function invalidCredTone(vm: Vm | undefined): StatusTone {
+  const revoked = vmRevoked(vm)
   return {
     cls: 'bad',
-    key: vmRevoked(vm) ? 'revoke' : 'bad',
-    text: '无效凭证',
-    label: '无效凭证',
+    key: revoked ? 'revoke' : 'bad',
+    text: revoked ? '已吊销' : '无效凭证',
+    label: revoked ? '已吊销' : '无效凭证',
   }
 }
 
@@ -572,26 +573,68 @@ export function vmRunning(vm: Vm | undefined): boolean {
   return Boolean(vm.active || s === 'running' || s === 'ok' || !s)
 }
 
+/** Same mapping as codex-proxy-rs `plan_type_display`; unknown raw values pass through. */
+export function openaiPlanLabel(planType: unknown): string {
+  const raw = String(planType || '').trim()
+  switch (raw.toLowerCase()) {
+    case '':
+      return 'GPT'
+    case 'free':
+    case 'free_workspace':
+    case 'guest':
+      return 'Free'
+    case 'go':
+      return 'Go'
+    case 'plus':
+      return 'Plus'
+    case 'pro':
+    case 'prolite':
+      return 'Pro'
+    case 'team':
+    case 'self_serve_business_prolite':
+    case 'self_serve_business_usage_based':
+      return 'Business'
+    case 'business':
+    case 'ent26':
+    case 'enterprise_cbp_automation':
+    case 'enterprise_cbp_usage_based':
+    case 'enterprise':
+    case 'hc':
+      return 'Enterprise'
+    case 'edu':
+    case 'education':
+      return 'Edu'
+    case 'edu_plus':
+      return 'Edu Plus'
+    case 'edu_pro':
+      return 'Edu Pro'
+    default:
+      return raw
+  }
+}
+
 export function claudeTier(vm: Vm | undefined): StatusTone {
   if (isCodexVm(vm)) {
     if (!vm?.has_token)
       return { key: 'none', label: '—', cls: 'none', text: '—' }
-    return { key: 'codex', label: 'GPT', cls: 'codex', text: 'GPT' }
+    const plan = openaiPlanLabel(vm?.plan_type)
+    return { key: 'codex', label: plan, cls: 'codex', text: plan }
   }
   if (!vm?.has_token) return { key: 'none', label: '—', cls: 'none', text: '—' }
-  const fb = vm.fable || {}
+  if (vm.usage_has_fable === false)
+    return { key: 'pro', label: 'Pro', cls: 'pro', text: 'Pro' }
   const raw = String(vm.account_tier || '').toLowerCase()
   const oi = vm.utilization_7d_oi
   const oiN =
     oi == null ? null : Number(oi) > 1.5 ? Number(oi) / 100 : Number(oi)
   const realFable =
     vm.usage_has_fable === true ||
-    Boolean(fb.ok) ||
     (oiN != null && Boolean(vm.reset_7d_oi || oiN < 1))
   // Usage 里有 Fable 就是 Max。落盘 pro / hop 403 不能盖掉。
+  // 没有套餐证据时不要画成 Pro，否则 Max 探测未完成的槽会一直显示 Pro。
   if (realFable || raw === 'max')
     return { key: 'max', label: 'Max', cls: 'max', text: 'Max' }
-  if (raw === 'pro' || fablePlanDenied(fb))
+  if (raw === 'pro')
     return { key: 'pro', label: 'Pro', cls: 'pro', text: 'Pro' }
   return { key: 'pro', label: 'Pro', cls: 'pro', text: 'Pro' }
 }

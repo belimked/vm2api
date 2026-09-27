@@ -21,6 +21,7 @@ import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { parseCodexImportPayload, upsertCodexAccount, readCodexAccounts } from '../vm/codex-slot.mjs'
 import { generateAuthUrl, exchangeAuthCode, normalizeOauthFlavor } from '../oauth/oauth-auth-url.mjs'
 import { sessionKeyToOAuth, panelImportErrorPayload } from '../oauth/cookie-auth.mjs'
+import { enrichOauthIdentity } from '../oauth/oauth-identity.mjs'
 import { generateCodexAuthUrl, exchangeCodexAuthCode } from '../oauth/codex-oauth.mjs'
 import {
   completeClaudeSetupToken,
@@ -384,7 +385,7 @@ export function createPanelHandler(ctx) {
     const vm = exec?.vm || getVm(cfg.paths.project, id)
     if (!exec || !vm) {
       const missing = { reachable: false, status: null, error_code: 'vm_not_found' }
-      return isCodexVm(vm) ? { codex: missing } : { go: missing, rust: missing }
+      return { go: missing, rust: missing }
     }
     if (isCodexVm(vm)) {
       const health = await codexKernelHealth(exec, { timeoutMs: 600 })
@@ -1979,6 +1980,17 @@ export function createPanelHandler(ctx) {
         if (typeof body?.schedulable !== 'boolean') {
           return json(res, 400, { ok: false, error: { message: 'schedulable required' } })
         }
+        const currentVm = getVm(cfg.paths.project, id)
+        const credentialFailure =
+          /oauth_revoked|oauth_invalid_grant|invalid_grant|refresh_token_missing|token has been revoked/i.test(
+            `${currentVm?.claude?.refresh_error || ''} ${currentVm?.schedule_disabled_reason || ''}`,
+          )
+        if (body.schedulable && credentialFailure) {
+          return json(res, 409, {
+            ok: false,
+            error: { code: 'credential_unavailable', message: '凭证已失效或吊销，请重新导入凭证后再开启调度' },
+          })
+        }
         const reason = body.schedulable ? null : body.reason || 'disabled'
         const summary = setVmSchedulable(cfg.paths.project, id, body.schedulable, reason, {
           preserveStatus: true,
@@ -2682,6 +2694,9 @@ export function createPanelHandler(ctx) {
             return json(res, 400, { ok: false, error: { message: 'sessionKey or access_token required' } })
           }
           if (body.auth_scheme || body.authScheme) oauth.auth_scheme = body.auth_scheme || body.authScheme
+          if (oauth.access_token && !wantsApiKey) {
+            oauth = await enrichOauthIdentity(oauth, { proxyUrl })
+          }
           const committed = await commitImportedOauth({
             vmId,
             vmPath,
@@ -2829,7 +2844,7 @@ export function createPanelHandler(ctx) {
           }
           const code = body.code || body.auth_code || ''
           const flavor = body.flavor || body.type || ''
-          const oauth = looksLikeOfficialSetupToken(code)
+          let oauth = looksLikeOfficialSetupToken(code)
             ? await completeClaudeSetupToken({
                 projectRoot: cfg.paths.project,
                 vmId: id,
@@ -2853,6 +2868,9 @@ export function createPanelHandler(ctx) {
             oauth.mode = 'setup-token'
           }
           if (body.auth_scheme || body.authScheme) oauth.auth_scheme = body.auth_scheme || body.authScheme
+          if (oauth.access_token) {
+            oauth = await enrichOauthIdentity(oauth, { proxyUrl: slotProxy.proxyUrl })
+          }
           const committed = await commitImportedOauth({
             vmId: id,
             vmPath,
@@ -3089,8 +3107,8 @@ export function createPanelHandler(ctx) {
       // POST /api/panel/probe
       if (req.method === 'POST' && p === '/api/panel/probe') {
         const body = await readBody(req, 4096).catch(() => ({}))
-        const hop = body?.hop !== false
-        const force = body?.force !== false
+        const hop = body?.hop ?? true
+        const force = body?.force ?? true
         const result = await panel.buildProbeAll({ cfg, accountQuota, hop, force })
         return json(res, 200, result)
       }
@@ -3434,6 +3452,7 @@ export function createPanelHandler(ctx) {
         })
         try {
           const result = await sendNotifyTest(trial, channel, {
+            baseUrl: cfg.base_url,
             snapshot:
               ctx.notifyMonitor?.getSnapshot?.() ||
               (await panel.snapshotAccountPool({
