@@ -12,7 +12,7 @@ if ! command -v pnpm >/dev/null 2>&1; then
   exit 1
 fi
 pnpm -C web build
-for b in kin-kernel kin-codex-kernel kin-cookie-auth kin-egress kin-worker; do
+for b in kin-kernel kin-codex-kernel kin-egress kin-worker kin-oauth-auth; do
   if [ ! -x "bin/$b" ]; then
     echo "pack-overlay: bin/$b missing or not executable" >&2
     exit 1
@@ -29,9 +29,10 @@ rm -rf "$OUT"
 mkdir -p "$OUT/src/config" "$OUT/bin" "$OUT/share" "$OUT/web"
 cp -a src/server.mjs "$OUT/src/"
 cp -a src/lib "$OUT/src/"
+rm -f "$OUT/src/lib/oauth/auth.js"
 cp -a src/config/distill-rules.json "$OUT/src/config/"
 cp -a VERSION "$OUT/"
-for b in kin-kernel kin-codex-kernel kin-cookie-auth kin-egress kin-worker; do
+for b in kin-kernel kin-codex-kernel kin-egress kin-worker kin-oauth-auth; do
   cp -a "bin/$b" "$OUT/bin/"
   chmod 755 "$OUT/bin/$b"
 done

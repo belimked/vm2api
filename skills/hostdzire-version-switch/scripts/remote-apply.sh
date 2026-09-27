@@ -32,13 +32,14 @@ cp -a /var/www/kin-console "$BAK/kin-console"
 cp -a "$STAGE/src/server.mjs" "$ROOT/src/server.mjs"
 rm -rf "$ROOT/src/lib"
 cp -a "$STAGE/src/lib" "$ROOT/src/lib"
+rm -f "$ROOT/src/lib/oauth/auth.js"
 if [ -f "$STAGE/src/config/distill-rules.json" ]; then
   cp -a "$STAGE/src/config/distill-rules.json" "$ROOT/src/config/distill-rules.json"
 fi
 cp -a "$STAGE/VERSION" "$ROOT/VERSION"
 
 mkdir -p "$ROOT/bin"
-for b in kin-kernel kin-codex-kernel kin-cookie-auth kin-egress kin-worker; do
+for b in kin-kernel kin-codex-kernel kin-egress kin-worker kin-oauth-auth; do
   cp -a "$STAGE/bin/$b" "$ROOT/bin/$b.new"
   chmod 755 "$ROOT/bin/$b.new"
   mv -f "$ROOT/bin/$b.new" "$ROOT/bin/$b"
