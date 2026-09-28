@@ -7,6 +7,7 @@ import path from 'node:path'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
 import { CRS_OFFICIAL_AGENT_PROMPT } from '../../src/lib/identity/crs-persona.mjs'
+import { DEFAULT_AGENT_STANDING } from '../../src/lib/identity/persona-template.mjs'
 import { resolveInferenceBackend, messagesUrl } from '../../src/lib/pool/api-protocol.mjs'
 
 function fakeResponse() {
@@ -112,7 +113,7 @@ test('API backend applies the global official_full persona setting', async () =>
     assert.ok(received)
     const outbound = JSON.parse(received.body)
     assert.equal(outbound.system.length, 4)
-    assert.equal(outbound.system[2].text, CRS_OFFICIAL_AGENT_PROMPT)
+    assert.equal(outbound.system[2].text, `${DEFAULT_AGENT_STANDING}\n${CRS_OFFICIAL_AGENT_PROMPT}`)
   } finally {
     await new Promise((resolve) => kernel.close(resolve))
     fs.rmSync(root, { recursive: true, force: true })
@@ -617,6 +618,34 @@ test('request without trusted session id keeps the legacy scoped sticky key', as
     const opts = await captureRunOpts({ body, stickyRouter: router, apiKeyRecord: { id: 'key-anon', group_id: 1 } })
     assert.match(String(opts.stickyKey), /^p:anthropic:kkey-anon:ch:/)
     assert.equal(opts.deviceKey, null)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('one-shot test call skips the session seat but keeps its sticky key', async () => {
+  const { dir, router } = realStickyRouter()
+  try {
+    const probe = await captureRunOpts({
+      body: sessionBody({ device_id: 'dev-probe', session_id: 'sess-probe' }, { max_tokens: 1024 }),
+      stickyRouter: router,
+    })
+    assert.equal(probe.skipSessionSeat, true)
+    assert.equal(probe.stickyKey, 'sess:sess-probe')
+    const turn = await captureRunOpts({
+      body: sessionBody(
+        { device_id: 'dev-probe', session_id: 'sess-probe' },
+        {
+          messages: [
+            { role: 'user', content: 'hello' },
+            { role: 'assistant', content: 'hi' },
+            { role: 'user', content: 'go on' },
+          ],
+        },
+      ),
+      stickyRouter: router,
+    })
+    assert.equal(turn.skipSessionSeat, false)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

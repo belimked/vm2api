@@ -512,6 +512,17 @@ export class FailoverRunner {
         }
         throw error
       }
+      const familyHome = familyKey ? this.stickyRouter?.resolve?.(familyKey) : null
+      const familySpilled = !!familyHome?.accountId && spilled.has(familyHome.accountId)
+      if (!selected?.ok && selected?.reason === 'family_vm_unavailable' && familyVmId && !familySpilled) {
+        // Whole family moves off a gated VM: drop the family pin so the next
+        // bind takes the new VM. Session pins on the old VM are released by
+        // the scheduler once that VM is no longer eligible.
+        if (familyKey) this.stickyRouter?.unbind?.(familyKey)
+        familyVmId = null
+        attemptNo -= 1
+        continue
+      }
       if (!selected?.ok && selected?.reason === 'fable_requires_max') {
         return fableRequiresMaxError({
           wait_ms: selected?.waitMs ?? selected?.wait_ms ?? 0,
@@ -546,9 +557,14 @@ export class FailoverRunner {
         },
         { countHit: false },
       )
-      if (familyKey) {
+      // An explicit VM pin outranks the family home. Without this, a pinned
+      // request reselects the same VM against a family locked elsewhere.
+      if (familyKey && !pinVmId) {
         const locked = this.stickyRouter.resolve?.(familyKey)
         if (locked?.vmId && locked.vmId !== selected.vmId) {
+          // The reservation is released only in the attempt's finally; this
+          // redirect never reaches it, so hand the seat back before reselecting.
+          selected.release?.()
           familyVmId = locked.vmId
           continue
         }
@@ -569,7 +585,11 @@ export class FailoverRunner {
       try {
         const prepared =
           typeof applyAttempt === 'function'
-            ? await applyAttempt(clone(requestBody), selected, { attemptNo, repaired })
+            ? await applyAttempt(clone(requestBody), selected, {
+                attemptNo,
+                repaired,
+                attemptStartedAt: attemptStarted,
+              })
             : clone(requestBody)
         const wrappedAttempt =
           prepared &&

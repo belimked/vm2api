@@ -45,7 +45,7 @@ const WAIT_TIMEOUT_MAX_MS = 120000
 
 const DEFAULT_CONFIG = {
   strategy: 'weighted-round-robin',
-  max_waiters_per_account: 32,
+  max_waiters_per_account: 100,
   fallback_wait_timeout_ms: 30000,
   sticky_wait_timeout_ms: 45000,
   worker_health_ttl_ms: 5000,
@@ -287,6 +287,12 @@ export class PoolScheduler {
         sessionKey: stickyKey,
         ownerScope,
       })
+      // The family VM is gated (quota, rate limit, credential, excluded) —
+      // not merely busy, which still yields a waitable candidate. The family
+      // must move; the runner releases its pins and selects again.
+      if (familyVmId && !pinned && candidates.length === 0) {
+        return fail('family_vm_unavailable', candidates, [])
+      }
       const available = candidates.filter((candidate) => this.isReservable(candidate))
       let selected = this.pick(available, {
         model,
@@ -1189,7 +1195,7 @@ export class PoolScheduler {
   }
 
   maxWaiters() {
-    return Math.max(1, Number(this.config.max_waiters_per_account) || 32)
+    return Math.max(1, Number(this.config.max_waiters_per_account) || 100)
   }
 
   waiterCount(accountId) {

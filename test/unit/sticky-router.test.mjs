@@ -3,7 +3,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { StickyRouter, childDeclaredWithoutParent, explicitParentSessionId } from '../../src/lib/pool/sticky-router.mjs'
+import {
+  StickyRouter,
+  childDeclaredWithoutParent,
+  explicitParentSessionId,
+  isShortProbeRequest,
+  mergeStickyConfig,
+} from '../../src/lib/pool/sticky-router.mjs'
 import { ProxyPool } from '../../src/lib/vm/proxy-pool.mjs'
 
 function tmpDir(prefix = 'kin-sticky-') {
@@ -61,6 +67,44 @@ test('bind + resolve + hits increment', () => {
   assert.equal(r.stats().sessions['conv-1'].hits, 2)
   // session_id preserved from previous bind
   assert.equal(r.stats().sessions['conv-1'].session_id, 'sess-9')
+})
+
+test('bind keeps outbound session on the same VM and overwrites after a VM change', () => {
+  const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
+  r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S1' })
+  r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S2' })
+  assert.equal(r.resolve('conv-s').sessionId, 'S1')
+  assert.equal(r.resolve('conv-s').vmId, 'vm-1')
+
+  r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-2', sessionId: 'S3' })
+  assert.equal(r.resolve('conv-s').vmId, 'vm-2')
+  assert.equal(r.resolve('conv-s').sessionId, 'S3')
+
+  r.unbind('conv-s')
+  r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S4' })
+  assert.equal(r.resolve('conv-s').vmId, 'vm-1')
+  assert.equal(r.resolve('conv-s').sessionId, 'S4')
+})
+
+test('bind stays locked when both VM and account differ', () => {
+  const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
+  r.bind('conv-lock', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S1' })
+  r.bind('conv-lock', { accountId: 'acc-2', vmId: 'vm-2', sessionId: 'S2' })
+  assert.equal(r.resolve('conv-lock').accountId, 'acc-1')
+  assert.equal(r.resolve('conv-lock').vmId, 'vm-1')
+  assert.equal(r.resolve('conv-lock').sessionId, 'S1')
+})
+
+test('mergeStickyConfig normalizes outbound_session to rebuild or passthrough', () => {
+  assert.equal(mergeStickyConfig({}).outbound_session, 'rebuild')
+  assert.equal(mergeStickyConfig({ sticky: {} }).outbound_session, 'rebuild')
+  assert.equal(mergeStickyConfig({ sticky: { outbound_session: 'rebuild' } }).outbound_session, 'rebuild')
+  assert.equal(mergeStickyConfig({ sticky: { outbound_session: 'passthrough' } }).outbound_session, 'passthrough')
+  assert.equal(mergeStickyConfig({ sticky: { outbound_session: 'other' } }).outbound_session, 'rebuild')
+  const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
+  assert.equal(r.config.outbound_session, 'rebuild')
+  r.reloadConfig({ sticky: { enabled: true, outbound_session: 'passthrough' } })
+  assert.equal(r.config.outbound_session, 'passthrough')
 })
 
 test('expired sessions purge on resolve/stats', () => {
@@ -729,4 +773,45 @@ test('disconnect_on_error config persists and runtime failure disables slot', ()
   assert.match(disconnected[0].reason, /proxy_disconnect/)
   assert.equal(disabled.length, 0, 'runtime disconnect should not also fire probe disable')
   pool2.stopScheduler()
+})
+
+test('isShortProbeRequest matches one-shot test calls of any max_tokens', () => {
+  // sub2api account test
+  assert.equal(
+    isShortProbeRequest({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 1024,
+      system: [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi', cache_control: { type: 'ephemeral' } }] }],
+    }),
+    true,
+  )
+  // new-api channel test
+  assert.equal(isShortProbeRequest({ max_tokens: 16, messages: [{ role: 'user', content: 'hi' }] }), true)
+  assert.equal(
+    isShortProbeRequest({ max_tokens: 32, messages: [{ role: 'user', content: 'verify-session f4: reply OK' }] }),
+    true,
+  )
+})
+
+test('isShortProbeRequest leaves conversations alone', () => {
+  const user = { role: 'user', content: 'hi' }
+  assert.equal(isShortProbeRequest({ messages: [user, { role: 'assistant', content: 'x' }, user] }), false)
+  assert.equal(isShortProbeRequest({ messages: [user], tools: [{ name: 'Bash' }] }), false)
+  assert.equal(isShortProbeRequest({ messages: [{ role: 'user', content: 'x'.repeat(65) }] }), false)
+  assert.equal(
+    isShortProbeRequest({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image', source: {} },
+            { type: 'text', text: 'hi' },
+          ],
+        },
+      ],
+    }),
+    false,
+  )
+  assert.equal(isShortProbeRequest({ messages: [{ role: 'user', content: '  ' }] }), false)
 })
