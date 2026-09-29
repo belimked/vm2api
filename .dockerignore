@@ -2,7 +2,6 @@
 .github
 node_modules
 web/node_modules
-web/dist
 bin/*
 !bin/kin-kernel
 !bin/kin-egress
@@ -19,6 +18,11 @@ data
 docs/images
 test
 crates
+patches
+.local
+local-src
+skills
+src/lib/oauth/auth.js
 worker/bin
 *.md
 !README.md

@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.3.79 — 2026-09-29
+
+- 槽位 `settings.env` 不再把 `CLAUDE_CODE_USE_BEDROCK` 和 `CLAUDE_CODE_USE_VERTEX` 写成 `1`。官方 CLI 会把 `1` 当成启用 Amazon Bedrock / Vertex，推理去连 `169.254.169.254` 拿 AWS 凭证，不再请求 Anthropic。这两个变量现在固定为 `0`，调用方传入的 `1` 不会生效。
+
+已部署机升级：覆盖控制面并重启 Node 一次。已有槽的 `settings.json` 要等下一次种子重写（保存种子策略或官方初始化）才会变成 `0`。kernel / cli-node 未变，不必 `wrap-cli/sync`。不要 `docker rm` 槽。不要覆盖 live `routing.json`。
+
+## 1.3.78 — 2026-09-29
+
+- Claude Code 出站身份对齐 2.1.284。默认 Sonnet 为 `claude-sonnet-5-5`：`max_tokens` 128000/128000，默认 effort `medium`，知识截止 June 2026。Sonnet 5 仍保留，缺省输出 64000。
+- 计费头在 first-party 且 prompt/turn 索引合法时，于 `cc_turn_origin` 后追加 `cc_prompt_index` 与 `cc_turn_index`。`cch` 种子和公式不变。
+- 槽位种子默认写入 `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`。cli-node 在该开关打开时，用 body 里的 `cc_prompt_id` 发送 `x-claude-code-prompt-id`。
+- 换票二进制 `kin-oauth-auth` 按 2.1.284 重编并 UPX 压缩到约 14MB。Node、worker 回退和二进制的 UA 都是 `claude-cli/2.1.284`。
+
+已部署机升级：覆盖控制面并重启 Node 一次，使新的 `bin/kin-oauth-auth` 生效。仓内 kernel / cli-node ELF 这次没有重编，不必 `wrap-cli/sync`。不要 `docker rm` 槽。不要覆盖 live `routing.json`。
+
+## 1.3.77 — 2026-09-29
+
+- 双号池空闲位优先：粘性 / family / 设备只是偏好。绑定槽忙时这一轮借同平台空闲合格槽，绑定不动；预约竞争失败不再停下等原槽，前 4 个候选失败后第 5 个仍可达。
+- 重试预算：同一请求在同一 VM 最多 3 次实际执行（含传输层隐藏重试），空跳先换空闲 VM；不再累计逻辑 slot 坏位、不再因计数把 VM 标过载或重启 CLI。`max_total_attempts` / `max_account_switches` 用完后只尝试未试过的 VM，直到总 deadline。
+- 占位闭环：预约被额度 / 熔断 / Fable 拒绝时按逆序归还本次拿到的执行位、额度计数与会话窗口；`release()` 幂等。活跃请求的会话窗口不被空闲过期清掉，空闲从最后一次释放起算。迁移不回收其他在飞请求的执行位；迟到的完成不会把已迁走 / 已释放的绑定写回。
+- 显式子请求（有 `parent_session_id` / `root_session_id` 且父会话本地已绑定）计入父会话窗口，不新占 `max_sessions`，仍各占执行位；借到别的 VM 的一轮不在那里新开长期窗口。
+- OpenAI：并发 / RPM 同步检查并占位，kernel 初始化期间不再超卖；候选每跳重新读取、不再截断前 4 个；会话窗口按 `max_sessions` 计，不再拿 `session_slots` 顶替；绑定槽忙不解绑；`previous_response_id` 续接只在原账号，原账号不可用返回 `409 response_not_portable`。
+- #163：裸 429 不再按模型名定范围，改为当前执行单元短冷却并触发一次 `/usage`（与定时探测同一单飞、有界队列、超时与退避，失败不写 0%）；点名模型的才按模型冷却，每分钟限流按 RPM。正在服务或持有会话的账号，最新真实样本超过 `usage_probe.stale_sec` 即重新探测，不再以 reset 未到当作新鲜。额度 / 凭证硬排除时，该账号所有绑定会话连同会话窗口一起迁走。
+- 错误与日志：真实容量耗尽返回 `429 pool_overloaded`（号池负载过高，稍后再试），仅在已知恢复时刻带 `Retry-After`；没有合格账号返回 `503 pool_unavailable`；执行过的失败保留上游本义与最后执行的 VM / 账号 / 尝试数，零执行记 0。日志里没分到执行位显示「未分配执行位」，不再显示「未绑定账号」。
+
+已部署机升级：覆盖控制面与前端并重启 Node 一次。kernel / cli-node 未变，不必 `wrap-cli/sync`。不要 `docker rm` 槽。不要覆盖 live `routing.json`。
+
+## 1.3.76 — 2026-09-28
+
+- 空跳或客户端取消：坏掉的 native slot 直接跳过，同一会话改用下一个，直到 20 个用满。不在这次错误上重启 CLI。VM 还有坏 slot 且没有在飞请求时，闲时重启 CLI。20 个 slot 都坏了，把 VM 标成过载并重启 CLI。
+
+已部署机升级：只覆盖控制面并重启 Node 一次。二进制未变，不必 `wrap-cli/sync`。不要 `docker rm` 槽。不要覆盖 live `routing.json`。
+
+## 1.3.75 — 2026-09-28
+
+- 代理池页重做：左侧「席位」总览（每条代理一列、每格一个绑定位，按健康着色，悬停联动右侧列表、点击定位）+ 待接代理槽位拖拽绑定；「添加代理」粘贴导入带结果回执（重复 / 无法解析分列，账密不回显）与本地出口；「管理」收纳全部测通 / 测地理、每条绑定上限、探测间隔、出口 DNS、跟随代理时区。
+- 右侧代理列表改为行卡片：大号 `已绑/上限` 计数 + 席位格、延迟信号格、出口地理、可搜索的绑定选择器（无代理槽位优先，已绑槽位标注来源并换绑），搜索、席位筛选与排序。
+
+已部署机升级：只覆盖前端（`web/dist`）。控制面、kernel 与 cli-node 未变，不必重启 Node，不必 `wrap-cli/sync`。不要 `docker rm` 槽。不要覆盖 live `routing.json`。
 
 ## 1.3.74 — 2026-09-28
 

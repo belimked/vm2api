@@ -443,7 +443,7 @@ export class StickyRouter {
   bind(
     key,
     { accountId, vmId, sessionId = null, deviceId = null, slotIndex = null } = {},
-    { countHit = true, ifGeneration = null } = {},
+    { countHit = true, ifGeneration = null, replaceSession = false, clearSlot = false } = {},
   ) {
     if (!key || !this.config.enabled) return false
     const ttl = (this.config.ttl_seconds || 86400) * 1000
@@ -457,9 +457,11 @@ export class StickyRouter {
     const nextVm = locked ? prev.vm_id : vmId
     const nextSlot = locked
       ? (prev.slot_index ?? null)
-      : slotIndex == null
-        ? (prev.slot_index ?? null)
-        : Number(slotIndex)
+      : clearSlot
+        ? null
+        : slotIndex == null
+          ? (prev.slot_index ?? null)
+          : Number(slotIndex)
     const changed = !!(
       prev.vm_id &&
       (nextAccount !== prev.account_id || nextVm !== prev.vm_id || (slotIndex != null && nextSlot !== prev.slot_index))
@@ -468,9 +470,11 @@ export class StickyRouter {
     const sameVm = !!(prev.vm_id && nextVm && prev.vm_id === nextVm)
     const nextSessionId = locked
       ? prev.session_id || sessionId || null
-      : sameVm
-        ? prev.session_id || sessionId || null
-        : sessionId || prev.session_id || null
+      : replaceSession
+        ? sessionId || null
+        : sameVm
+          ? prev.session_id || sessionId || null
+          : sessionId || prev.session_id || null
     const device = String(deviceId || '').trim()
     this.repo.upsert(key, {
       account_id: nextAccount,
@@ -582,6 +586,15 @@ export class StickyRouter {
 
   unbindByAccount({ accountId = null, vmId = null } = {}) {
     return this.repo.removeByAccount({ accountId, vmId })
+  }
+
+  /** Live keys pinned to this account or VM, so their windows leave with them. */
+  boundKeys({ accountId = null, vmId = null } = {}) {
+    if (!accountId && !vmId) return []
+    this._purge()
+    return Object.entries(this.repo.all() || {})
+      .filter(([, ent]) => (accountId && ent?.account_id === accountId) || (vmId && ent?.vm_id === vmId))
+      .map(([key, ent]) => ({ key, accountId: ent.account_id, vmId: ent.vm_id }))
   }
 
   _purge() {
