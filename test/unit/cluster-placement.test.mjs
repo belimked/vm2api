@@ -211,7 +211,8 @@ test('remote iptables script mirrors applyIptables semantics', () => {
     'INPUT acceptance is scoped to the egress bridge and redirect port',
   )
   assert.ok(script.includes("'!'"), 'negation is passed as its own quoted arg')
-  assert.equal(lines.length, 1 + plan.add.length - 2, 'two -C rows fold into their guarded row')
+  const guardedRows = plan.add.filter((args) => args.includes('-C')).length
+  assert.equal(lines.length, 1 + plan.add.length - guardedRows, 'each -C row folds into its guarded row')
   assert.doesNotMatch(remoteIptablesScript(plan, { sudo: false }), /sudo/)
 })
 
