@@ -204,7 +204,12 @@ test('remote iptables script mirrors applyIptables semantics', () => {
   assert.match(lines[1], /^sudo -n iptables '-t' 'nat' '-N' 'KEGabc' 2>\/dev\/null \|\| true$/)
   // -C guards exactly the following -A/-I; both halves on one line.
   assert.match(lines[2], /'-C' 'PREROUTING'.*\|\| sudo -n iptables .*'-A' 'PREROUTING'/)
-  assert.ok(lines.at(-1).includes("'-C' 'FORWARD'") && lines.at(-1).includes("'-I' 'FORWARD' '1'"))
+  assert.ok(lines.some((line) => line.includes("'-C' 'FORWARD'") && line.includes("'-I' 'FORWARD' '1'")))
+  assert.ok(lines.some((line) => line.includes("'-I' 'INPUT' '1'") && line.includes("'ACCEPT'")))
+  assert.ok(
+    script.includes("'-i' 'kegabc' '-p' 'tcp' '--dport' '20000' '-j' 'ACCEPT'"),
+    'INPUT acceptance is scoped to the egress bridge and redirect port',
+  )
   assert.ok(script.includes("'!'"), 'negation is passed as its own quoted arg')
   assert.equal(lines.length, 1 + plan.add.length - 2, 'two -C rows fold into their guarded row')
   assert.doesNotMatch(remoteIptablesScript(plan, { sudo: false }), /sudo/)
