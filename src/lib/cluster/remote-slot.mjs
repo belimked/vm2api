@@ -334,7 +334,7 @@ export async function releaseRemoteEgress(session, networkMode) {
 export function slotContainerBody(vm, { image, network, remoteDir, user }) {
   const slotName = displayName(vm.id)
   const mem = parseMemoryBytes(SLOT_MEMORY)
-  const macAllowed = !['host', 'none'].includes(network) && !String(network || '').startsWith('container:')
+  const macAllowed = !['host', 'bridge', 'none'].includes(network) && !String(network || '').startsWith('container:')
   const mac = macAllowed ? workstationMacAddress(vm) : null
   return {
     Image: image,
