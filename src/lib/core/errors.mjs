@@ -331,6 +331,16 @@ export function incompleteAssistantClientError(result = {}) {
 export function mapUpstreamError(status, body, headers = {}) {
   const upType = upstreamErrorType(body)
   const inboundCode = body?.error?.code || null
+  if (
+    [
+      'classifier_model_incompatible',
+      'classifier_runtime_unsupported',
+      'classifier_invalid_cache',
+      'invalid_request_context',
+    ].includes(inboundCode)
+  ) {
+    return makeError({ type: ErrorType.INVALID_REQUEST, code: inboundCode, message: body.error.message, status: 400 })
+  }
   let msg =
     body?.error?.message ||
     (typeof body?.error === 'string' ? body.error : null) ||
@@ -399,7 +409,11 @@ export function mapUpstreamError(status, body, headers = {}) {
       code: ErrorCode.CONTENT_FILTER_REFUSAL,
       message: String(msg),
       status: 403,
-      details: { upstream_type: upType, upstream_status: status },
+      details: {
+        upstream_type: upType,
+        upstream_status: status,
+        ...(body?.error?.upstream_code ? { upstream_code: body.error.upstream_code } : {}),
+      },
       request_id,
     })
   }
@@ -410,7 +424,11 @@ export function mapUpstreamError(status, body, headers = {}) {
       code: ErrorCode.UPSTREAM_AUTH,
       message: String(msg),
       status: status === 403 ? 403 : 401,
-      details: { upstream_type: upType, upstream_status: status },
+      details: {
+        upstream_type: upType,
+        upstream_status: status,
+        ...(body?.error?.upstream_code ? { upstream_code: body.error.upstream_code } : {}),
+      },
       request_id,
     })
   }
@@ -436,7 +454,11 @@ export function mapUpstreamError(status, body, headers = {}) {
       code: ErrorCode.UPSTREAM_OVERLOADED,
       message: String(msg),
       status: 529,
-      details: { upstream_type: upType, upstream_status: status },
+      details: {
+        upstream_type: upType,
+        upstream_status: status,
+        ...(body?.error?.upstream_code ? { upstream_code: body.error.upstream_code } : {}),
+      },
       request_id,
     })
   }
@@ -448,7 +470,11 @@ export function mapUpstreamError(status, body, headers = {}) {
       message: String(msg),
       status: inboundCode === ErrorCode.UPSTREAM_INVALID && status >= 400 && status < 500 ? status : 400,
       param: body?.error?.param || undefined,
-      details: { upstream_type: upType, upstream_status: status },
+      details: {
+        upstream_type: upType,
+        upstream_status: status,
+        ...(body?.error?.upstream_code ? { upstream_code: body.error.upstream_code } : {}),
+      },
       request_id,
     })
   }
@@ -460,7 +486,11 @@ export function mapUpstreamError(status, body, headers = {}) {
       code: inboundCode,
       message: String(msg),
       status: inboundCode === ErrorCode.UPSTREAM_ERROR && status >= 500 && status < 600 ? status : kernelStatus,
-      details: { upstream_type: upType, upstream_status: status },
+      details: {
+        upstream_type: upType,
+        upstream_status: status,
+        ...(body?.error?.upstream_code ? { upstream_code: body.error.upstream_code } : {}),
+      },
       request_id,
     })
   }
@@ -504,7 +534,11 @@ export function mapUpstreamError(status, body, headers = {}) {
     code: ErrorCode.UPSTREAM_ERROR,
     message: String(msg),
     status: status >= 400 && status < 600 ? status : 502,
-    details: { upstream_type: upType, upstream_status: status },
+    details: {
+      upstream_type: upType,
+      upstream_status: status,
+      ...(body?.error?.upstream_code ? { upstream_code: body.error.upstream_code } : {}),
+    },
     request_id,
   })
 }

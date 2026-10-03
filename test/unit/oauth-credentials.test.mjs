@@ -16,6 +16,7 @@ import {
   readWorkerCredentialFile,
   readSlotCredentialIdentity,
   writeWorkerCredentialFile,
+  ensureSlotSubscriptionType,
   slotUidGidFromHomeDir,
   ensureSlotClaudeOwnership,
   REFRESH_SKEW_MS,
@@ -305,7 +306,7 @@ test('readWorkerCredentialFile infers setup-token from inference-only scopes', (
   assert.equal(cred.scope, 'user:inference')
 })
 
-test('writeWorkerCredentialFile maps setup-token inference scope to user:inference', () => {
+test('writeWorkerCredentialFile maps inference-only oats to official-setup-token', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-scope-'))
   writeWorkerCredentialFile(home, {
     type: 'setup-token',
@@ -313,9 +314,10 @@ test('writeWorkerCredentialFile maps setup-token inference scope to user:inferen
     scope: 'inference',
   })
   const cred = readWorkerCredentialFile(home)
-  assert.equal(cred.type, 'setup-token')
+  assert.equal(cred.type, 'official-setup-token')
   assert.equal(cred.scope, 'user:inference')
   const raw = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'credentials.json'), 'utf8'))
+  assert.equal(raw.type, 'official-setup-token')
   assert.deepEqual(raw.claudeAiOauth.scopes, ['user:inference'])
   fs.rmSync(home, { recursive: true, force: true })
 })
@@ -362,8 +364,50 @@ test('writeWorkerCredentialFile stores claudeAiOauth and reads back', () => {
   fs.rmSync(home, { recursive: true, force: true })
 })
 
-test('slotUidGidFromHomeDir maps numeric slot homes', () => {
+test('writeWorkerCredentialFile stores subscriptionType and falls back to the vm plan', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-sub-'))
+  writeWorkerCredentialFile(home, {
+    type: 'setup-token',
+    access_token: 'sk-ant-oat01-SUB',
+    subscription_type: 'max',
+  })
+  let raw = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'credentials.json'), 'utf8'))
+  assert.equal(raw.claudeAiOauth.subscriptionType, 'max')
+  assert.equal(readWorkerCredentialFile(home).subscription_type, 'max')
+  writeWorkerCredentialFile(home, {
+    type: 'setup-token',
+    access_token: 'sk-ant-oat01-SUB',
+    account_tier: 'pro',
+  })
+  raw = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'credentials.json'), 'utf8'))
+  assert.equal(raw.claudeAiOauth.subscriptionType, 'pro')
+  writeWorkerCredentialFile(home, {
+    type: 'setup-token',
+    access_token: 'sk-ant-oat01-SUB',
+  })
+  raw = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'credentials.json'), 'utf8'))
+  assert.equal(raw.claudeAiOauth.subscriptionType, 'pro')
+  fs.rmSync(home, { recursive: true, force: true })
+})
+
+test('ensureSlotSubscriptionType fills an old credential and keeps an existing plan', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-migrate-'))
+  const file = path.join(home, '.claude', 'credentials.json')
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, JSON.stringify({ claudeAiOauth: { accessToken: 'sk-ant-oat01-OLD' } }))
+  assert.deepEqual(ensureSlotSubscriptionType(home, 'max'), { wrote: true, subscriptionType: 'max' })
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).claudeAiOauth.subscriptionType, 'max')
+  assert.deepEqual(ensureSlotSubscriptionType(home, 'pro'), { wrote: false, reason: 'present' })
+  fs.rmSync(home, { recursive: true, force: true })
+})
+
+test('slotUidGidFromHomeDir maps numeric and named slot homes', () => {
   assert.deepEqual(slotUidGidFromHomeDir('/opt/kin-gateway-rust/vms/vm-03/cli-home'), { uid: 10003, gid: 987 })
+  assert.deepEqual(slotUidGidFromHomeDir('/opt/vm2api/vms/claude-ios-145/cli-home'), { uid: 10001, gid: 987 })
+  assert.deepEqual(slotUidGidFromHomeDir('/opt/kin-gateway/vms/bloat-ranges-3hicloudcom/cli-home'), {
+    uid: 10001,
+    gid: 987,
+  })
   assert.equal(slotUidGidFromHomeDir('/tmp/kin-slot-write-xxx'), null)
 })
 
@@ -451,7 +495,7 @@ test('official setup-token persist omits refresh and marks mode', () => {
     { acceptLiveGrant: true },
   )
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-  assert.equal(vm.claude.mode, 'setup-token')
+  assert.equal(vm.claude.mode, 'official-setup-token')
   assert.equal(vm.claude.has_access, true)
   assert.equal(vm.claude.has_refresh, false)
   assert.equal(vm.claude.source, 'claude-setup-token')
@@ -465,10 +509,10 @@ test('official setup-token persist omits refresh and marks mode', () => {
     scope: 'user:inference',
   })
   const raw = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'credentials.json'), 'utf8'))
-  assert.equal(raw.type, 'setup-token')
-  assert.equal(raw.claudeAiOauth.type, 'setup-token')
+  assert.equal(raw.type, 'official-setup-token')
+  assert.equal(raw.claudeAiOauth.type, 'official-setup-token')
   assert.ok(!Object.prototype.hasOwnProperty.call(raw.claudeAiOauth, 'refreshToken'))
   const cred = readWorkerCredentialFile(home)
-  assert.equal(cred.type, 'setup-token')
+  assert.equal(cred.type, 'official-setup-token')
   assert.equal(cred.refresh_token, '')
 })
