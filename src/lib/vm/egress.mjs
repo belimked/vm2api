@@ -103,6 +103,27 @@ export function gatewayFromSubnet(subnet) {
 export function iptablesPlan({ chain, bridge, subnet, tcpPort, dnsPort }) {
   const tcp = String(tcpPort)
   const dns = String(dnsPort)
+  // REDIRECT delivers bridge traffic to host INPUT. Allow only this proxy's
+  // subnet and helper ports, ahead of host default-reject rules (e.g. Oracle).
+  const inputRules = [
+    [
+      '-i',
+      bridge,
+      '-s',
+      subnet,
+      '-d',
+      subnet,
+      '-p',
+      'tcp',
+      '-m',
+      'multiport',
+      '--dports',
+      `${tcp},${dns}`,
+      '-j',
+      'ACCEPT',
+    ],
+    ['-i', bridge, '-s', subnet, '-d', subnet, '-p', 'udp', '--dport', dns, '-j', 'ACCEPT'],
+  ]
   return {
     add: [
       ['-t', 'nat', '-N', chain],
@@ -113,28 +134,19 @@ export function iptablesPlan({ chain, bridge, subnet, tcpPort, dnsPort }) {
       ['-t', 'nat', '-A', chain, '-p', 'tcp', '--dport', '53', '-j', 'REDIRECT', '--to-ports', dns],
       ['-t', 'nat', '-A', chain, '-p', 'udp', '--dport', '53', '-j', 'REDIRECT', '--to-ports', dns],
       ['-t', 'nat', '-A', chain, '-p', 'tcp', '-j', 'REDIRECT', '--to-ports', tcp],
+      ...inputRules.flatMap((rule) => [
+        ['-t', 'filter', '-C', 'INPUT', ...rule],
+        ['-t', 'filter', '-I', 'INPUT', '1', ...rule],
+      ]),
       ['-t', 'filter', '-C', 'FORWARD', '-i', bridge, '!', '-d', subnet, '-j', 'DROP'],
       ['-t', 'filter', '-I', 'FORWARD', '1', '-i', bridge, '!', '-d', subnet, '-j', 'DROP'],
-      // REDIRECT DNATs the bridge to the gateway, so container→kin-egress packets
-      // traverse INPUT. A restrictive host INPUT policy (or a DROP ahead of
-      // docker's rules) silently drops them → kin-egress never receives → 502.
-      // Allow the kin-egress redirect ports on this bridge, inserted ahead of any
-      // DROP. Scoped to the two ports so nothing else on the bridge reaches host.
-      ['-t', 'filter', '-C', 'INPUT', '-i', bridge, '-p', 'tcp', '--dport', tcp, '-j', 'ACCEPT'],
-      ['-t', 'filter', '-I', 'INPUT', '1', '-i', bridge, '-p', 'tcp', '--dport', tcp, '-j', 'ACCEPT'],
-      ['-t', 'filter', '-C', 'INPUT', '-i', bridge, '-p', 'tcp', '--dport', dns, '-j', 'ACCEPT'],
-      ['-t', 'filter', '-I', 'INPUT', '1', '-i', bridge, '-p', 'tcp', '--dport', dns, '-j', 'ACCEPT'],
-      ['-t', 'filter', '-C', 'INPUT', '-i', bridge, '-p', 'udp', '--dport', dns, '-j', 'ACCEPT'],
-      ['-t', 'filter', '-I', 'INPUT', '1', '-i', bridge, '-p', 'udp', '--dport', dns, '-j', 'ACCEPT'],
     ],
     del: [
       ['-t', 'nat', '-D', 'PREROUTING', '-i', bridge, '-j', chain],
       ['-t', 'nat', '-F', chain],
       ['-t', 'nat', '-X', chain],
       ['-t', 'filter', '-D', 'FORWARD', '-i', bridge, '!', '-d', subnet, '-j', 'DROP'],
-      ['-t', 'filter', '-D', 'INPUT', '-i', bridge, '-p', 'tcp', '--dport', tcp, '-j', 'ACCEPT'],
-      ['-t', 'filter', '-D', 'INPUT', '-i', bridge, '-p', 'tcp', '--dport', dns, '-j', 'ACCEPT'],
-      ['-t', 'filter', '-D', 'INPUT', '-i', bridge, '-p', 'udp', '--dport', dns, '-j', 'ACCEPT'],
+      ...inputRules.map((rule) => ['-t', 'filter', '-D', 'INPUT', ...rule]),
     ],
   }
 }
