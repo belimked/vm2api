@@ -66,15 +66,6 @@ import { refreshCodexAccessToken } from '../protocol/codex-models.mjs'
 import { defaultSeedPolicy, seedTelemetryContract, standardSeedPolicy } from '../protocol/seed-policy.mjs'
 
 import { runVmTestChat, resolveTestModels, syncCodexCatalog } from './vm-test-chat.mjs'
-import {
-  startConcurrentTest,
-  getConcurrentTest,
-  listConcurrentTests,
-  cancelConcurrentTest,
-  listSavedReports,
-  readSavedReport,
-} from './concurrent-test.mjs'
-import { startProbeTest, getProbeTest, listProbeTests, cancelProbeTest, getProbeCatalog } from './probe-test.mjs'
 import { publicKeyView } from './api-keys.mjs'
 import { publicEndpointView, fetchUpstreamModels, API_ENDPOINT_PRESETS } from './api-endpoints.mjs'
 import { publicUserView } from './panel-users.mjs'
@@ -204,6 +195,68 @@ import { codexKernelHealth } from '../transport/codex-kernel-client.mjs'
 import { setManualScheduleWins } from '../pool/schedule-policy.mjs'
 import { normalizeHealthProbeConfig } from './health-probe.mjs'
 import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
+import { UsageLogsView } from '../db/repos/usage-logs-view.mjs'
+import {
+  StatisticsRepo,
+  USER_ROLE_DIMENSIONS,
+  normalizeDimension,
+  normalizeRange,
+} from '../db/repos/statistics-repo.mjs'
+
+/** Tenants always see their own rows; other roles may narrow by `user_id`. */
+function logsOwner(req, u) {
+  return panelIdentity(req).role === 'user' ? req.panelUserId : u.searchParams.get('user_id') || null
+}
+
+/** Scrolling-log query string → `UsageLogsView` filters. Empty strings are dropped. */
+function usageLogFilters(req, u) {
+  const get = (k) => {
+    const v = u.searchParams.get(k)
+    return v == null || v === '' ? null : v
+  }
+  const isUser = panelIdentity(req).role === 'user'
+  return {
+    limit: get('limit'),
+    cursor_created_at: get('cursor_created_at'),
+    cursor_id: get('cursor_id'),
+    user_id: isUser ? null : get('user_id'),
+    key_id: get('key_id'),
+    vm_id: get('vm_id'),
+    account_id: get('account_id'),
+    session_id: get('session_id'),
+    model: get('model'),
+    endpoint: get('endpoint'),
+    protocol: get('protocol'),
+    status_code: get('status_code'),
+    exclude_status_200: get('exclude_status_200') === '1',
+    model_mismatch: get('model_mismatch') === '1',
+    min_attempt_count: get('min_attempt_count'),
+    error_class: get('error_class'),
+    exclude_error_class: get('exclude_error_class'),
+    include_muted: get('include_muted') === '1',
+    debug_only: get('log_mode') === 'debug',
+    start_time: get('start_time'),
+    end_time: get('end_time'),
+    q: get('q'),
+    owner_user_id: isUser ? req.panelUserId : null,
+  }
+}
+
+/**
+ * Validated statistics params. `user` may only group by key/model: user and
+ * vm groupings would reveal other tenants or the pool layout.
+ */
+function statsParams(req, u, dimensionKey) {
+  const isUser = panelIdentity(req).role === 'user'
+  const rawRange = u.searchParams.get('range')
+  const rawDim = u.searchParams.get(dimensionKey)
+  const range = rawRange ? normalizeRange(rawRange) : 'today'
+  if (!range) return { error: `invalid range: ${rawRange}` }
+  const dimension = rawDim ? normalizeDimension(rawDim) : 'model'
+  if (!dimension) return { error: `invalid ${dimensionKey}: ${rawDim}` }
+  if (isUser && !USER_ROLE_DIMENSIONS.includes(dimension)) return { error: `${dimensionKey} not allowed: ${dimension}` }
+  return { range, dimension, tz: u.searchParams.get('tz') || 'UTC', owner_user_id: logsOwner(req, u) }
+}
 
 async function commitImportedCodexVm({ cfg, vmPath, existing, account, catalogClientVersion = 'auto' }) {
   const saved = upsertCodexAccount(cfg.paths.project, existing.id, account)
@@ -271,6 +324,13 @@ async function syncInstalledKernels({ project, routingConfig, body = {} }) {
   report.ok_count = report.items.length - failed.length
   report.failed_count = failed.length
   return report
+}
+
+/** Auth-link hint for the slot's proxy: `name · host:port`, or bare host:port when unnamed. */
+function slotProxyHint(px = {}, label = null) {
+  if (!px.host) return null
+  const endpoint = `${px.host}${px.port ? ':' + px.port : ''}`
+  return label ? `${label} · ${endpoint}` : endpoint
 }
 
 export function createPanelHandler(ctx) {
@@ -372,9 +432,9 @@ export function createPanelHandler(ctx) {
     reloadActiveVm(cfg)
     const vm = getVm(cfg.paths.project, id)
     accountQuota.ensure({
-      account_id: vm?.claude?.account_uuid || id,
+      account_id: vm?.account_uuid || vm?.claude?.account_uuid || id,
       vm_id: id,
-      email: vm?.claude?.email || null,
+      email: vm?.email || vm?.codex?.email || vm?.claude?.email || null,
       type: normalizeCredentialMode(vm?.claude?.mode),
       max_concurrency: vm?.policy?.maxConcurrency || 2,
       max_rpm: vm?.policy?.maxRpm ?? 0,
@@ -1228,6 +1288,61 @@ export function createPanelHandler(ctx) {
         return json(res, 200, { ok: true, item: rec })
       }
 
+      // ---- Scrolling usage logs (keyset cursor, camelCase rows) ----
+      // Lives beside /request-logs (offset + snake_case, still used by error
+      // collection and export); this surface never COUNTs the table.
+      const usageLogsView = () => new UsageLogsView(getDb(), { mutedErrorClasses: requestLog?.mutedErrorClasses })
+      const tenantId = () => (panelIdentity(req).role === 'user' ? req.panelUserId : null)
+      if (req.method === 'GET' && p === '/api/panel/usage-logs') {
+        const u = new URL(req.url, 'http://x')
+        return json(res, 200, panel.ok(usageLogsView().listBatch(usageLogFilters(req, u))))
+      }
+      if (req.method === 'GET' && p === '/api/panel/usage-logs/summary') {
+        const u = new URL(req.url, 'http://x')
+        return json(res, 200, panel.ok(usageLogsView().summary(usageLogFilters(req, u))))
+      }
+      if (req.method === 'GET' && p === '/api/panel/usage-logs/filter-options') {
+        return json(res, 200, panel.ok(usageLogsView().filterOptions({ owner_user_id: tenantId() })))
+      }
+      if (req.method === 'GET' && p === '/api/panel/usage-logs/session-suggestions') {
+        const u = new URL(req.url, 'http://x')
+        const q = u.searchParams.get('q') || ''
+        const limit = u.searchParams.get('limit')
+        return json(res, 200, panel.ok(usageLogsView().sessionSuggestions({ q, limit, owner_user_id: tenantId() })))
+      }
+      if (req.method === 'GET' && p === '/api/panel/usage-logs/active-sessions') {
+        const u = new URL(req.url, 'http://x')
+        const minutes = u.searchParams.get('minutes')
+        const limit = u.searchParams.get('limit')
+        return json(res, 200, panel.ok(usageLogsView().activeSessions({ minutes, limit, owner_user_id: tenantId() })))
+      }
+      if (req.method === 'GET' && p === '/api/panel/usage-logs/overview') {
+        const u = new URL(req.url, 'http://x')
+        const tz = u.searchParams.get('tz') || 'UTC'
+        return json(res, 200, panel.ok(usageLogsView().overview({ tz, owner_user_id: tenantId() })))
+      }
+
+      // ---- Statistics page ----
+      if (req.method === 'GET' && p === '/api/panel/statistics') {
+        const u = new URL(req.url, 'http://x')
+        const q = statsParams(req, u, 'dimension')
+        if (q.error) return json(res, 400, { ok: false, error: { message: q.error } })
+        const { range, dimension, tz, owner_user_id } = q
+        return json(res, 200, panel.ok(new StatisticsRepo(getDb()).statistics({ range, dimension, tz, owner_user_id })))
+      }
+      if (req.method === 'GET' && p === '/api/panel/statistics/leaderboard') {
+        const u = new URL(req.url, 'http://x')
+        const q = statsParams(req, u, 'scope')
+        if (q.error) return json(res, 400, { ok: false, error: { message: q.error } })
+        const { range, dimension: scope, tz, owner_user_id } = q
+        const limit = u.searchParams.get('limit')
+        return json(
+          res,
+          200,
+          panel.ok(new StatisticsRepo(getDb()).leaderboard({ range, scope, limit, tz, owner_user_id })),
+        )
+      }
+
       if (req.method === 'GET' && p === '/api/panel/billing') {
         const u = new URL(req.url, 'http://x')
         const ident = panelIdentity(req)
@@ -1351,6 +1466,7 @@ export function createPanelHandler(ctx) {
             routingConfig: ctx.routingConfig,
             poolScheduler: ctx.poolScheduler,
             proxyPool,
+            requestLog,
             role: ident.role,
             ownerUserId: ident.role === 'user' ? req.panelUserId : null,
           }),
@@ -1975,109 +2091,6 @@ export function createPanelHandler(ctx) {
           refresh,
         })
         return json(res, 200, panel.ok(payload))
-      }
-
-      // Concurrent persistent-conversation load test
-      if (req.method === 'POST' && p === '/api/panel/concurrent-test') {
-        const body = await readBody(req, 32 * 1024).catch(() => ({}))
-        const result = startConcurrentTest({
-          concurrency: body.concurrency,
-          turns: body.turns,
-          models: body.models,
-          stocks: body.stocks,
-          max_tokens: body.max_tokens,
-          stream: body.stream,
-          timeout_ms: body.timeout_ms,
-          baseUrl: `http://127.0.0.1:${cfg.port}`,
-          apiKey: cfg.api_key,
-          dataDir: cfg.paths?.data || path.join(cfg.paths.project, 'data'),
-        })
-        if (!result.ok) {
-          const status = result.error?.code === 'run_in_progress' ? 409 : 400
-          return json(res, status, { ok: false, error: result.error, data: result.data || null })
-        }
-        return json(res, 200, panel.ok(result.data))
-      }
-      if (req.method === 'GET' && p === '/api/panel/concurrent-test') {
-        const includeText = url.searchParams.get('text') === '1'
-        return json(res, 200, panel.ok(getConcurrentTest(null, { includeText })))
-      }
-      if (req.method === 'GET' && p === '/api/panel/concurrent-tests') {
-        return json(res, 200, panel.ok({ items: listConcurrentTests() }))
-      }
-      if (req.method === 'GET' && p === '/api/panel/concurrent-test-reports') {
-        const day = url.searchParams.get('day') || null
-        const dataDir = cfg.paths?.data || path.join(cfg.paths.project, 'data')
-        return json(res, 200, panel.ok(listSavedReports(dataDir, day)))
-      }
-      if (req.method === 'GET' && /^\/api\/panel\/concurrent-test-reports\/\d{4}-\d{2}-\d{2}\/[^/]+$/.test(p)) {
-        const day = p.split('/')[4]
-        const name = decodeURIComponent(p.split('/')[5] || '')
-        const dataDir = cfg.paths?.data || path.join(cfg.paths.project, 'data')
-        const data = readSavedReport(dataDir, day, name)
-        if (!data) return json(res, 404, { ok: false, error: { message: 'report not found' } })
-        return json(res, 200, panel.ok(data))
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/concurrent-test\/[^/]+\/cancel$/.test(p)) {
-        const id = p.split('/')[4]
-        const result = cancelConcurrentTest(id)
-        if (!result.ok) return json(res, 404, { ok: false, error: result.error })
-        return json(res, 200, panel.ok(result.data))
-      }
-      if (req.method === 'GET' && /^\/api\/panel\/concurrent-test\/[^/]+$/.test(p)) {
-        const id = p.split('/')[4]
-        const includeText = url.searchParams.get('text') === '1'
-        const data = getConcurrentTest(id, { includeText })
-        if (!data) return json(res, 404, { ok: false, error: { message: 'run not found' } })
-        return json(res, 200, panel.ok(data))
-      }
-
-      if (req.method === 'GET' && p === '/api/panel/probe-test/catalog') {
-        return json(res, 200, panel.ok(getProbeCatalog()))
-      }
-      if (req.method === 'POST' && p === '/api/panel/probe-test') {
-        const body = await readBody(req, 32 * 1024).catch(() => ({}))
-        const result = startProbeTest({
-          suite: body.suite,
-          models: body.models,
-          cases: body.cases,
-          forms: body.forms,
-          questions: body.questions,
-          sample: body.sample ?? body.sample_size,
-          random: body.random,
-          seed: body.seed,
-          max_tokens: body.max_tokens,
-          concurrency: body.concurrency,
-          timeout_ms: body.timeout_ms,
-          baseUrl: `http://127.0.0.1:${cfg.port}`,
-          apiKey: cfg.api_key,
-          dataDir: cfg.paths?.data || path.join(cfg.paths.project, 'data'),
-        })
-        if (!result.ok) {
-          const status = result.error?.code === 'run_in_progress' ? 409 : 400
-          return json(res, status, { ok: false, error: result.error, data: result.data || null })
-        }
-        return json(res, 200, panel.ok(result.data))
-      }
-      if (req.method === 'GET' && p === '/api/panel/probe-test') {
-        const includeText = url.searchParams.get('text') === '1' || url.searchParams.get('raw') === '1'
-        return json(res, 200, panel.ok(getProbeTest(null, { includeText })))
-      }
-      if (req.method === 'GET' && p === '/api/panel/probe-tests') {
-        return json(res, 200, panel.ok({ items: listProbeTests() }))
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/probe-test\/[^/]+\/cancel$/.test(p)) {
-        const id = p.split('/')[4]
-        const result = cancelProbeTest(id)
-        if (!result.ok) return json(res, 404, { ok: false, error: result.error })
-        return json(res, 200, panel.ok(result.data))
-      }
-      if (req.method === 'GET' && /^\/api\/panel\/probe-test\/[^/]+$/.test(p)) {
-        const id = p.split('/')[4]
-        const includeText = url.searchParams.get('text') === '1' || url.searchParams.get('raw') === '1'
-        const data = getProbeTest(id, { includeText })
-        if (!data) return json(res, 404, { ok: false, error: { message: 'run not found' } })
-        return json(res, 200, panel.ok(data))
       }
 
       // POST /api/panel/vms/:id/schedulable — sub2api-style schedule toggle
@@ -2932,7 +2945,7 @@ export function createPanelHandler(ctx) {
               200,
               panel.ok({
                 ...generated,
-                proxy_hint: px.host ? `${px.host}${px.port ? ':' + px.port : ''}` : null,
+                proxy_hint: slotProxyHint(px, proxyPool?.labelOf(px.id)),
               }),
             )
           }
@@ -2948,7 +2961,7 @@ export function createPanelHandler(ctx) {
             200,
             panel.ok({
               ...generated,
-              proxy_hint: px.host ? `${px.host}${px.port ? ':' + px.port : ''}` : null,
+              proxy_hint: slotProxyHint(px, proxyPool?.labelOf(px.id)),
             }),
           )
         } catch (e) {
@@ -3756,25 +3769,30 @@ export function createPanelHandler(ctx) {
       }
       if (req.method === 'PUT' && p === '/api/panel/proxies/config') {
         const body = await readBody(req, 64 * 1024)
-        const previousDnsPrimary = proxyPool.snapshot().config.dns_primary
+        const previousConfig = proxyPool.snapshot().config
         const result = proxyPool.updateConfig(body)
         if (!result.ok)
           return json(res, 400, {
             ok: false,
             error: { type: 'invalid_request_error', code: result.error, message: result.error, details: result },
           })
-        // DNS order change must reach running egress helpers; slots stay intact.
+        // DNS changes must reach running egress helpers; slots stay intact.
         const egress = []
         if (
-          body.dns_primary != null &&
-          body.dns_primary !== previousDnsPrimary &&
+          ((body.dns_primary != null && body.dns_primary !== previousConfig.dns_primary) ||
+            (body.dns_disable_svcb_https != null &&
+              body.dns_disable_svcb_https !== previousConfig.dns_disable_svcb_https)) &&
           egressEnabled() &&
           process.env.KIN_CRS_MOCK !== '1'
         ) {
           const dnsUpstream = dnsUpstreamChain(result.config.dns_primary)
+          const dnsEmptyTypes = result.config.dns_disable_svcb_https ? [64, 65] : []
           for (const proxy of proxyPool.snapshot().proxies) {
             if (isLocalEgressProxy(proxy) || !proxy.bound_vm_ids?.length) continue
-            const r = ensureProxyEgress(cfg.paths.project, proxyPool.getProxyByIdWithAuth(proxy.id), { dnsUpstream })
+            const r = ensureProxyEgress(cfg.paths.project, proxyPool.getProxyByIdWithAuth(proxy.id), {
+              dnsUpstream,
+              dnsEmptyTypes,
+            })
             egress.push({ proxy_id: proxy.id, ok: r.ok, error: r.ok ? null : r.error })
           }
         }
@@ -3792,7 +3810,7 @@ export function createPanelHandler(ctx) {
         // Forward only the keys the caller actually sent — update() reads
         // presence, not value, to tell "leave alone" from "clear".
         const patch = {}
-        for (const key of ['host', 'port', 'username', 'password']) {
+        for (const key of ['host', 'port', 'username', 'password', 'label']) {
           if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = body[key]
         }
         const result = proxyPool.update(id, patch)
@@ -3801,6 +3819,9 @@ export function createPanelHandler(ctx) {
           const type = status === 404 ? 'not_found_error' : 'invalid_request_error'
           return json(res, status, { ok: false, error: { type, code: result.error, message: result.error } })
         }
+        // A label is display-only; reloading every bound worker for it would
+        // pull live slots out of scheduling for nothing.
+        if (!result.connection_changed) return json(res, 200, panel.ok({ proxy: result.proxy, workers: [] }))
         // The pool store is only one of three places the credentials live
         // (pool -> vms/<id>.json -> worker.json). Without this the edit looks
         // like it worked while every bound slot keeps dialing the old proxy.

@@ -187,6 +187,25 @@ function readPid(file) {
     return 0
   }
 }
+
+function ownsEgressProcess(pid, configPath) {
+  if (!pidAlive(pid)) return false
+  try {
+    // PID files survive container restarts; a live PID may belong to another
+    // process or another proxy. Verify both before reusing or signaling it.
+    const exe = fs.readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, '')
+    const args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')
+    const configIndex = args.indexOf('-config')
+    if (path.basename(exe) !== 'kin-egress' || configIndex <= 0 || !args[configIndex + 1]) return false
+    const argument = args[configIndex + 1]
+    const actualConfig = path.isAbsolute(argument)
+      ? path.resolve(argument)
+      : path.resolve(fs.readlinkSync(`/proc/${pid}/cwd`), argument)
+    return actualConfig === path.resolve(configPath)
+  } catch {
+    return false
+  }
+}
 export function inspectEgressNetwork(proxyId, run = docker) {
   const name = networkName(proxyId)
   if (!name) return null
@@ -310,6 +329,11 @@ export function configuredDnsUpstream() {
   }
 }
 
+export function configuredDnsEmptyTypes() {
+  if (!isDbOpen()) return []
+  return new SettingsRepo(getDb()).get('proxy_pool_config')?.dns_disable_svcb_https === true ? [64, 65] : []
+}
+
 export function startEgressProcess({
   projectRoot,
   proxyId,
@@ -319,6 +343,7 @@ export function startEgressProcess({
   listenHost,
   bin = EGRESS_BIN,
   dnsUpstream = '',
+  dnsEmptyTypes = [],
 }) {
   const blocked = proxyBlockedReason({ url: proxyUrl })
   if (blocked) return { ok: false, error: blocked }
@@ -330,14 +355,15 @@ export function startEgressProcess({
   const listenTcp = `${listenHost}:${tcpPort}`
   const listenDns = `${listenHost}:${dnsPort}`
   const existing = readPid(pidFile)
-  if (existing && pidAlive(existing)) {
+  if (ownsEgressProcess(existing, cfgPath)) {
     try {
       const old = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
       if (
         old.listen_tcp === listenTcp &&
         old.listen_dns === listenDns &&
         old.proxy_url === proxyUrl &&
-        (old.dns_upstream || '') === dnsUpstream
+        (old.dns_upstream || '') === dnsUpstream &&
+        JSON.stringify(old.dns_empty_types || []) === JSON.stringify(dnsEmptyTypes)
       ) {
         return { ok: true, pid: existing, reused: true, configPath: cfgPath }
       }
@@ -356,6 +382,7 @@ export function startEgressProcess({
     listen_dns: listenDns,
   }
   if (dnsUpstream) cfg.dns_upstream = dnsUpstream
+  if (dnsEmptyTypes.length) cfg.dns_empty_types = dnsEmptyTypes
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 })
   const child = spawn(bin, ['-config', cfgPath], {
     detached: true,
@@ -370,14 +397,14 @@ export function stopEgressProcess(projectRoot, proxyId) {
   const dir = egressRunDir(projectRoot, proxyId)
   const pidFile = path.join(dir, 'egress.pid')
   const pid = readPid(pidFile)
-  if (pid && pidAlive(pid)) {
+  if (ownsEgressProcess(pid, path.join(dir, 'egress.json'))) {
     try {
       process.kill(pid, 'SIGTERM')
     } catch (error) {
       if (error.code !== 'ESRCH') return { ok: false, error: `egress_stop_failed: ${error.code || error.message}` }
     }
     // Keep the PID while termination is pending so policy reconciliation can verify/retry it.
-    if (pidAlive(pid)) return { ok: true }
+    if (ownsEgressProcess(pid, path.join(dir, 'egress.json'))) return { ok: true }
   }
   try {
     fs.rmSync(pidFile, { force: true })
@@ -390,7 +417,9 @@ export function stopEgressProcess(projectRoot, proxyId) {
 export function inspectEgressProcess(projectRoot, proxyId) {
   const dir = egressRunDir(projectRoot, proxyId)
   const pid = readPid(path.join(dir, 'egress.pid'))
-  if (!pid || !pidAlive(pid)) return { ok: false, pid: pid || null, reason: 'not_running' }
+  if (!ownsEgressProcess(pid, path.join(dir, 'egress.json'))) {
+    return { ok: false, pid: pid || null, reason: 'not_running' }
+  }
   let listenTcp = ''
   try {
     listenTcp = String(JSON.parse(fs.readFileSync(path.join(dir, 'egress.json'), 'utf8')).listen_tcp || '')
@@ -496,7 +525,12 @@ export function ensureLocalProxyEgress(proxy, { runDocker = docker } = {}) {
 export function ensureProxyEgress(
   projectRoot,
   proxy,
-  { runDocker = docker, runIptables = iptables, dnsUpstream = configuredDnsUpstream() } = {},
+  {
+    runDocker = docker,
+    runIptables = iptables,
+    dnsUpstream = configuredDnsUpstream(),
+    dnsEmptyTypes = configuredDnsEmptyTypes(),
+  } = {},
 ) {
   if (isLocalEgressProxy(proxy)) return ensureLocalProxyEgress(proxy, { runDocker })
   const blocked = proxyBlockedReason(proxy)
@@ -525,6 +559,7 @@ export function ensureProxyEgress(
     dnsPort: ports.dns,
     listenHost,
     dnsUpstream,
+    dnsEmptyTypes,
   })
   if (!started.ok) return started
   if (!waitListen(listenHost, ports.tcp))
