@@ -99,7 +99,7 @@ docker exec vm2api python3 -c 'import urllib.request; print(urllib.request.urlop
 kin-<槽> 容器 → keg* 网桥 → 宿主机 kin-egress（网关 IP:端口）→ SOCKS5 → 上游
 ```
 
-控制面用 iptables 把容器的 TCP 和 DNS 重定向到宿主机上的 `kin-egress`。这一跳的目的地是宿主机本身，要经过宿主机 **INPUT** 链。UFW 默认入站 `DROP`，而 vm2api 不改你的 INPUT 规则，所以需要手动放行：
+控制面用 iptables 把容器的 TCP 和 DNS 重定向到宿主机上的 `kin-egress`。这一跳的目的地是宿主机本身，要经过宿主机 **INPUT** 链。当前控制面自动插入限定网桥、源与目标网段及出口端口的 INPUT 放行规则；若宿主机防火墙刷新或清除这些规则，须检查并恢复出口规则。以下 UFW / firewalld 配置可作额外兜底（范围比自动规则宽）：
 
 | 项 | 值 |
 |---|---|

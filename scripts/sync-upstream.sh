@@ -18,7 +18,7 @@ set -uo pipefail
 
 # ── 配置 ────────────────────────────────────────────────────
 UPSTREAM_URL="https://github.com/dofastted/vm2api.git"
-CUSTOM_BRANCH="cus/v1.3.106"
+CUSTOM_BRANCH="cus/v1.3.108"
 MIRROR_BRANCH="main"                     # belimked/main = 上游纯镜像
 BIOME="@biomejs/biome@2.5.11"
 DO_PUSH=0
@@ -27,7 +27,6 @@ DO_PUSH=0
 # 我们的定制补丁: "标记文本:文件" —— grep 到即视为补丁在位
 PATCHES=(
   "sendNotifyTest:src/lib/admin/panel-routes.mjs"          # 设置保存 / notify 导入
-  "CLI_HOP_CACHE_TTL:src/lib/protocol/outbound-attempt.mjs" # #32 cli-hop 固定 5m
   "INCOMPLETE_ASSISTANT_MESSAGE:src/lib/core/errors.mjs"    # #32 保留上游错误原因
   "reconcileEgress:src/lib/vm/proxy-pool.mjs"               # #32 启动恢复出口
   "NIC_OUIS:src/lib/identity/workstation-profile.mjs"       # 槽位哈希 + 厂商 MAC
@@ -49,7 +48,6 @@ git checkout -q "$CUSTOM_BRANCH" || die "切不到 $CUSTOM_BRANCH"
 # ── 1. 抓上游 ───────────────────────────────────────────────
 step "① 抓取上游 $UPSTREAM_URL"
 git fetch -q "$UPSTREAM_URL" main || die "fetch 上游失败"
-git fetch -q --tags "$UPSTREAM_URL" 2>/dev/null || true
 U=$(git rev-parse FETCH_HEAD)
 UV=$(git show "${U}:VERSION" 2>/dev/null || echo "?")
 CUR=$(cat VERSION)
@@ -133,7 +131,7 @@ for entry in "${PATCHES[@]}"; do
   mark="${entry%%:*}"; file="${entry#*:}"
   grep -q -- "$mark" "$file" 2>/dev/null || missing="$missing ${mark}"
 done
-if [ -z "$missing" ]; then ok "六个定制补丁全部完好"; else warn "补丁丢失:$missing"; FAIL=1; fi
+if [ -z "$missing" ]; then ok "${#PATCHES[@]} 个定制补丁全部完好"; else warn "补丁丢失:$missing"; FAIL=1; fi
 
 # 5.4 版本号三处一致
 V1=$(cat VERSION); V2=$(grep -oE '"version": *"[0-9.]+"' package.json | grep -oE '[0-9.]+' | head -1); V3=$(grep -oE 'vm2api:[0-9.]+' docker-compose.yml | cut -d: -f2 | head -1)
