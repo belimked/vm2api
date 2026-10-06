@@ -18,7 +18,7 @@ set -uo pipefail
 
 # ── 配置 ────────────────────────────────────────────────────
 UPSTREAM_URL="https://github.com/dofastted/vm2api.git"
-CUSTOM_BRANCH="cus/v1.3.108"
+CUSTOM_BRANCH="cus/v1.3.110"
 MIRROR_BRANCH="main"                     # belimked/main = 上游纯镜像
 BIOME="@biomejs/biome@2.5.11"
 DO_PUSH=0
@@ -26,7 +26,6 @@ DO_PUSH=0
 
 # 我们的定制补丁: "标记文本:文件" —— grep 到即视为补丁在位
 PATCHES=(
-  "sendNotifyTest:src/lib/admin/panel-routes.mjs"          # 设置保存 / notify 导入
   "INCOMPLETE_ASSISTANT_MESSAGE:src/lib/core/errors.mjs"    # #32 保留上游错误原因
   "reconcileEgress:src/lib/vm/proxy-pool.mjs"               # #32 启动恢复出口
   "NIC_OUIS:src/lib/identity/workstation-profile.mjs"       # 槽位哈希 + 厂商 MAC
