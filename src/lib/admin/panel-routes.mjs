@@ -3787,10 +3787,18 @@ export function createPanelHandler(ctx) {
       if (req.method === 'GET' && p === '/api/panel/proxies/geo-checks') {
         if (panelIdentity(req).role !== 'admin') return json(res, 403, { ok: false, error: 'forbidden' })
         const params = url.searchParams
-        return json(res, 200, panel.ok(ctx.proxyGeoGuard.repo.list({
-          proxy_id: params.get('proxy_id'), result: params.get('result'),
-          limit: params.get('limit'), before_id: params.get('before_id'),
-        })))
+        return json(
+          res,
+          200,
+          panel.ok(
+            ctx.proxyGeoGuard.repo.list({
+              proxy_id: params.get('proxy_id'),
+              result: params.get('result'),
+              limit: params.get('limit'),
+              before_id: params.get('before_id'),
+            }),
+          ),
+        )
       }
       if (req.method === 'POST' && p === '/api/panel/proxies/geo-guard/run') {
         if (panelIdentity(req).role !== 'admin') return json(res, 403, { ok: false, error: 'forbidden' })
@@ -3800,8 +3808,11 @@ export function createPanelHandler(ctx) {
       if (req.method === 'POST' && /^\/api\/panel\/proxies\/[^/]+\/geo-guard\/confirm$/.test(p)) {
         if (panelIdentity(req).role !== 'admin') return json(res, 403, { ok: false, error: 'forbidden' })
         const result = ctx.proxyGeoGuard.confirm(p.split('/')[4])
-        return json(res, result.ok ? 200 : result.error === 'proxy_not_found' ? 404 : 409,
-          result.ok ? panel.ok(result) : result)
+        return json(
+          res,
+          result.ok ? 200 : result.error === 'proxy_not_found' ? 404 : 409,
+          result.ok ? panel.ok(result) : result,
+        )
       }
       if (req.method === 'GET' && p === '/api/panel/proxies/config') {
         const config = proxyPool.snapshot().config

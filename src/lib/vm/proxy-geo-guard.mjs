@@ -51,10 +51,14 @@ export class ProxyGeoGuard {
         const checkedAt = new Date(this.now()).toISOString()
         const previous = p.geo_guard_status
         const previousReason = p.geo_guard_reason
-        const baseCountry = String(p.geo_base_country_code || '').trim().toUpperCase()
+        const baseCountry = String(p.geo_base_country_code || '')
+          .trim()
+          .toUpperCase()
         const baseRegion = p.geo_base_region
         const geo = response?.geo || {}
-        const country = String(geo.country_code || '').trim().toUpperCase()
+        const country = String(geo.country_code || '')
+          .trim()
+          .toUpperCase()
         let result
         let action = null
         this.pool._applyGeoResult(p, response)

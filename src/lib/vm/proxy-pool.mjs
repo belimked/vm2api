@@ -391,7 +391,11 @@ export class ProxyPool {
       scheme: isLocalEgressProxy(p) ? 'local' : p.scheme || 'socks5',
       geo: proxyGeoOf(p),
       geo_guard: {
-        base: { country_code: p.geo_base_country_code || null, region: p.geo_base_region || null, at: p.geo_base_at || null },
+        base: {
+          country_code: p.geo_base_country_code || null,
+          region: p.geo_base_region || null,
+          at: p.geo_base_at || null,
+        },
         status: p.geo_guard_status || null,
         checked_at: p.geo_guard_checked_at || null,
         reason: p.geo_guard_reason || null,
@@ -710,7 +714,8 @@ export class ProxyPool {
       this.state.config.geo_guard_interval_sec = Math.min(86400, Math.max(60, n))
     }
     if (patch.geo_guard_action != null) {
-      if (!['notify_pause', 'notify'].includes(patch.geo_guard_action)) return { ok: false, error: 'invalid_geo_guard_action' }
+      if (!['notify_pause', 'notify'].includes(patch.geo_guard_action))
+        return { ok: false, error: 'invalid_geo_guard_action' }
       this.state.config.geo_guard_action = patch.geo_guard_action
     }
     if (patch.follow_proxy_timezone != null) {
