@@ -335,6 +335,18 @@ proxyPool = new ProxyPool({
     const why = String(vm?.schedule_disabled_reason || '')
     if (why.startsWith('geo_changed|')) return
     if (!why.includes(`proxy=${proxyId}`) && !/egress_down|proxy_probe_failed/.test(why)) return
+    // A probe failure may have overwritten the geo pause reason; while the
+    // guard still holds this exit as country-changed, keep the slot paused
+    // (restamp the reason) so geo recovery, not probe recovery, re-enables it.
+    const px = proxyPool.state.proxies.find((x) => x.id === proxyId)
+    if (
+      proxyPool.state.config.geo_guard_enabled &&
+      proxyPool.state.config.geo_guard_action === 'notify_pause' &&
+      px?.geo_guard_status === 'changed'
+    ) {
+      setVmSchedulable(cfg.paths.project, vmId, false, `geo_changed|proxy=${proxyId}`)
+      return
+    }
     setVmSchedulable(cfg.paths.project, vmId, true)
   },
   egressCheck: (proxy) => proxyEgressReady(proxy, cfg.paths.project),
