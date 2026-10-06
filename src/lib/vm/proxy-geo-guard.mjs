@@ -87,7 +87,6 @@ export class ProxyGeoGuard {
             action = 'recovered'
           }
         }
-        this.pool.save()
         this.repo.insert({
           proxy_id: p.id,
           proxy_label: p.label,
@@ -113,6 +112,7 @@ export class ProxyGeoGuard {
       this.repo.prune(this.now())
       return summary
     } finally {
+      if (summary.checked) this.pool.save()
       this.running = false
     }
   }

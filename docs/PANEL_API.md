@@ -233,7 +233,7 @@ Claude 槽测试走官方 CC 入站（`/v1/messages`）。GPT/Codex 槽测试走
 
 `GET /proxies` 和 `GET /proxies/config` 仅向管理员返回 `dns_primary`；租户响应省略该字段（自定义 URL 的路径 / 查询参数可能包含私有令牌），其它配置字段保持不变。
 
-### 出口地区巡检（定制补丁）
+### 出口国家巡检（定制补丁）
 
 `PUT /proxies/config`：`geo_guard_enabled`（默认 false）、`geo_guard_interval_sec`（默认 300，范围 60–86400）、`geo_guard_action`（默认 notify_pause，可选 notify）。只比较出口国家代码（忽略大小写及首尾空格），不比较 IP/城市/地区。仅检查启用、可用且有绑定槽的代理；查询失败不暂停槽。首次成功查询建立基准，国家变化只在新变化时通知；恢复基准或确认新国家只恢复由该代理巡检暂停的槽。
 

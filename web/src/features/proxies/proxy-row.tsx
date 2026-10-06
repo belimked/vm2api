@@ -98,7 +98,7 @@ export function ProxyRow({
         method: 'POST',
       }),
     onSuccess: () => {
-      toast.success('已确认新地区')
+      toast.success('已确认新国家')
       void qc.invalidateQueries({ queryKey: ['panel', 'proxies'] })
     },
     onError: (error: Error) => toast.error(error.message),
@@ -183,7 +183,7 @@ export function ProxyRow({
                   onClick={() => confirmGeo.mutate()}
                   disabled={confirmGeo.isPending}
                 >
-                  确认新地区
+                  确认新国家
                 </Button>
               </>
             )}

@@ -353,7 +353,7 @@ export function ProxyManagePanel({
         </div>
 
         <fieldset className='space-y-2 border-t pt-4'>
-          <legend className='text-xs font-medium'>出口地区巡检</legend>
+          <legend className='text-xs font-medium'>出口国家巡检</legend>
           <div className='flex items-center justify-between text-xs'>
             <span>开启</span>
             <Switch
@@ -361,7 +361,7 @@ export function ProxyManagePanel({
               onCheckedChange={(value) =>
                 saveConfig.mutate({ geo_guard_enabled: value })
               }
-              aria-label='开启出口地区巡检'
+              aria-label='开启出口国家巡检'
             />
           </div>
           <label className='block text-xs' htmlFor='geo-guard-interval'>
