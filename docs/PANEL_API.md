@@ -215,6 +215,8 @@ Claude 槽测试走官方 CC 入站（`/v1/messages`）。GPT/Codex 槽测试走
 | GET | `/proxies` |
 | POST | `/proxies/import` · `/proxies/probe` · `/proxies/geo` |
 | GET/PUT | `/proxies/config` |
+| GET | `/proxies/geo-checks` |
+| POST | `/proxies/geo-guard/run` · `/proxies/:id/geo-guard/confirm` |
 | PUT | `/proxies/:id` 改 host/port/账密 |
 | POST | `/proxies/:id/enable` · `/disable` · `/bind` · `/unbind` · `/reveal` · `/geo` |
 | DELETE | `/proxies/:id` |
@@ -230,6 +232,12 @@ Claude 槽测试走官方 CC 入站（`/v1/messages`）。GPT/Codex 槽测试走
 自定义 URL 必须以小写 `https://` 开头，百分号编码必须有效；域名大小写不受限制。设置会保留原 URL 字符串，不做隐式改写。
 
 `GET /proxies` 和 `GET /proxies/config` 仅向管理员返回 `dns_primary`；租户响应省略该字段（自定义 URL 的路径 / 查询参数可能包含私有令牌），其它配置字段保持不变。
+
+### 出口地区巡检（定制补丁）
+
+`PUT /proxies/config`：`geo_guard_enabled`（默认 false）、`geo_guard_interval_sec`（默认 300，范围 60–86400）、`geo_guard_match`（默认 country，可选 region）、`geo_guard_action`（默认 notify_pause，可选 notify）。只比较国家代码或国家代码+地区，不比较 IP。仅检查启用、可用且有绑定槽的代理；查询失败不暂停槽。首次成功查询建立基准，地区变化只在新变化时通知；恢复基准或确认新地区只恢复由该代理巡检暂停的槽。
+
+管理员可调用 `GET /proxies/geo-checks?proxy_id=&result=&limit=&before_id=` 分页查看日志（最多 500 条/页，保留七天且总计最多 20000 条），`POST /proxies/geo-guard/run` 立即巡检，`POST /proxies/:id/geo-guard/confirm` 以最近成功查询的地区确认为新基准。迁移 `030_proxy_geo_guard.sql` 新增代理基准列与巡检日志表；回退旧版不会回滚迁移，但旧版 `replaceAll` 显式列清空重写代理行会丢失基准，回退前请备份。
 
 ### `POST /proxies/geo` · `POST /proxies/:id/geo`
 
