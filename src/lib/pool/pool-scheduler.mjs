@@ -921,7 +921,8 @@ export class PoolScheduler extends EventEmitter {
       if (
         this.projectRoot &&
         isSlotProxyDesynced(vm, this.projectRoot) &&
-        vm.schedule_disabled_reason !== 'proxy_desynced'
+        vm.schedule_disabled_reason !== 'proxy_desynced' &&
+        !String(vm.schedule_disabled_reason || '').startsWith('geo_changed|')
       ) {
         setVmSchedulable(this.projectRoot, vm.id, false, 'proxy_desynced')
       }

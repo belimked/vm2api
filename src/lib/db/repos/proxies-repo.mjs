@@ -36,6 +36,12 @@ const COLUMNS = [
   'geo_timezone',
   'geo_checked_at',
   'geo_error',
+  'geo_base_country_code',
+  'geo_base_region',
+  'geo_base_at',
+  'geo_guard_status',
+  'geo_guard_checked_at',
+  'geo_guard_reason',
   'created_at',
   'updated_at',
 ]

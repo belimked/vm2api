@@ -32,6 +32,10 @@ const DEFAULT_CONFIG = {
   enabled: true,
   disconnect_on_error: false, // experimental: stop slot + tear SOCKS on runtime errors
   geo_timeout_ms: 8000,
+  geo_guard_enabled: false,
+  geo_guard_interval_sec: 300,
+  geo_guard_match: 'country',
+  geo_guard_action: 'notify_pause',
   // Bind a proxy -> the slot adopts that exit node's timezone unless the
   // operator pinned one by hand (vm.timezone_source === 'manual').
   follow_proxy_timezone: true,
@@ -386,6 +390,12 @@ export class ProxyPool {
       kind: isLocalEgressProxy(p) ? 'local' : 'socks5',
       scheme: isLocalEgressProxy(p) ? 'local' : p.scheme || 'socks5',
       geo: proxyGeoOf(p),
+      geo_guard: {
+        base: { country_code: p.geo_base_country_code || null, region: p.geo_base_region || null, at: p.geo_base_at || null },
+        status: p.geo_guard_status || null,
+        checked_at: p.geo_guard_checked_at || null,
+        reason: p.geo_guard_reason || null,
+      },
     }
   }
 
@@ -669,6 +679,14 @@ export class ProxyPool {
         allowed: [DNS_PRIMARY_AUTO, ...DNS_UPSTREAMS],
       }
     }
+    if (patch.geo_guard_enabled != null && typeof patch.geo_guard_enabled !== 'boolean')
+      return { ok: false, error: 'invalid_geo_guard_enabled' }
+    if (patch.geo_guard_interval_sec != null && !Number.isInteger(Number(patch.geo_guard_interval_sec)))
+      return { ok: false, error: 'invalid_geo_guard_interval_sec' }
+    if (patch.geo_guard_match != null && !['country', 'region'].includes(patch.geo_guard_match))
+      return { ok: false, error: 'invalid_geo_guard_match' }
+    if (patch.geo_guard_action != null && !['notify_pause', 'notify'].includes(patch.geo_guard_action))
+      return { ok: false, error: 'invalid_geo_guard_action' }
     if (patch.dns_primary != null) this.state.config.dns_primary = patch.dns_primary
     if (patch.dns_disable_svcb_https != null) this.state.config.dns_disable_svcb_https = patch.dns_disable_svcb_https
     if (patch.probe_interval_min != null) {
@@ -683,6 +701,23 @@ export class ProxyPool {
     }
     if (patch.geo_timeout_ms != null) {
       this.state.config.geo_timeout_ms = Math.max(1000, Number(patch.geo_timeout_ms) || 8000)
+    }
+    if (patch.geo_guard_enabled != null) {
+      if (typeof patch.geo_guard_enabled !== 'boolean') return { ok: false, error: 'invalid_geo_guard_enabled' }
+      this.state.config.geo_guard_enabled = patch.geo_guard_enabled
+    }
+    if (patch.geo_guard_interval_sec != null) {
+      const n = Number(patch.geo_guard_interval_sec)
+      if (!Number.isInteger(n)) return { ok: false, error: 'invalid_geo_guard_interval_sec' }
+      this.state.config.geo_guard_interval_sec = Math.min(86400, Math.max(60, n))
+    }
+    if (patch.geo_guard_match != null) {
+      if (!['country', 'region'].includes(patch.geo_guard_match)) return { ok: false, error: 'invalid_geo_guard_match' }
+      this.state.config.geo_guard_match = patch.geo_guard_match
+    }
+    if (patch.geo_guard_action != null) {
+      if (!['notify_pause', 'notify'].includes(patch.geo_guard_action)) return { ok: false, error: 'invalid_geo_guard_action' }
+      this.state.config.geo_guard_action = patch.geo_guard_action
     }
     if (patch.follow_proxy_timezone != null) {
       this.state.config.follow_proxy_timezone = !!patch.follow_proxy_timezone

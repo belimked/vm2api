@@ -36,6 +36,8 @@ import { normalizeOfficialCcConfig } from './lib/oauth/official-cc-bootstrap.mjs
 import { invalidateLiveCredentialCache } from './lib/admin/panel-live-credentials.mjs'
 import { normalizeHealthProbeConfig, createHealthProbeMonitor, HEALTH_REAL_HEADER } from './lib/admin/health-probe.mjs'
 import { normalizeNotifyConfig, createNotifyMonitor, dispatchNotify } from './lib/admin/notify.mjs'
+import { ProxyGeoGuard } from './lib/vm/proxy-geo-guard.mjs'
+import { ProxyGeoChecksRepo } from './lib/db/repos/proxy-geo-checks-repo.mjs'
 import { runVmTestChat } from './lib/admin/vm-test-chat.mjs'
 import { StickyRouter } from './lib/pool/sticky-router.mjs'
 import { setManualScheduleWins } from './lib/pool/schedule-policy.mjs'
@@ -331,6 +333,7 @@ proxyPool = new ProxyPool({
   onEnableVm: (vmId, _reason, proxyId) => {
     const vm = getVm(cfg.paths.project, vmId)
     const why = String(vm?.schedule_disabled_reason || '')
+    if (why.startsWith('geo_changed|')) return
     if (!why.includes(`proxy=${proxyId}`) && !/egress_down|proxy_probe_failed/.test(why)) return
     setVmSchedulable(cfg.paths.project, vmId, true)
   },
@@ -338,6 +341,27 @@ proxyPool = new ProxyPool({
   repairEgress: (proxy) => ensureProxyEgress(cfg.paths.project, proxy),
 })
 proxyPool.startScheduler()
+const proxyGeoGuard = new ProxyGeoGuard({
+  pool: proxyPool,
+  onGeoChanged: (proxy, bound, info) => {
+    if (info.action.startsWith('paused:')) {
+      for (const vmId of bound) setVmSchedulable(cfg.paths.project, vmId, false, `geo_changed|proxy=${proxy.id}`)
+    }
+    dispatchNotify(routingConfig.notify, {
+      title: `代理出口地区变化 ${proxy.label || proxy.id}`,
+      subject: `代理出口地区变化 ${proxy.label || proxy.id}`,
+      text: `${info.old.country_code}/${info.old.region || '-'} → ${info.geo.country_code}/${info.geo.region || '-'}\nIP: ${info.geo.ip || '-'}\nISP: ${info.geo.isp || '-'}\n槽: ${bound.join(', ')}\n处理: ${info.action}`,
+    })
+  },
+  onRecovered: (proxy, bound) => {
+    for (const vmId of bound) {
+      const vm = getVm(cfg.paths.project, vmId)
+      if (vm?.schedule_disabled_reason === `geo_changed|proxy=${proxy.id}`)
+        setVmSchedulable(cfg.paths.project, vmId, true)
+    }
+  },
+})
+proxyGeoGuard.restart()
 setImmediate(() => {
   try {
     const out = proxyPool.reconcileEgress()
@@ -513,6 +537,8 @@ backupService.onRestored((db) => {
   for (const store of [apiKeyStore, apiEndpointStore, panelUsers, accountQuota, stickyRouter, proxyPool, requestLog]) {
     store.rebind(db)
   }
+  proxyGeoGuard.repo = new ProxyGeoChecksRepo(db)
+  proxyGeoGuard.restart()
   groupsRepo = new GroupsRepo(db)
   apiScheduler.reload(apiEndpointStore.listRaw())
 
@@ -879,6 +905,7 @@ const handlePanel = createPanelHandler({
   get proxyPool() {
     return proxyPool
   },
+  proxyGeoGuard,
   apiKeyStore,
   apiEndpointStore,
   apiScheduler,
@@ -1118,6 +1145,7 @@ function shutdown(signal) {
     backupService.stopScheduler()
   } catch {}
   try {
+    proxyGeoGuard.stop()
     proxyPool.stopScheduler()
   } catch {}
   try {
