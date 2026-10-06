@@ -48,6 +48,10 @@ export function ProxyManagePanel({
   dnsPrimary,
   dnsDisableSvcbHttps,
   followProxyTimezone,
+  geoGuardEnabled,
+  geoGuardInterval,
+  geoGuardMatch,
+  geoGuardAction,
 }: {
   proxies: VmProxySnap[]
   bindLimit: number
@@ -55,9 +59,14 @@ export function ProxyManagePanel({
   dnsPrimary: string
   dnsDisableSvcbHttps: boolean
   followProxyTimezone: boolean
+  geoGuardEnabled: boolean
+  geoGuardInterval: number
+  geoGuardMatch: string
+  geoGuardAction: string
 }) {
   const refresh = useRefreshProxies()
   const [customDnsDraft, setCustomDnsDraft] = useState<string | null>(null)
+  const [intervalDraft, setIntervalDraft] = useState<string | null>(null)
   const lastProbe = useMemo(() => {
     let max = 0
     for (const p of proxies) {
@@ -118,6 +127,18 @@ export function ProxyManagePanel({
       const rows = data.results || []
       const ok = rows.filter((r) => r.ok).length
       toast.success(`地理检测完成 ${ok}/${rows.length}`)
+      await refresh()
+    },
+    onError: (error: Error) => toast.error(error.message),
+  })
+
+  const runGuard = useMutation({
+    mutationFn: () =>
+      api<{ checked: number }>('/api/panel/proxies/geo-guard/run', {
+        method: 'POST',
+      }),
+    onSuccess: async (result) => {
+      toast.success(`巡检完成：${result.checked} 条`)
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
@@ -332,6 +353,84 @@ export function ProxyManagePanel({
             className='mt-0.5'
           />
         </div>
+
+        <fieldset className='space-y-2 border-t pt-4'>
+          <legend className='text-xs font-medium'>出口地区巡检</legend>
+          <div className='flex items-center justify-between text-xs'>
+            <span>开启</span>
+            <Switch
+              checked={geoGuardEnabled}
+              onCheckedChange={(value) =>
+                saveConfig.mutate({ geo_guard_enabled: value })
+              }
+              aria-label='开启出口地区巡检'
+            />
+          </div>
+          <label className='block text-xs' htmlFor='geo-guard-interval'>
+            轮询间隔（秒）
+          </label>
+          <Input
+            id='geo-guard-interval'
+            type='number'
+            min={60}
+            max={86400}
+            value={intervalDraft ?? geoGuardInterval}
+            onChange={(event) => setIntervalDraft(event.target.value)}
+            onBlur={() => {
+              if (intervalDraft !== null && Number(intervalDraft) >= 60) {
+                saveConfig.mutate({
+                  geo_guard_interval_sec: Number(intervalDraft),
+                })
+              }
+              setIntervalDraft(null)
+            }}
+            onKeyDown={(event) =>
+              event.key === 'Enter' && event.currentTarget.blur()
+            }
+          />
+          <label className='block text-xs'>比较</label>
+          <Select
+            value={geoGuardMatch}
+            onValueChange={(value) =>
+              saveConfig.mutate({ geo_guard_match: value })
+            }
+          >
+            <SelectTrigger className='h-8 text-xs'>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value='country'>国家</SelectItem>
+              <SelectItem value='region'>国家+地区</SelectItem>
+            </SelectContent>
+          </Select>
+          <label className='block text-xs'>地区变化时</label>
+          <Select
+            value={geoGuardAction}
+            onValueChange={(value) =>
+              saveConfig.mutate({ geo_guard_action: value })
+            }
+          >
+            <SelectTrigger className='h-8 text-xs'>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value='notify_pause'>通知并暂停槽</SelectItem>
+              <SelectItem value='notify'>仅通知</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            size='sm'
+            variant='outline'
+            onClick={() => runGuard.mutate()}
+            disabled={runGuard.isPending}
+          >
+            立即巡检
+          </Button>
+          <p className='text-[11px] text-muted-foreground'>
+            经由代理查询出口 IP 归属地；只比较国家/地区，不比较
+            IP；查询失败不会暂停槽。
+          </p>
+        </fieldset>
 
         <label className='flex cursor-pointer items-start justify-between gap-3'>
           <span className='space-y-0.5'>

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Vm, VmProxySnap } from '@/types/panel-vm'
 import {
   Activity,
@@ -11,6 +12,8 @@ import {
   PowerOff,
   Trash2,
 } from 'lucide-react'
+import { toast } from 'sonner'
+import { api } from '@/lib/api'
 import { fmtAgo } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -88,6 +91,18 @@ export function ProxyRow({
   actions: ProxyRowActions
 }) {
   const id = proxy.id || ''
+  const qc = useQueryClient()
+  const confirmGeo = useMutation({
+    mutationFn: () =>
+      api(`/api/panel/proxies/${encodeURIComponent(id)}/geo-guard/confirm`, {
+        method: 'POST',
+      }),
+    onSuccess: () => {
+      toast.success('已确认新地区')
+      void qc.invalidateQueries({ queryKey: ['panel', 'proxies'] })
+    },
+    onError: (error: Error) => toast.error(error.message),
+  })
   const lit = useProxyHovered(hover, id)
   const [over, setOver] = useState(false)
   const ids = proxyBoundIds(proxy)
@@ -150,6 +165,30 @@ export function ProxyRow({
       />
 
       <div className='min-w-[210px] flex-[1.25] space-y-1'>
+        {proxy.geo_guard?.checked_at && (
+          <div className='flex items-center gap-2 text-[11px] text-muted-foreground'>
+            <span>
+              巡检基准 {proxy.geo_guard.base.country_code || '-'} ·{' '}
+              {fmtAgo(proxy.geo_guard.checked_at)}
+            </span>
+            {proxy.geo_guard.status === 'changed' && (
+              <>
+                <span className='text-destructive'>
+                  地区变化 {proxy.geo_guard.base.country_code}→
+                  {proxy.geo?.country_code}
+                </span>
+                <Button
+                  size='sm'
+                  variant='outline'
+                  onClick={() => confirmGeo.mutate()}
+                  disabled={confirmGeo.isPending}
+                >
+                  确认新地区
+                </Button>
+              </>
+            )}
+          </div>
+        )}
         {proxy.label ? (
           <p className='truncate text-[13px] font-medium' title={proxy.label}>
             {proxy.label}

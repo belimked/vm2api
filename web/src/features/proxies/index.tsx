@@ -4,12 +4,14 @@ import { VIEW_TITLES } from '@/config/nav'
 import type { Vm, VmProxySnap } from '@/types/panel-vm'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PageHeader } from '@/components/page-header'
 import { SectionSkeleton } from '@/components/page-skeletons'
 import { QueryGate } from '@/components/query-gate'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { ProxyEditDialog } from './proxy-edit-dialog'
+import { ProxyGeoLog } from './proxy-geo-log'
 import { createProxyHover } from './proxy-hover'
 import { ProxyImportPanel } from './proxy-import-panel'
 import { ProxyList } from './proxy-list'
@@ -327,34 +329,51 @@ export function ProxiesPage() {
               dnsPrimary={String(cfg.dns_primary || 'auto')}
               dnsDisableSvcbHttps={cfg.dns_disable_svcb_https === true}
               followProxyTimezone={cfg.follow_proxy_timezone !== false}
+              geoGuardEnabled={cfg.geo_guard_enabled === true}
+              geoGuardInterval={Number(cfg.geo_guard_interval_sec || 300)}
+              geoGuardMatch={String(cfg.geo_guard_match || 'country')}
+              geoGuardAction={String(cfg.geo_guard_action || 'notify_pause')}
             />
           </aside>
-          <ProxyList
-            all={sorted}
-            rows={rows}
-            vms={vms}
-            vmById={vmById}
-            ownerOf={ownerOf}
-            poolLimit={bindLimit}
-            query={query}
-            onQuery={setQuery}
-            filter={filter}
-            onFilter={setFilter}
-            sortKey={sortKey}
-            sortDir={sortDir}
-            onSortKey={changeSortKey}
-            onSortDir={() => setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))}
-            hover={hover}
-            dragVm={dragVm}
-            pending={{
-              probe: firstOf(probing),
-              geo: firstOf(geoing),
-              copy: firstOf(copying),
-              toggle: firstOf(toggling),
-              binding: bind.isPending || unbind.isPending,
-            }}
-            actions={actions}
-          />
+          <Tabs defaultValue='list' className='min-w-0'>
+            <TabsList>
+              <TabsTrigger value='list'>代理列表</TabsTrigger>
+              <TabsTrigger value='logs'>巡检日志</TabsTrigger>
+            </TabsList>
+            <TabsContent value='list'>
+              <ProxyList
+                all={sorted}
+                rows={rows}
+                vms={vms}
+                vmById={vmById}
+                ownerOf={ownerOf}
+                poolLimit={bindLimit}
+                query={query}
+                onQuery={setQuery}
+                filter={filter}
+                onFilter={setFilter}
+                sortKey={sortKey}
+                sortDir={sortDir}
+                onSortKey={changeSortKey}
+                onSortDir={() =>
+                  setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+                }
+                hover={hover}
+                dragVm={dragVm}
+                pending={{
+                  probe: firstOf(probing),
+                  geo: firstOf(geoing),
+                  copy: firstOf(copying),
+                  toggle: firstOf(toggling),
+                  binding: bind.isPending || unbind.isPending,
+                }}
+                actions={actions}
+              />
+            </TabsContent>
+            <TabsContent value='logs'>
+              <ProxyGeoLog proxies={list} />
+            </TabsContent>
+          </Tabs>
         </div>
       </QueryGate>
       <ProxyEditDialog

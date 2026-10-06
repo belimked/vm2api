@@ -53,6 +53,16 @@ export type VmProxySnap = {
   scheme?: string
   /** 出口地理位置；从未检测过为 null。 */
   geo?: ProxyGeo | null
+  geo_guard?: {
+    base: {
+      country_code: string | null
+      region: string | null
+      at: string | null
+    }
+    status: 'ok' | 'changed' | 'error' | null
+    checked_at: string | null
+    reason: string | null
+  }
 }
 
 export type InferenceEngine = 'auto' | 'go' | 'rust'
