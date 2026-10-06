@@ -29,6 +29,7 @@ PATCHES=(
   "INCOMPLETE_ASSISTANT_MESSAGE:src/lib/core/errors.mjs"    # #32 保留上游错误原因
   "reconcileEgress:src/lib/vm/proxy-pool.mjs"               # #32 启动恢复出口
   "NIC_OUIS:src/lib/identity/workstation-profile.mjs"       # 槽位哈希 + 厂商 MAC
+  "GEO_GUARD:src/lib/vm/proxy-geo-guard.mjs"           # 出口地区巡检
   "NPM_REGISTRY:Dockerfile"                                  # 大陆镜像源
 )
 
