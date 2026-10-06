@@ -34,7 +34,6 @@ const DEFAULT_CONFIG = {
   geo_timeout_ms: 8000,
   geo_guard_enabled: false,
   geo_guard_interval_sec: 300,
-  geo_guard_match: 'country',
   geo_guard_action: 'notify_pause',
   // Bind a proxy -> the slot adopts that exit node's timezone unless the
   // operator pinned one by hand (vm.timezone_source === 'manual').
@@ -300,7 +299,8 @@ export class ProxyPool {
   /** Re-read working set from DB (startup + post-restore). */
   load() {
     try {
-      this.state.config = { ...DEFAULT_CONFIG, ...(this.repo.getConfig({}) || {}) }
+      const { geo_guard_match: _legacyGeoGuardMatch, ...storedConfig } = this.repo.getConfig({}) || {}
+      this.state.config = { ...DEFAULT_CONFIG, ...storedConfig }
       this.state.proxies = this.repo.loadAll().map(hydrateProxy)
     } catch {
       this.state = { config: { ...DEFAULT_CONFIG }, proxies: [] }
@@ -683,8 +683,6 @@ export class ProxyPool {
       return { ok: false, error: 'invalid_geo_guard_enabled' }
     if (patch.geo_guard_interval_sec != null && !Number.isInteger(Number(patch.geo_guard_interval_sec)))
       return { ok: false, error: 'invalid_geo_guard_interval_sec' }
-    if (patch.geo_guard_match != null && !['country', 'region'].includes(patch.geo_guard_match))
-      return { ok: false, error: 'invalid_geo_guard_match' }
     if (patch.geo_guard_action != null && !['notify_pause', 'notify'].includes(patch.geo_guard_action))
       return { ok: false, error: 'invalid_geo_guard_action' }
     if (patch.dns_primary != null) this.state.config.dns_primary = patch.dns_primary
@@ -710,10 +708,6 @@ export class ProxyPool {
       const n = Number(patch.geo_guard_interval_sec)
       if (!Number.isInteger(n)) return { ok: false, error: 'invalid_geo_guard_interval_sec' }
       this.state.config.geo_guard_interval_sec = Math.min(86400, Math.max(60, n))
-    }
-    if (patch.geo_guard_match != null) {
-      if (!['country', 'region'].includes(patch.geo_guard_match)) return { ok: false, error: 'invalid_geo_guard_match' }
-      this.state.config.geo_guard_match = patch.geo_guard_match
     }
     if (patch.geo_guard_action != null) {
       if (!['notify_pause', 'notify'].includes(patch.geo_guard_action)) return { ok: false, error: 'invalid_geo_guard_action' }

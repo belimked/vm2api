@@ -69,7 +69,7 @@ export function ProxyGeoLog({ proxies }: { proxies: VmProxySnap[] }) {
           <option value=''>全部结果</option>
           <option value='baseline'>基准</option>
           <option value='same'>未变化</option>
-          <option value='changed'>地区变化</option>
+          <option value='changed'>国家变化</option>
           <option value='error'>失败</option>
         </select>
       </div>
@@ -121,7 +121,7 @@ export function ProxyGeoLog({ proxies }: { proxies: VmProxySnap[] }) {
                     {
                       baseline: '基准',
                       same: '未变化',
-                      changed: '地区变化',
+                      changed: '国家变化',
                       error: '失败',
                     } as Record<string, string>
                   )[row.result] || row.result}

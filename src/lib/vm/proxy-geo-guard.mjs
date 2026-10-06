@@ -51,33 +51,30 @@ export class ProxyGeoGuard {
         const checkedAt = new Date(this.now()).toISOString()
         const previous = p.geo_guard_status
         const previousReason = p.geo_guard_reason
-        const baseCountry = p.geo_base_country_code
+        const baseCountry = String(p.geo_base_country_code || '').trim().toUpperCase()
         const baseRegion = p.geo_base_region
         const geo = response?.geo || {}
+        const country = String(geo.country_code || '').trim().toUpperCase()
         let result
         let action = null
         this.pool._applyGeoResult(p, response)
         p.geo_guard_checked_at = checkedAt
-        if (!response?.ok || !geo.country_code) {
+        if (!response?.ok || !country) {
           result = 'error'
           p.geo_guard_status = 'error'
           p.geo_guard_reason = String(response?.error || 'missing_country_code').slice(0, 200)
         } else if (!baseCountry) {
           result = 'baseline'
-          p.geo_base_country_code = geo.country_code
+          p.geo_base_country_code = country
           p.geo_base_region = geo.region || null
           p.geo_base_at = checkedAt
           p.geo_guard_status = 'ok'
           p.geo_guard_reason = null
         } else {
-          const changed =
-            baseCountry !== geo.country_code ||
-            (this.pool.state.config.geo_guard_match === 'region' && (baseRegion || '') !== (geo.region || ''))
+          const changed = baseCountry !== country
           result = changed ? 'changed' : 'same'
           p.geo_guard_status = changed ? 'changed' : 'ok'
-          p.geo_guard_reason = changed
-            ? `${baseCountry}/${baseRegion || '-'} → ${geo.country_code}/${geo.region || '-'}`
-            : null
+          p.geo_guard_reason = changed ? `${baseCountry} → ${country}` : null
           const lastChanged = this.lastChanged.get(p.id) || (previous === 'changed' ? previousReason : null)
           if (changed && lastChanged !== p.geo_guard_reason) {
             this.lastChanged.set(p.id, p.geo_guard_reason)
@@ -127,7 +124,7 @@ export class ProxyGeoGuard {
     if (!p.geo_country_code || p.geo_error) return { ok: false, error: 'geo_unavailable' }
     const oldCountry = p.geo_base_country_code
     const oldRegion = p.geo_base_region
-    p.geo_base_country_code = p.geo_country_code
+    p.geo_base_country_code = String(p.geo_country_code).trim().toUpperCase()
     p.geo_base_region = p.geo_region || null
     p.geo_base_at = new Date(this.now()).toISOString()
     p.geo_guard_checked_at = p.geo_base_at

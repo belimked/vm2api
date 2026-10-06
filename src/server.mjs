@@ -348,9 +348,9 @@ const proxyGeoGuard = new ProxyGeoGuard({
       for (const vmId of bound) setVmSchedulable(cfg.paths.project, vmId, false, `geo_changed|proxy=${proxy.id}`)
     }
     dispatchNotify(routingConfig.notify, {
-      title: `代理出口地区变化 ${proxy.label || proxy.id}`,
-      subject: `代理出口地区变化 ${proxy.label || proxy.id}`,
-      text: `${info.old.country_code}/${info.old.region || '-'} → ${info.geo.country_code}/${info.geo.region || '-'}\nIP: ${info.geo.ip || '-'}\nISP: ${info.geo.isp || '-'}\n槽: ${bound.join(', ')}\n处理: ${info.action}`,
+      title: `代理出口国家变化 ${proxy.label || proxy.id}`,
+      subject: `代理出口国家变化 ${proxy.label || proxy.id}`,
+      text: `${info.old.country_code} → ${info.geo.country_code}（${info.geo.city || info.geo.region || '-'}）\nIP: ${info.geo.ip || '-'}\nISP: ${info.geo.isp || '-'}\n槽: ${bound.join(', ')}\n处理: ${info.action}`,
     })
   },
   onRecovered: (proxy, bound) => {

@@ -331,7 +331,6 @@ export function ProxiesPage() {
               followProxyTimezone={cfg.follow_proxy_timezone !== false}
               geoGuardEnabled={cfg.geo_guard_enabled === true}
               geoGuardInterval={Number(cfg.geo_guard_interval_sec || 300)}
-              geoGuardMatch={String(cfg.geo_guard_match || 'country')}
               geoGuardAction={String(cfg.geo_guard_action || 'notify_pause')}
             />
           </aside>

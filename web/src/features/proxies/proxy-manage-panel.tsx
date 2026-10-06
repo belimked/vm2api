@@ -50,7 +50,6 @@ export function ProxyManagePanel({
   followProxyTimezone,
   geoGuardEnabled,
   geoGuardInterval,
-  geoGuardMatch,
   geoGuardAction,
 }: {
   proxies: VmProxySnap[]
@@ -61,7 +60,6 @@ export function ProxyManagePanel({
   followProxyTimezone: boolean
   geoGuardEnabled: boolean
   geoGuardInterval: number
-  geoGuardMatch: string
   geoGuardAction: string
 }) {
   const refresh = useRefreshProxies()
@@ -388,22 +386,7 @@ export function ProxyManagePanel({
               event.key === 'Enter' && event.currentTarget.blur()
             }
           />
-          <label className='block text-xs'>比较</label>
-          <Select
-            value={geoGuardMatch}
-            onValueChange={(value) =>
-              saveConfig.mutate({ geo_guard_match: value })
-            }
-          >
-            <SelectTrigger className='h-8 text-xs'>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value='country'>国家</SelectItem>
-              <SelectItem value='region'>国家+地区</SelectItem>
-            </SelectContent>
-          </Select>
-          <label className='block text-xs'>地区变化时</label>
+          <label className='block text-xs'>国家变化时</label>
           <Select
             value={geoGuardAction}
             onValueChange={(value) =>
@@ -427,8 +410,8 @@ export function ProxyManagePanel({
             立即巡检
           </Button>
           <p className='text-[11px] text-muted-foreground'>
-            经由代理查询出口 IP 归属地；只比较国家/地区，不比较
-            IP；查询失败不会暂停槽。
+            经由代理查询出口 IP 归属地；只比较出口国家，不比较
+            IP/城市；查询失败不会暂停槽。
           </p>
         </fieldset>
 

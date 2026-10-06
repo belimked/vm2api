@@ -8,7 +8,10 @@ import { ProxyPool } from '../../src/lib/vm/proxy-pool.mjs'
 import { ProxyGeoGuard } from '../../src/lib/vm/proxy-geo-guard.mjs'
 import { ProxyGeoChecksRepo } from '../../src/lib/db/repos/proxy-geo-checks-repo.mjs'
 
-const geo = (country_code, region = 'R') => ({ ok: true, geo: { country_code, region, ip: '1.2.3.4' } })
+const geo = (country_code, region = 'R', city = 'City', ip = '1.2.3.4') => ({
+  ok: true,
+  geo: { country_code, region, city, ip },
+})
 
 test('巡检：基准、同国家、变化去重、错误、恢复与确认', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'geo-guard-'))
@@ -31,13 +34,22 @@ test('巡检：基准、同国家、变化去重、错误、恢复与确认', as
     })
     assert.equal((await guard.run()).baseline, 1)
     assert.equal(p.geo_base_country_code, 'JP')
-    next = geo('JP', 'Osaka')
+    next = geo(' jp ', 'Osaka', 'Osaka', '5.6.7.8')
     assert.equal((await guard.run()).same, 1)
-    next = geo('US', 'CA')
-    await guard.run()
+    assert.equal(p.geo_guard_status, 'ok')
+    assert.equal(p.geo_guard_reason, null)
+    assert.equal(events.length, 0) // No notification or pause for region/city/IP changes.
+    assert.equal(new ProxyGeoChecksRepo(db).list({ result: 'same' }).items[0].action, null)
+    next = geo(' us ', 'CA')
+    assert.equal((await guard.run()).changed, 1)
+    assert.equal(p.geo_guard_reason, 'JP → US')
     await guard.run()
     assert.equal(events.length, 1)
+    assert.equal(events[0][1].action, 'paused:vm-a')
     assert.deepEqual(events[0][0], ['vm-a'])
+    next = geo('us', 'NY', 'New York', '9.8.7.6')
+    assert.equal((await guard.run()).changed, 1) // Still US vs JP baseline: no re-notify for a new US city/IP.
+    assert.equal(events.length, 1)
     next = geo('DE', 'Berlin')
     await guard.run()
     assert.equal(events.length, 2)

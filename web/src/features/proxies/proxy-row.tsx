@@ -174,7 +174,7 @@ export function ProxyRow({
             {proxy.geo_guard.status === 'changed' && (
               <>
                 <span className='text-destructive'>
-                  地区变化 {proxy.geo_guard.base.country_code}→
+                  国家变化 {proxy.geo_guard.base.country_code}→
                   {proxy.geo?.country_code}
                 </span>
                 <Button
