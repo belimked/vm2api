@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { VmProxySnap } from '@/types/panel-vm'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
+import { proxyHostText } from './proxy-sort'
 
 export type GeoCheck = {
   id: number
@@ -25,6 +26,15 @@ export function ProxyGeoLog({ proxies }: { proxies: VmProxySnap[] }) {
   const [result, setResult] = useState('')
   const [before, setBefore] = useState<number | null>(null)
   const [history, setHistory] = useState<GeoCheck[]>([])
+  const byId = new Map(proxies.map((p) => [p.id, p]))
+  const proxyName = (row: GeoCheck) => {
+    const p = byId.get(row.proxy_id)
+    return (
+      p?.label?.trim() ||
+      row.proxy_label ||
+      (p ? proxyHostText(p) : row.proxy_id)
+    )
+  }
   const params = new URLSearchParams()
   if (proxyId) params.set('proxy_id', proxyId)
   if (result) params.set('result', result)
@@ -56,7 +66,7 @@ export function ProxyGeoLog({ proxies }: { proxies: VmProxySnap[] }) {
           <option value=''>全部代理</option>
           {proxies.map((p) => (
             <option key={p.id} value={p.id}>
-              {p.label || p.id}
+              {p.label?.trim() || proxyHostText(p)}
             </option>
           ))}
         </select>
@@ -76,21 +86,11 @@ export function ProxyGeoLog({ proxies }: { proxies: VmProxySnap[] }) {
       {checks.error && (
         <p className='text-xs text-destructive'>{checks.error.message}</p>
       )}
-      <table className='w-full min-w-[900px] text-left text-xs'>
+      <table className='w-full min-w-[1080px] table-fixed text-left text-xs'>
         <thead>
           <tr>
-            {[
-              '时间',
-              '代理',
-              '出口 IP',
-              '国家·地区·城市',
-              'ISP',
-              '耗时',
-              '结果',
-              '处理',
-              '错误',
-            ].map((name) => (
-              <th key={name} className='p-2'>
+            {COLUMNS.map(([name, width]) => (
+              <th key={name} className={`p-2 ${width}`}>
                 {name}
               </th>
             ))}
@@ -99,17 +99,18 @@ export function ProxyGeoLog({ proxies }: { proxies: VmProxySnap[] }) {
         <tbody>
           {rows.map((row) => (
             <tr key={row.id} className='border-t'>
-              <td className='p-2'>
-                {new Date(row.checked_at).toLocaleString()}
-              </td>
-              <td className='p-2'>{row.proxy_label || row.proxy_id}</td>
-              <td className='p-2'>{row.ip || '-'}</td>
-              <td className='p-2'>
-                {[row.country_code, row.region, row.city]
+              <Cell text={new Date(row.checked_at).toLocaleString()} />
+              <Cell
+                text={proxyName(row)}
+                title={`${proxyName(row)} (${row.proxy_id})`}
+              />
+              <Cell text={row.ip} />
+              <Cell
+                text={[row.country_code, row.region, row.city]
                   .filter(Boolean)
-                  .join(' · ') || '-'}
-              </td>
-              <td className='p-2'>{row.isp || '-'}</td>
+                  .join(' · ')}
+              />
+              <Cell text={row.isp} />
               <td className='p-2'>
                 {row.latency_ms == null ? '-' : `${row.latency_ms}ms`}
               </td>
@@ -127,8 +128,8 @@ export function ProxyGeoLog({ proxies }: { proxies: VmProxySnap[] }) {
                   )[row.result] || row.result}
                 </span>
               </td>
-              <td className='p-2'>{row.action || '-'}</td>
-              <td className='p-2'>{row.error || '-'}</td>
+              <Cell text={row.action} />
+              <Cell text={row.error} />
             </tr>
           ))}
         </tbody>
@@ -146,5 +147,25 @@ export function ProxyGeoLog({ proxies }: { proxies: VmProxySnap[] }) {
         </Button>
       )}
     </div>
+  )
+}
+
+const COLUMNS: [string, string][] = [
+  ['时间', 'w-40'],
+  ['代理', 'w-44'],
+  ['出口 IP', 'w-32'],
+  ['国家·地区·城市', 'w-40'],
+  ['ISP', 'w-36'],
+  ['耗时', 'w-16'],
+  ['结果', 'w-20'],
+  ['处理', 'w-32'],
+  ['错误', ''],
+]
+
+function Cell({ text, title }: { text: string | null; title?: string }) {
+  return (
+    <td className='truncate p-2' title={title || text || undefined}>
+      {text || '-'}
+    </td>
   )
 }
