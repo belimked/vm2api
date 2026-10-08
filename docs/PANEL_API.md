@@ -287,7 +287,7 @@ Claude 槽测试走官方 CC 入站（`/v1/messages`）。GPT/Codex 槽测试走
 
 `PUT /proxies/config`：`geo_guard_enabled`（默认 false）、`geo_guard_interval_sec`（默认 300，范围 60–86400）、`geo_guard_action`（默认 notify_pause，可选 notify）。只比较出口国家代码（忽略大小写及首尾空格），不比较 IP/城市/地区。仅检查启用、可用且有绑定槽的代理；查询失败不暂停槽。首次成功查询建立基准，国家变化只在新变化时通知；恢复基准或确认新国家只恢复由该代理巡检暂停的槽。
 
-管理员可调用 `GET /proxies/geo-checks?proxy_id=&result=&limit=&before_id=` 分页查看日志（最多 500 条/页，保留七天且总计最多 20000 条），`POST /proxies/geo-guard/run` 立即巡检，`POST /proxies/:id/geo-guard/confirm` 以最近成功查询的地区确认为新基准。迁移 `030_proxy_geo_guard.sql` 新增代理基准列与巡检日志表；回退旧版不会回滚迁移，但旧版 `replaceAll` 显式列清空重写代理行会丢失基准，回退前请备份。
+管理员可调用 `GET /proxies/geo-checks?proxy_id=&result=&limit=&before_id=` 分页查看日志（最多 500 条/页，保留七天且总计最多 20000 条），`POST /proxies/geo-guard/run` 立即巡检，`POST /proxies/:id/geo-guard/confirm` 以最近成功查询的地区确认为新基准。迁移 `900_proxy_geo_guard.sql`（早期版本为 `030`，启动时自动改记为 900）新增代理基准列与巡检日志表；回退旧版不会回滚迁移，但旧版 `replaceAll` 显式列清空重写代理行会丢失基准，回退前请备份。
 
 ### `POST /proxies/geo` · `POST /proxies/:id/geo`
 

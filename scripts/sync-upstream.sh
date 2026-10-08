@@ -18,7 +18,7 @@ set -uo pipefail
 
 # ── 配置 ────────────────────────────────────────────────────
 UPSTREAM_URL="https://github.com/dofastted/vm2api.git"
-CUSTOM_BRANCH="cus/v1.3.110"
+CUSTOM_BRANCH="cus/v1.3.123"
 MIRROR_BRANCH="main"                     # belimked/main = 上游纯镜像
 BIOME="@biomejs/biome@2.5.11"
 DO_PUSH=0
@@ -29,7 +29,8 @@ PATCHES=(
   "INCOMPLETE_ASSISTANT_MESSAGE:src/lib/core/errors.mjs"    # #32 保留上游错误原因
   "reconcileEgress:src/lib/vm/proxy-pool.mjs"               # #32 启动恢复出口
   "NIC_OUIS:src/lib/identity/workstation-profile.mjs"       # 槽位哈希 + 厂商 MAC
-  "GEO_GUARD:src/lib/vm/proxy-geo-guard.mjs"           # 出口地区巡检
+  "class ProxyGeoGuard:src/lib/vm/proxy-geo-guard.mjs"      # 出口国家巡检
+  "900_proxy_geo_guard:src/lib/db/database.mjs"            # 巡检迁移 030→900 改号
   "NPM_REGISTRY:Dockerfile"                                  # 大陆镜像源
 )
 
