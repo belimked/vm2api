@@ -1,7 +1,12 @@
 import crypto from 'node:crypto'
 import { liftMidConversationSystemMessages, stripIllegalContentFields } from './sanitize.mjs'
 import { isAnthropicServerTool } from './web-search.mjs'
-import { normalizeThinkingForModel, ensureUnofficialAdaptiveThinking, ensureUnofficialEffortHigh } from './thinking.mjs'
+import {
+  normalizeThinkingForModel,
+  ensureUnofficialAdaptiveThinking,
+  ensureUnofficialEffortHigh,
+  downgradeUngatedThinkingDisplay,
+} from './thinking.mjs'
 import { applyMaxTokensCap, applyModelRequestRules, getCapabilities } from './model-policy.mjs'
 import { ensureOutputConfigSchema, rectifyUnofficialRequest } from './request-rectifier.mjs'
 import { DEFAULT_CACHE_TTL, applyCacheBreakpoints, stripCacheScopeFields } from './cache-ttl.mjs'
@@ -195,13 +200,18 @@ export const MID_CONVERSATION_SYSTEM_BETA = 'mid-conversation-system-2026-04-07'
 export function modelSupportsContextManagement(modelId = '') {
   const caps = getCapabilities(modelId)
   if (caps?.supports_context_management === false) return false
-  if (/haiku/i.test(String(modelId || ''))) return false
+  const id = String(modelId || '')
+  if (/haiku/i.test(id) && !/haiku-5/i.test(id)) return false
   return true
 }
 
-/** Haiku 400s `role 'system' is not supported on this model`. */
+/** Mid-conversation `role=system` 400s on Haiku 4.5 and Claude 4.x. Haiku 5.5 accepts it. */
 export function modelSupportsMidConversationSystem(modelId = '') {
-  return !/haiku/i.test(String(modelId || ''))
+  const id = String(modelId || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\[1m\]$/i, '')
+  return /^claude-(?:opus|sonnet|haiku)-5(?:-5|\.5)?(?:-|$)/.test(id)
 }
 
 /**
@@ -303,7 +313,7 @@ export function sanitizeAnthropicBodyForBetaTokens(body = {}, anthropicBetaHeade
   ) {
     out = liftMidConversationSystemMessages(out)
   }
-  return out
+  return downgradeUngatedThinkingDisplay(out, anthropicBetaHeader)
 }
 
 /** sub2api normalizeClaudeOAuthRequestBody defaults (temperature / empty tools). */

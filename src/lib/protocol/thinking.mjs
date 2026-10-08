@@ -1,3 +1,5 @@
+import { BETA_THINKING_DISPLAY_UPDATES } from './claude-code-betas.mjs'
+
 import {
   normalizeThinkingByPolicy,
   getCapabilities,
@@ -63,6 +65,7 @@ export function modelSupportsAdaptiveThinking(model = '') {
     .toLowerCase()
     .split('[')[0]
   if (!m) return false
+  if (/haiku-5/.test(m)) return true
   if (m.includes('haiku')) return false
   if (/claude-3[.-]/.test(m)) return false
   // 4.5 family
@@ -121,6 +124,34 @@ export function normalizeThinkingForModel(body = {}) {
 }
 
 const OFFICIAL_THINKING_DISPLAY = 'omitted'
+
+function betaHeaderHas(header, token) {
+  if (!header || !token) return false
+  return String(header)
+    .split(',')
+    .map((part) => part.trim())
+    .includes(token)
+}
+
+/**
+ * `updates` requires thinking-display-updates-2026-08-18.
+ * Rebuilt setup-token and mimicry headers omit that token, and upstream then
+ * 400s unless display is summarized or omitted. Keep `updates` only when the
+ * outbound header still declares the beta.
+ */
+export function downgradeUngatedThinkingDisplay(body = {}, anthropicBetaHeader = '') {
+  if (!body || typeof body !== 'object') return body
+  const thinking = body.thinking
+  if (!thinking || typeof thinking !== 'object') return body
+  if (
+    String(thinking.display ?? '')
+      .trim()
+      .toLowerCase() !== 'updates'
+  )
+    return body
+  if (betaHeaderHas(anthropicBetaHeader, BETA_THINKING_DISPLAY_UPDATES)) return body
+  return { ...body, thinking: { ...thinking, display: OFFICIAL_THINKING_DISPLAY } }
+}
 
 function thinkingNeedsOfficialDisplay(thinking) {
   if (!thinking || typeof thinking !== 'object') return false

@@ -24,6 +24,8 @@ export const BETA_CACHE_DIAGNOSIS = 'cache-diagnosis-2026-04-07'
 export const BETA_CONTEXT_MANAGEMENT = 'context-management-2025-06-27'
 export const BETA_FALLBACK_CREDIT = 'fallback-credit-2026-06-01'
 export const BETA_CONTEXT_1M = 'context-1m-2025-08-07'
+/** Gates thinking.display=updates. Absent from rebuilt setup-token and mimicry headers. */
+export const BETA_THINKING_DISPLAY_UPDATES = 'thinking-display-updates-2026-08-18'
 
 export const HAIKU_BETA_HEADER = `${BETA_OAUTH},${BETA_INTERLEAVED}`
 
@@ -53,8 +55,13 @@ export function fullClaudeCodeMimicryBetas() {
 
 export const DEFAULT_BETA_HEADER = fullClaudeCodeMimicryBetas().join(',')
 
+function isLegacyHaiku(modelId = '') {
+  const id = String(modelId || '')
+  return /haiku/i.test(id) && !/haiku-5/i.test(id)
+}
+
 export function defaultOfficialBetaHeader(modelId = '') {
-  return /haiku/i.test(String(modelId || '')) ? HAIKU_BETA_HEADER : DEFAULT_BETA_HEADER
+  return isLegacyHaiku(modelId) ? HAIKU_BETA_HEADER : DEFAULT_BETA_HEADER
 }
 
 export function joinBetas(tokens = []) {
@@ -78,7 +85,7 @@ export function apiKeyBetaHeader(header = '') {
 
 /** Setup Token runtime uses the inference-compatible beta set. Claude Code session betas 401 it. */
 export function setupTokenBetaHeader(modelId = '') {
-  if (/haiku/i.test(String(modelId || ''))) return HAIKU_BETA_HEADER
+  if (isLegacyHaiku(modelId)) return HAIKU_BETA_HEADER
   return joinBetas([BETA_OAUTH, BETA_INTERLEAVED, BETA_CONTEXT_MANAGEMENT])
 }
 
