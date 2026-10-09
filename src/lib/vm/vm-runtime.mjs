@@ -8,8 +8,8 @@ import { execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { readRoutingConfigFile } from '../core/config.mjs'
-import { normalizeTimezone, US_TIMEZONES } from '../core/timezone.mjs'
+import { readRoutingConfigFile, streamIdleTimeoutMs } from '../core/config.mjs'
+import { US_TIMEZONES, validTimezone } from '../core/timezone.mjs'
 import { runtimeKind } from './runtime-kind.mjs'
 import { buildWorkerTelemetry } from './worker-telemetry.mjs'
 import { kernelBinPath, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
@@ -359,6 +359,7 @@ export function writeWorkerFiles(vm, projectRoot, { transparent, routing } = {})
   const proxyUrl = onEgress || local ? '' : workerProxyUrl(vm) || ''
   if (!onEgress && !local && vm.proxy_required !== false && !proxyUrl) throw new Error('slot SOCKS5 proxy is required')
   const testEndpoints = process.env.KIN_WORKER_TEST_ENDPOINTS === '1'
+  const resolvedRouting = routing != null ? routing : readProjectRouting(projectRoot)
   const workerConfig = {
     vm_id: vm.id,
     socket_path: '/run/kin/worker.sock',
@@ -370,7 +371,7 @@ export function writeWorkerFiles(vm, projectRoot, { transparent, routing } = {})
     refresh_skew_seconds: 300,
     request_timeout_seconds: 0,
     first_byte_timeout_seconds: 600,
-    idle_timeout_seconds: 180,
+    idle_timeout_seconds: Math.ceil(streamIdleTimeoutMs(resolvedRouting) / 1000),
     max_request_bytes: 32 * 1024 * 1024,
     max_response_bytes: 64 * 1024 * 1024,
     max_event_bytes: 32 * 1024 * 1024,
@@ -386,7 +387,6 @@ export function writeWorkerFiles(vm, projectRoot, { transparent, routing } = {})
     if (oauthTokenUrl) workerConfig.oauth_token_url = oauthTokenUrl
   }
   replaceSlotOwnedFile(paths.config, JSON.stringify(workerConfig, null, 2) + '\n', vm)
-  const resolvedRouting = routing != null ? routing : readProjectRouting(projectRoot)
   const allowed = assertCliHopAllowed(vm, resolvedRouting)
   if (!allowed.ok) throw new Error(allowed.error)
   const kernel = writeKernelConfig(projectRoot, vm, {
@@ -421,7 +421,8 @@ export function startVmRuntime(vm, projectRoot, { recreate = false, routing } = 
   const host = String(vm.fingerprint?.hostname || '').trim() || slotName
   const kernel = vm.kernel && OS_CATALOG[vm.kernel] ? vm.kernel : 'ubuntu-24.04'
   vm.kernel = kernel
-  vm.timezone = normalizeTimezone(vm.timezone)
+  const zone = validTimezone(vm.timezone)
+  if (zone) vm.timezone = zone
   vm.locale = vm.locale || STANDARD_LOCALE
   const image = imageForKernel(kernel)
   const home = path.join(projectRoot, 'vms', vm.id, 'cli-home')
@@ -555,7 +556,7 @@ export function startVmRuntime(vm, projectRoot, { recreate = false, routing } = 
     '-e',
     'CLAUDE_CONFIG_DIR=/home/kincli/.claude',
     '-e',
-    `TZ=${vm.timezone}`,
+    `TZ=${zone || 'UTC'}`,
     '-e',
     `LANG=${vm.locale}`,
     '-e',

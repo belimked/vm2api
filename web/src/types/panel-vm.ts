@@ -51,7 +51,7 @@ export type VmProxySnap = {
   created_at?: string
   kind?: 'local' | 'socks5' | string
   scheme?: string
-  /** 出口地理位置；从未检测过为 null。 */
+  /** 出口地理位置（IPv4）；从未检测过为 null。 */
   geo?: ProxyGeo | null
   geo_guard?: {
     base: {
@@ -63,6 +63,8 @@ export type VmProxySnap = {
     checked_at: string | null
     reason: string | null
   }
+  /** 公网 IPv6 出口地理位置；从未检测过为 null。 */
+  geo_v6?: ProxyGeo | null
 }
 
 export type InferenceEngine = 'auto' | 'go' | 'rust'

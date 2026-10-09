@@ -3,7 +3,6 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api, isApiError } from '@/lib/api'
 import { importErrorMessage } from '@/lib/import-errors'
-import { validTimezone } from '@/lib/timezone'
 import { vmIdOf } from '@/lib/vm-name'
 import { Button } from '@/components/ui/button'
 import {
@@ -29,6 +28,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { PlatformChip } from '@/components/platform-chip'
 import { dashboardQueryOptions } from '@/features/overview/queries'
+import { CreateExitField, useCreateExit } from '@/features/vm/create-exit-field'
 import {
   KERNELS,
   VM_CONCURRENCY_OPTIONS,
@@ -47,7 +47,6 @@ import {
   usePlacement,
 } from '@/features/vm/placement-field'
 import { vmsListQueryOptions } from '@/features/vm/queries'
-import { TimezonePicker } from '@/features/vm/timezone-picker'
 
 /** 「之后」的 5 档，对齐 index.html `createVmFromPage()` 的派生逻辑。 */
 export type CreateVmAfter = 'idle' | 'start' | 'proxy' | 'active' | 'full'
@@ -59,6 +58,8 @@ type CreateVmResponse = {
   vm_id?: string
   vm?: { id?: string }
   start_error?: string
+  /** 指定出口在创建瞬间没绑上（被别处占满等）。 */
+  proxy_error?: string
 }
 
 /**
@@ -108,7 +109,6 @@ export function CreateVmFields({
   const [region, setRegion] = useState<string>(
     DEFAULT_TEMPLATE.region || VM_REGION_AUTO
   )
-  const [tz, setTz] = useState<string>(DEFAULT_TEMPLATE.tz)
   const [locale, setLocale] = useState<string>(DEFAULT_TEMPLATE.locale)
   const [conc, setConc] = useState<number>(DEFAULT_TEMPLATE.conc)
   const [openaiOwnConc, setOpenaiOwnConc] = useState(false)
@@ -121,8 +121,10 @@ export function CreateVmFields({
   const typedName = name.trim()
   const placement = usePlacement(kernel)
   const remoteGpt = !!placement.nodeId && platform === 'openai'
+  const exit = useCreateExit(placement.nodeId)
+  const wantsExit = after !== 'idle'
 
-  /** 切模板：回填内核/区域/时区/语言/并发/权重与「之后」，对齐 `applyVmTemplate()`。 */
+  /** 切模板：回填内核/区域/语言/并发/权重与「之后」。时区不在这里选。 */
   function applyTemplate(id: string) {
     const tpl = VM_TEMPLATES.find((x) => x.id === id) || DEFAULT_TEMPLATE
     setTemplate(tpl.id)
@@ -130,7 +132,6 @@ export function CreateVmFields({
     // 宿主钉死了「之后」（导入向导）时不跟模板走，其余场景用模板预设。
     setAfter(defaultAfter || tpl.after)
     setRegion(tpl.region || VM_REGION_AUTO)
-    setTz(tpl.tz)
     setLocale(tpl.locale)
     setConc(tpl.conc)
     setOpenaiConc(null)
@@ -149,7 +150,6 @@ export function CreateVmFields({
           id,
           ...(typedName ? { name: typedName } : {}),
           kernel,
-          timezone: tz.trim(),
           locale,
           // 「自动」是纯 UI 哨兵值，不发给后端（对齐 index.html 的 `region || undefined`）。
           region: region === VM_REGION_AUTO ? undefined : region,
@@ -163,14 +163,19 @@ export function CreateVmFields({
           platform,
           family: platform === 'openai' ? 'codex' : 'claude',
           ...(nodeId ? { node_id: nodeId } : {}),
+          ...(wantsExit && exit.proxyId ? { proxy_id: exit.proxyId } : {}),
         }),
       })
       return {
         id: data.id || data.vm_id || data.vm?.id || id || '',
         startError: data.start_error || '',
+        proxyError: data.proxy_error || '',
       }
     },
     onSuccess: async (created) => {
+      if (created.proxyError) {
+        toast.warning(`出口未绑定：${created.proxyError}`)
+      }
       if (created.startError) {
         toast.warning(
           created.id
@@ -300,6 +305,10 @@ export function CreateVmFields({
         </Select>
       </div>
 
+      {wantsExit ? (
+        <CreateExitField exit={exit} remote={!!placement.nodeId} />
+      ) : null}
+
       <Collapsible open={advOpen} onOpenChange={setAdvOpen}>
         <CollapsibleTrigger className='text-sm text-primary hover:underline'>
           高级 {advOpen ? '▴' : '▾'}
@@ -320,9 +329,13 @@ export function CreateVmFields({
               </SelectContent>
             </Select>
           </div>
-          <div className='space-y-1'>
+          <div className='space-y-1 sm:col-span-2'>
             <Label>时区</Label>
-            <TimezonePicker value={tz} onChange={setTz} />
+            <p className='text-sm'>时区未配置</p>
+            <p className='text-xs text-muted-foreground'>
+              绑定正在使用的 SOCKS5
+              并完成地理探测后写入。探测没有时区，或结果不可用，就保持未配置。
+            </p>
           </div>
           <div className='space-y-1'>
             <Label>语言</Label>
@@ -438,12 +451,7 @@ export function CreateVmFields({
         ) : null}
         <Button
           onClick={() => create.mutate()}
-          disabled={
-            create.isPending ||
-            !validTimezone(tz) ||
-            placement.blocked ||
-            remoteGpt
-          }
+          disabled={create.isPending || placement.blocked || remoteGpt}
           loading={create.isPending}
         >
           {submitLabel}

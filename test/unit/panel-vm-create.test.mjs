@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
+import { ProxyPool } from '../../src/lib/vm/proxy-pool.mjs'
 
 function makeCreateHandler(project, body, proxyPool, accountQuota) {
   const response = {}
@@ -52,6 +53,9 @@ test('import-style create succeeds without seed_policy or SOCKS5', async () => {
     assert.equal(saved.seed_policy.telemetry_disabled, false)
     assert.equal(saved.proxy_required, false)
     assert.equal(saved.proxy, null)
+    assert.equal(saved.timezone, null)
+    assert.equal(saved.timezone_source, 'auto')
+    assert.equal(saved.fingerprint.timezone, '')
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -147,6 +151,10 @@ test('create returns the persisted VM when runtime start fails', async () => {
         getProxyForVm() {
           return proxy
         },
+        // A new slot without a requested zone takes its exit's.
+        proxyTimezone() {
+          return 'Europe/Berlin'
+        },
       },
     )
     await handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/create'))
@@ -160,6 +168,8 @@ test('create returns the persisted VM when runtime start fails', async () => {
     const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`), 'utf8'))
     assert.equal(saved.status, 'error')
     assert.ok(saved.schedule_disabled_reason)
+    assert.equal(saved.timezone, 'Europe/Berlin')
+    assert.equal(saved.timezone_source, 'proxy_geo')
   } finally {
     process.env.PATH = prevPath
     fs.rmSync(root, { recursive: true, force: true })
@@ -182,6 +192,51 @@ test('auto-numbering skips ids a deleted VM left behind in account history', asy
     await handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/create'))
     assert.equal(response.status, 200, response.body?.error?.message || JSON.stringify(response.body))
     assert.equal(response.body?.data?.vm?.id, 'vm-03', 'a fresh slot must not inherit vm-02 history')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('create binds an explicitly chosen exit instead of auto-allocating', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-create-exit-'))
+  const pool = new ProxyPool({ dataDir: root, geoLookup: async () => ({ ok: false, error: 'offline' }) })
+  pool.stopScheduler()
+  try {
+    const socks = pool.importLines('1.2.3.4:1080').items[0].id
+    const local = pool.ensureLocal().proxy.id
+    const { handlePanel, response } = makeCreateHandler(root, { start: false, proxy_id: local }, pool)
+    await handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/create'))
+    assert.equal(response.status, 200, response.body?.error?.message || JSON.stringify(response.body))
+    const id = response.body?.data?.vm?.id
+    assert.equal(pool.getProxyForVm(id)?.id, local)
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'vms', `${id}.json`), 'utf8')).proxy.id, local)
+    assert.deepEqual(
+      pool.snapshot().proxies.find((p) => p.id === socks).bound_vm_ids,
+      [],
+      'the healthier SOCKS row must stay free',
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('create refuses an unknown or full exit before writing the slot', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-create-exit-bad-'))
+  const pool = new ProxyPool({ dataDir: root, geoLookup: async () => ({ ok: false, error: 'offline' }) })
+  pool.stopScheduler()
+  try {
+    const missing = makeCreateHandler(root, { id: 'vm-x', start: false, proxy_id: 'px-nope' }, pool)
+    await missing.handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/create'))
+    assert.equal(missing.response.status, 404)
+
+    const local = pool.ensureLocal().proxy.id
+    pool.updateConfig({ bind_limit: 1 })
+    pool.stopScheduler()
+    pool.bind(local, 'vm-other')
+    const full = makeCreateHandler(root, { id: 'vm-x', start: false, proxy_id: local }, pool)
+    await full.handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/create'))
+    assert.equal(full.response.status, 409)
+    assert.equal(fs.existsSync(path.join(root, 'vms', 'vm-x.json')), false)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

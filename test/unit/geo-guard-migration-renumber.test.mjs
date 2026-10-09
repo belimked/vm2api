@@ -23,7 +23,7 @@ test('geo guard applied as 030 is re-keyed to 900 so upstream 030/031 still appl
     const db = createDatabase({ dataDir })
     try {
       const rows = db
-        .prepare("SELECT version, name FROM schema_migrations WHERE version >= '030' ORDER BY version")
+        .prepare("SELECT version, name FROM schema_migrations WHERE version IN ('030', '031', '900') ORDER BY version")
         .all()
       assert.deepEqual(
         rows.map((r) => [r.version, r.name]),
