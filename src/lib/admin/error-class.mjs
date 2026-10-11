@@ -27,6 +27,8 @@ const CODE_MAP = {
   api_key_disabled: 'auth',
   api_key_expired: 'auth',
   key_group_mismatch: 'request',
+  vm_pool_unavailable: 'request',
+  claude_code_only: 'request',
   invalid_json: 'request',
   body_too_large: 'request',
   empty_body: 'request',
@@ -46,6 +48,7 @@ const CODE_MAP = {
   upstream_rate_limit: 'rate_limit',
   quota_5h_safety: 'quota',
   quota_7d_safety: 'quota',
+  quota_guard_request_too_large: 'quota',
   api_key_quota_exhausted: 'quota',
   concurrency_limit: 'quota',
   api_key_concurrency_limit: 'quota',
@@ -113,6 +116,7 @@ export const SLA_OK_ERROR_CODES = new Set([
   'api_key_rate_limit',
   'quota_5h_safety',
   'quota_7d_safety',
+  'quota_guard_request_too_large',
   'api_key_quota_exhausted',
   'concurrency_limit',
   'api_key_concurrency_limit',
@@ -121,6 +125,8 @@ export const SLA_OK_ERROR_CODES = new Set([
   'content_filter_refusal',
   'policy_blocked',
   'key_group_mismatch',
+  'vm_pool_unavailable',
+  'claude_code_only',
   // Pool queue full / timeout moved from 429 to 529; SLA keeps counting them as it did at 429.
   'pool_overloaded',
   'pool_wait_queue_full',
@@ -164,6 +170,19 @@ export function ingressAuthSql() {
   )`
 }
 
+/**
+ * The muted `auth` class, matching `classifyRequestError`: a slotless 401/403 is ingress auth
+ * unless its code already names another class. Policy refusals (claude_code_only,
+ * key_group_mismatch, distill_blocked…) are 403s too and must stay visible.
+ */
+function mutedAuthSql() {
+  const classified = Object.keys(CODE_MAP)
+    .filter((code) => CODE_MAP[code] !== 'auth')
+    .map((code) => `'${code}'`)
+    .join(',')
+  return `(${ingressAuthSql()} AND IFNULL(error_code, '') NOT IN (${classified}))`
+}
+
 export function excludeErrorClassSql(classes) {
   const list = Array.isArray(classes)
     ? classes
@@ -173,7 +192,7 @@ export function excludeErrorClassSql(classes) {
         .filter(Boolean)
   const parts = []
   for (const id of list) {
-    if (id === 'auth') parts.push(`NOT (${ingressAuthSql()})`)
+    if (id === 'auth') parts.push(`NOT ${mutedAuthSql()}`)
   }
   return parts.length ? `(${parts.join(' AND ')})` : ''
 }

@@ -5,7 +5,7 @@ import path from 'node:path'
 import { getVm, listVms, persistCodexUsage, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isValidVmId } from '../vm/vm-file.mjs'
 import { isCodexProtocolAllowed, isCodexVm, normalizeCodexRouting } from './codex-route.mjs'
-import { keyAllowsVm, keyScopeFromRequest } from '../admin/key-scope.mjs'
+import { keyAllowsVm, keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
 import { normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { restrictCodexClient } from './codex-restriction.mjs'
 import {
@@ -162,6 +162,8 @@ export function pickCodexCandidates(
   const model = body?.model || null
   const routingPolicy = normalizeCodexRouting(routing.codex || routing).quota
   const scope = keyScopeFromRequest(req)
+  const poolDenial = vmPoolDenial(scope)
+  if (poolDenial) return { error: 'vm_pool_unavailable', message: poolDenial.message, ids: [], candidates: [] }
   if (scope.group_type === 'anthropic') return { error: 'key_group_mismatch', ids: [], candidates: [] }
   if (pin) {
     const vm = getVm(projectRoot, pin)
@@ -186,6 +188,9 @@ export function pickCodexCandidates(
   const bound = sessionKey ? stickyRouter?.resolve?.(sessionKey) : null
   const vms = listVms(projectRoot, { codex: { quota: routingPolicy } }).filter((vm) => keyAllowsVm(scope, vm))
   const continuesResponse = !!body?.previous_response_id && !!bound?.vmId
+  if (scope.vm_pool_id && vms.length === 0 && !continuesResponse) {
+    return { error: 'vm_pool_unavailable', message: '账号池没有可调度的 GPT 槽位', ids: [], candidates: [] }
+  }
   const ordered = orderCodexSessionSlots(continuesResponse ? vms.filter((vm) => vm.id === bound.vmId) : vms, {
     boundVmId: bound?.vmId || null,
     sessionKey,
@@ -345,7 +350,49 @@ async function admitCodexCandidate(projectRoot, req, opts, { deadline, signal })
   }
 }
 
-export async function runCodexKernelHop({ hop, args = {}, onEvent } = {}) {
+// Observed with gpt-6-astra + Responses Lite, not a documented upstream limit.
+// Keep the model gate tight until another Lite model shows the same 128 KiB failure.
+// Retry only a failed full-history attempt, keeping the newest reasoning suffix.
+export function reasoningHistoryFallback(args, result) {
+  if (process.env.KIN_CODEX_REASONING_HISTORY_FALLBACK === '0') return null
+  const body = args.body
+  const error = result?.body?.error || result?.body?.response?.error
+  if (result?.ok || result?.committed || result?.transportError || args.signal?.aborted) return null
+  if (![500, 502].includes(Number(result?.status)) || error?.code !== 'server_error') return null
+  if (body?.model !== 'gpt-6-astra' || body?.reasoning?.context !== 'all_turns' || !Array.isArray(body.input))
+    return null
+  if (String(args.envelope?.headers?.['x-openai-internal-codex-responses-lite']).toLowerCase() !== 'true') return null
+  if (body.previous_response_id || args.envelope?.session?.previous_response_id) return null
+  const encrypted = (item) =>
+    item?.type === 'reasoning' && typeof item.encrypted_content === 'string' && item.encrypted_content.length > 0
+  const history = body.input.filter(encrypted)
+  const originalBytes = Buffer.byteLength(JSON.stringify(history.map((item) => item.encrypted_content)))
+  if (originalBytes <= 128 * 1024) return null
+  let retainedBytes = 2
+  const keep = new Set()
+  for (let i = body.input.length - 1; i >= 0; i--) {
+    const item = body.input[i]
+    if (!encrypted(item)) continue
+    const bytes = Buffer.byteLength(JSON.stringify(item.encrypted_content)) + (keep.size ? 1 : 0)
+    if (retainedBytes + bytes > 120 * 1024) break
+    retainedBytes += bytes
+    keep.add(i)
+  }
+  if (!keep.size || keep.size === history.length) return null
+  const nextBody = { ...body, input: body.input.filter((item, i) => !encrypted(item) || keep.has(i)) }
+  return {
+    args: { ...args, body: nextBody, envelope: { ...args.envelope, body: nextBody } },
+    info: {
+      original_array_bytes: originalBytes,
+      retained_array_bytes: retainedBytes,
+      original_items: history.length,
+      retained_items: keep.size,
+      omitted_items: history.length - keep.size,
+    },
+  }
+}
+
+export async function runCodexKernelHop({ hop, args = {}, onEvent, onReasoningFallback } = {}) {
   let emitted = false
   const wrapped = async (line) => {
     emitted = true
@@ -354,6 +401,17 @@ export async function runCodexKernelHop({ hop, args = {}, onEvent } = {}) {
   let result = await hop({ ...args, onEvent: wrapped })
   if (!result?.ok && !emitted && isRetryableCodexTransport(result)) {
     result = { ...(await hop({ ...args, onEvent: wrapped })), transport_retried: true }
+  }
+  const fallback = !emitted && !result?.transport_retried ? reasoningHistoryFallback(args, result) : null
+  if (fallback) {
+    if (onReasoningFallback)
+      await onReasoningFallback({ originalResult: result, body: fallback.args.body, ...fallback.info })
+    if (args.signal?.aborted) return result
+    result = {
+      ...(await hop({ ...fallback.args, onEvent: wrapped })),
+      reasoning_history_retried: true,
+      reasoning_history_fallback: fallback.info,
+    }
   }
   return result
 }
@@ -572,6 +630,7 @@ export async function handleCodexProtocol({
           hop,
           args: {
             exec: execFor(projectRoot, vm),
+            signal: gone.signal,
             body: outboundBody,
             reqHeaders: req.headers,
             envelope: {
@@ -580,6 +639,9 @@ export async function handleCodexProtocol({
               stream: true,
               session,
             },
+          },
+          onReasoningFallback: ({ body: retryBody }) => {
+            if (captureOutbound) logBag.outbound_body = retryBody
           },
           onEvent: async (line) => {
             if (conversionError) return
@@ -622,6 +684,10 @@ export async function handleCodexProtocol({
         }
         ingestCodexHop(projectRoot, vm.id, result, Date.now(), normalizeCodexRouting(routing.codex).quota)
         if (result?.transport_retried) logBag.transport_retried = true
+        if (result?.reasoning_history_retried) {
+          logBag.attempt_count += 1
+          logBag.reasoning_history_retried = true
+        }
         last = result
         const hopUsage = result.usage || result.body?.usage || result.body?.response?.usage || null
         const usage = preferUsage(hopUsage, streamedUsage)
@@ -720,6 +786,15 @@ function rejectCodexAdmission({ res, json, stats, logBag, picked, model }) {
         type: 'permission_error',
         code: 'key_group_mismatch',
         message: '此密钥不能调用 openai',
+      },
+    })
+  }
+  if (picked.error === 'vm_pool_unavailable') {
+    return json(res, 403, {
+      error: {
+        type: 'permission_error',
+        code: 'vm_pool_unavailable',
+        message: picked.message || '账号池不可用',
       },
     })
   }

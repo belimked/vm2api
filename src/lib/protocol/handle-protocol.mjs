@@ -53,7 +53,7 @@ import { classifyClaudeRequestPurpose, prepareClassifierBody, classifierRequestS
 import { summarizeBody, redactHeaders, presentedApiKeyForLog } from '../admin/request-log.mjs'
 import { reasoningEffortOf, sessionIdForLog } from './log-fields.mjs'
 import { ownerScopeFromRequest } from '../admin/resource-owner.mjs'
-import { keyScopeFromRequest } from '../admin/key-scope.mjs'
+import { keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
 import {
   resolveInferenceEngine,
   resolveOfficialCcInference,
@@ -108,6 +108,11 @@ import {
   standingUsageFromRoutingFile,
   personaModeFromRoutingFile,
 } from '../identity/crs-persona.mjs'
+import {
+  claudeCodeOnlyError,
+  claudeCodeOnlyFromRouting,
+  isClaudeCodeFamilyRequest,
+} from '../identity/claude-code-only.mjs'
 import { createDownstreamKeepalive } from './stream-keepalive.mjs'
 import { createAnthropicStreamTracker, isRecoverableTruncation } from './stream-truncation.mjs'
 import {
@@ -122,7 +127,7 @@ import {
   pinConversationCacheTtl,
   resolveCacheTtl,
 } from './cache-ttl.mjs'
-import { describeCacheContinuity, trackCachePrefix } from './cache-prefix.mjs'
+import { confirmCachePrefix, describeCacheContinuity, trackCachePrefix } from './cache-prefix.mjs'
 import { ensureClaudeWebSearch, shouldInjectClaudeWebSearch } from './web-search.mjs'
 import { dispatchStreamInference } from '../transport/kernel-router.mjs'
 import { syncClaudeKernelConfigsFromFile } from '../transport/rust-kernel-supervisor.mjs'
@@ -490,6 +495,21 @@ export function createHandleProtocol(deps) {
     logBag.reasoning_effort = reasoningEffortOf(inbound)
 
     const fp = fingerprintRequest(req, inbound)
+    // Before the health probe: its synthesized or fail-closed replies would otherwise answer
+    // probe-shaped third-party traffic. Official Claude Code only ever speaks Messages, so other
+    // inbound protocols on a Claude model are third-party by construction.
+    const routingNow = getRouting()
+    if (
+      claudeCodeOnlyFromRouting(routingNow) &&
+      detectInboundPlatform(inbound?.model).platform === 'anthropic' &&
+      !(protocol === 'anthropic.messages' && isClaudeCodeFamilyRequest(req.headers, inbound, { routing: routingNow }))
+    ) {
+      stats.errors++
+      const errorResult = claudeCodeOnlyError()
+      logBag.error_code = ErrorCode.CLAUDE_CODE_ONLY
+      logBag.error_message = errorResult.body?.error?.message || null
+      return json(res, errorResult.status, errorResult.body)
+    }
     const healthDecision = getHealthMonitor()?.decide?.(req.headers, inbound, protocol)
     if (healthDecision?.action === 'fail') {
       stats.requests++
@@ -576,6 +596,19 @@ export function createHandleProtocol(deps) {
       return json(res, errorResult.status, errorResult.body)
     }
     const keyScope = keyScopeFromRequest(req)
+    const poolDenial = vmPoolDenial(keyScope)
+    if (poolDenial) {
+      stats.errors++
+      const errorResult = makeError({
+        type: ErrorType.PERMISSION,
+        code: ErrorCode.VM_POOL_UNAVAILABLE,
+        message: poolDenial.message,
+        status: 403,
+      })
+      logBag.error_code = ErrorCode.VM_POOL_UNAVAILABLE
+      logBag.error_message = errorResult.body?.error?.message || null
+      return json(res, 403, errorResult.body)
+    }
     if (keyScope.group_type !== 'all' && keyScope.group_type !== platform.platform) {
       stats.errors++
       const errorResult = makeError({
@@ -830,6 +863,8 @@ export function createHandleProtocol(deps) {
         }),
       })
     }
+    // After OpenAI→Anthropic conversion so function tools already have input_schema;
+    // leftover OpenAI-shaped tools are still marked (rewrite / mixed inbound).
     ctx.body = applyEagerToolStreaming(ctx.body, getRouting())
     const personaIn = ctx.body
     if (!requestContext)
@@ -1005,8 +1040,10 @@ export function createHandleProtocol(deps) {
     // Cache lives per account; a failover to another account starts cold by design.
     const noteCachePrefix = (selected, sessionId, body) => {
       if (!sessionId) return
-      const prefix = trackCachePrefix(`${selected.accountId}:${sessionId}`, body)
+      const key = `${selected.accountId}:${sessionId}`
+      const prefix = trackCachePrefix(key, body)
       logBag.cache_prefix = prefix
+      logBag.cache_prefix_key = key
       if (!prefix?.break) return
       const where = prefix.break.section === 'messages' ? `messages[${prefix.break.index}]` : prefix.break.section
       console.warn(`[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} broke at ${where}`)
@@ -1029,6 +1066,10 @@ export function createHandleProtocol(deps) {
         ownerScope,
         keyScope,
         countUsage: !healthReal,
+        quotaRequest: {
+          body: canonicalBody,
+          sessionId: outboundSessionId || callerSession || stickyKey,
+        },
         stream: upstreamStream,
         deliveryMode,
         signal: clientAbort.signal,
@@ -1316,6 +1357,9 @@ export function createHandleProtocol(deps) {
     }
 
     result = acceptAssistantHop(result)
+    if (result?.finalState === 'verified' && logBag.cache_prefix_key) {
+      confirmCachePrefix(logBag.cache_prefix_key)
+    }
     logBag.vm_id = result?.vmId || null
     logBag.account_id = result?.accountId || null
     logBag.final_account_id = result?.accountId || null

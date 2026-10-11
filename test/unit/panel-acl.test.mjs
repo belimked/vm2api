@@ -36,6 +36,7 @@ test('user can manage owned vm/proxy/key surfaces and nothing else', () => {
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01', 'user').ok, true)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/create', 'user').ok, true)
+  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/create-options', 'user').ok, true)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/schedulable', 'user').ok, true)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/import', 'user').ok, true)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/package', 'user').ok, true)
@@ -54,6 +55,30 @@ test('user can manage owned vm/proxy/key surfaces and nothing else', () => {
   assert.equal(authorizePanelRoute('GET', '/api/panel/database/metrics', 'user').ok, false)
   assert.equal(authorizePanelRoute('GET', '/api/panel/version', 'user').ok, false)
   assert.equal(authorizePanelRoute('POST', '/api/panel/update', 'user').ok, false)
+})
+
+test('user can query quota and redeem reset credits on owned vms and keys', () => {
+  const allowed = [
+    '/api/panel/vms/vm-01/openai-quota/refresh',
+    '/api/panel/vms/vm-01/openai-quota/reset',
+    '/api/panel/vms/vm-01/claude-reset/query',
+    '/api/panel/vms/vm-01/claude-reset/redeem',
+    '/api/panel/api-keys/key_a/reset-quota',
+  ]
+  for (const p of allowed) {
+    assert.equal(authorizePanelRoute('POST', p, 'user').ok, true, `user POST ${p}`)
+    assert.equal(authorizePanelRoute('GET', p, 'user').ok, false, `user GET ${p}`)
+    assert.equal(authorizePanelRoute('POST', p, 'super').ok, false, `super POST ${p}`)
+  }
+  assert.equal(authorizePanelRoute('POST', '/api/panel/api-keys/key_a/reset', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/claude-reset/other', 'user').ok, false)
+})
+
+test('user can rotate owned api keys; super cannot', () => {
+  const p = '/api/panel/api-keys/key_a/rotate'
+  assert.equal(authorizePanelRoute('POST', p, 'user').ok, true)
+  assert.equal(authorizePanelRoute('GET', p, 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', p, 'super').ok, false)
 })
 
 test('usage-logs and statistics are read-only for user and super', () => {
@@ -94,6 +119,7 @@ test('super can schedule VMs but cannot touch credentials or delete', () => {
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/oauth/credential', 'user').ok, false)
   assert.equal(authorizePanelRoute('DELETE', '/api/panel/vms/vm-01', 'super').ok, false)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/create', 'super').ok, false)
+  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/create-options', 'super').ok, false)
   assert.equal(authorizePanelRoute('POST', '/api/panel/users', 'super').ok, false)
   assert.equal(authorizePanelRoute('GET', '/api/panel/database/metrics', 'super').ok, false)
   assert.equal(authorizePanelRoute('GET', '/api/panel/version', 'super').ok, false)

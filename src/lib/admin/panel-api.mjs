@@ -39,6 +39,7 @@ import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { socksProxyFamily, normalizeSocksHost } from '../vm/socks-address.mjs'
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from '../pool/quota-tiers.mjs'
 import { applyVmQuotaConfig, applyVmQuotaPolicy, vmQuotaOverrideOf, vmQuotaView } from '../pool/vm-quota-override.mjs'
+import { GATE_OPEN, gatePolicyFields, gateZone, quotaGateOf } from '../pool/quota-gate.mjs'
 import { inferClaudeTier } from '../pool/claude-tier.mjs'
 import { listQuotaFromHeaders, isOfficialWindowLimited } from '../pool/quota-window.mjs'
 import { hardBlockOf } from '../pool/rate-limit-service.mjs'
@@ -64,6 +65,8 @@ import {
   usageErrorText,
 } from '../oauth/crs-usage-probe.mjs'
 import { proxyHasVm } from '../vm/proxy-pool.mjs'
+import { isLocalEgressProxy } from '../vm/egress.mjs'
+import { canRevealClusterNodes, localProxyNodeFields, nodeNameOf } from '../vm/local-proxy-nodes.mjs'
 import { collectLivePanelCredentials } from './panel-live-credentials.mjs'
 import { officialCcHome, readOfficialCcStatus, normalizeOfficialCcConfig } from '../oauth/official-cc-bootstrap.mjs'
 import { normalizeHealthProbeConfig } from './health-probe.mjs'
@@ -84,6 +87,8 @@ import { MESSAGES_BREAKPOINT_MODES } from '../protocol/cache-ttl.mjs'
 import { normalizeCodexRouting } from '../protocol/codex-route.mjs'
 import { effectiveOpenAIPolicy, normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { openAIRuntimeSignals } from '../pool/openai-account-runtime.mjs'
+import { normalizeVmConfig } from '../vm/machine-spec.mjs'
+import { runtimeKind } from '../vm/runtime-kind.mjs'
 
 export function ok(data, meta) {
   const out = { ok: true, data }
@@ -92,20 +97,34 @@ export function ok(data, meta) {
 }
 
 /** Start/create `allocated_proxy` must never carry SOCKS credentials. */
-export function publicAllocatedProxy(proxyPool, bound) {
+export function publicAllocatedProxy(proxyPool, bound, { nodeId = null, role = 'admin', nodes = [] } = {}) {
   if (!bound) return null
   const raw = bound.id && proxyPool?.state?.proxies?.find((p) => p.id === bound.id)
-  if (raw && typeof proxyPool.publicProxy === 'function') return proxyPool.publicProxy(raw)
-  return {
-    id: bound.id || null,
-    host: bound.host || null,
-    port: bound.port ?? null,
-    has_auth: !!(bound.username || bound.password || bound.has_auth),
-    status: bound.status ?? null,
-    enabled: bound.enabled ?? null,
-    scheme: bound.scheme || (bound.kind === 'local' ? 'local' : 'socks5'),
-    kind: bound.kind || bound.scheme || 'socks5',
+  let view =
+    raw && typeof proxyPool.publicProxy === 'function'
+      ? proxyPool.publicProxy(raw)
+      : {
+          id: bound.id || null,
+          host: bound.host || null,
+          port: bound.port ?? null,
+          has_auth: !!(bound.username || bound.password || bound.has_auth),
+          status: bound.status ?? null,
+          enabled: bound.enabled ?? null,
+          scheme: bound.scheme || (bound.kind === 'local' ? 'local' : 'socks5'),
+          kind: bound.kind || bound.scheme || 'socks5',
+        }
+  if (!isLocalEgressProxy(view) && !isLocalEgressProxy(bound)) return view
+  const reveal = canRevealClusterNodes(role)
+  const fields = localProxyNodeFields({ node_id: nodeId }, { role, nodes })
+  view = { ...view, ...fields }
+  if (!reveal) {
+    delete view.node_name
+    delete view.bound_nodes
+    delete view.bound_vm_ids
+    delete view.bound_vm_id
+    delete view.node_id
   }
+  return view
 }
 
 /** Drop host paths, container ids, IPs, and PIDs from slot boot/halt payloads. */
@@ -158,6 +177,8 @@ export function publicVmBootView(vm) {
     persona_preset: vm.persona_preset || null,
     schedulable: vm.schedulable !== false,
     schedule_disabled_reason: vm.schedule_disabled_reason || null,
+    runtime_type: vm.runtime_type || runtimeKind(vm),
+    machine: vm.machine || null,
   }
 }
 
@@ -343,6 +364,9 @@ export function validatePersonaRoutingPatch(body = {}) {
   if (compat.cache_ttl != null && !['5m', '1h'].includes(String(compat.cache_ttl).trim())) {
     problems.push(`cache_ttl 必须是 5m / 1h，收到 ${compat.cache_ttl}`)
   }
+  if (compat.claude_code_only != null && typeof compat.claude_code_only !== 'boolean') {
+    problems.push('claude_code_only 必须是布尔')
+  }
   if (compat.cache_breakpoints != null) {
     const bp = compat.cache_breakpoints
     if (typeof bp !== 'object' || Array.isArray(bp)) {
@@ -438,6 +462,7 @@ export async function buildDashboard({
   requestLog = null,
   poolScheduler = null,
   proxyPool = null,
+  clusterNodes = [],
 }) {
   try {
     accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
@@ -454,6 +479,8 @@ export async function buildDashboard({
       poolSnap,
       liveById,
       projectRoot: cfg.paths.project,
+      clusterNodes,
+      role: 'admin',
     }),
   )
   const snap = accountQuota.snapshot()
@@ -563,6 +590,7 @@ export async function buildVmList({
   ownerUserId = null,
   role = 'admin',
   requestLog = null,
+  clusterNodes = [],
 } = {}) {
   try {
     accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
@@ -579,6 +607,8 @@ export async function buildVmList({
       poolSnap,
       liveById,
       projectRoot: cfg.paths.project,
+      clusterNodes,
+      role,
     }),
   )
   const accounts = (() => {
@@ -620,6 +650,8 @@ export async function buildVmDetail({
   proxyPool = null,
   kernelHealth = null,
   slotProcessStatus = readSlotProcessStatus,
+  clusterNodes = [],
+  role = 'admin',
 }) {
   const vm = getVm(cfg.paths.project, id)
   if (!vm) {
@@ -643,6 +675,8 @@ export async function buildVmDetail({
     poolSnap,
     liveById,
     projectRoot: cfg.paths.project,
+    clusterNodes,
+    role,
   })
   const acc = findAccount(accountQuota, summary)
   const billing = (() => {
@@ -1042,17 +1076,20 @@ export async function buildProbeOne({
     lastProbe: qAfter.last_probe,
     probeSource: qAfter.probe_source,
     quota: qAfter,
-    policy: applyVmQuotaPolicy(
-      resolveTierPolicy(
-        {
-          tiers: accountQuota?.tiers,
-          quota: accountQuota?.config,
-          concurrency: accountQuota?.concurrency,
-        },
-        tier,
+    policy: {
+      ...applyVmQuotaPolicy(
+        resolveTierPolicy(
+          {
+            tiers: accountQuota?.tiers,
+            quota: accountQuota?.config,
+            concurrency: accountQuota?.concurrency,
+          },
+          tier,
+        ),
+        vmQuotaOverrideOf(vm),
       ),
-      vmQuotaOverrideOf(vm),
-    ),
+      ...gatePolicyFields(applyVmQuotaConfig(accountQuota?.config || {}, vmQuotaOverrideOf(vm))),
+    },
   })
   const data = {
     vm_id: id,
@@ -1250,6 +1287,7 @@ export function buildRouting({ routingConfig, stickyRouter }) {
     health_probe: normalizeHealthProbeConfig(routingConfig?.health_probe),
     usage_probe: normalizeUsageProbeConfig(routingConfig?.usage_probe),
     notify: publicNotifyConfig(routingConfig?.notify),
+    vm: normalizeVmConfig(routingConfig?.vm),
     sessions: stickyRouter.stats(),
   })
 }
@@ -1491,31 +1529,35 @@ function canImportCredential(v, hit) {
   return !!(base.url || (base.host && base.port) || v.proxy_id)
 }
 
-function mergeVmProxy(v, poolSnap) {
+function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
   const hit = poolProxyForVm(v, poolSnap)
   const base = v.proxy || {}
   const configured = proxyConfigured(v, hit)
   if (!configured) {
     return { proxy: null, proxy_configured: false, can_import_credential: false }
   }
+  const proxy = {
+    id: hit?.id || base.id || v.proxy_id || null,
+    host: normalizeSocksHost(hit?.host || base.host) || hit?.host || base.host || null,
+    port: hit?.port ?? base.port ?? null,
+    label: hit?.label || null,
+    scheme: hit?.scheme || base.scheme || (hit?.id === 'px-local' || base.id === 'px-local' ? 'local' : 'socks5'),
+    has_auth: hit?.has_auth ?? !!(base.url && /\/\/[^/@]+@/.test(base.url)),
+    status: hit?.status ?? null,
+    enabled: hit?.enabled ?? null,
+    blocked_reason: hit ? hit.blocked_reason || null : proxyBlockedReason(base),
+    address_family: hit?.address_family || socksProxyFamily(base) || null,
+    latency_ms: hit?.latency_ms ?? null,
+    last_error: hit?.last_error || null,
+    last_probe_at: hit?.last_probe_at || null,
+    geo: hit?.geo || null,
+    configured: true,
+  }
+  if (isLocalEgressProxy(proxy) || isLocalEgressProxy(hit) || isLocalEgressProxy(base)) {
+    Object.assign(proxy, localProxyNodeFields(v, { role, nodes }))
+  }
   return {
-    proxy: {
-      id: hit?.id || base.id || v.proxy_id || null,
-      host: normalizeSocksHost(hit?.host || base.host) || hit?.host || base.host || null,
-      port: hit?.port ?? base.port ?? null,
-      label: hit?.label || null,
-      scheme: hit?.scheme || base.scheme || (hit?.id === 'px-local' || base.id === 'px-local' ? 'local' : 'socks5'),
-      has_auth: hit?.has_auth ?? !!(base.url && /\/\/[^/@]+@/.test(base.url)),
-      status: hit?.status ?? null,
-      enabled: hit?.enabled ?? null,
-      blocked_reason: hit ? hit.blocked_reason || null : proxyBlockedReason(base),
-      address_family: hit?.address_family || socksProxyFamily(base) || null,
-      latency_ms: hit?.latency_ms ?? null,
-      last_error: hit?.last_error || null,
-      last_probe_at: hit?.last_probe_at || null,
-      geo: hit?.geo || null,
-      configured: true,
-    },
+    proxy,
     proxy_configured: true,
     can_import_credential: canImportCredential(v, hit),
   }
@@ -1555,7 +1597,10 @@ function enrichVm(v, accountQuota, active, extras = {}) {
   const mergedQuota = isCodex ? v.codex_usage?.quota || {} : q
   const u5 = mergedQuota.utilization_5h
   const u7 = mergedQuota.utilization_7d
-  const merged = mergeVmProxy(v, extras.poolSnap || null)
+  const merged = mergeVmProxy(v, extras.poolSnap || null, {
+    role: extras.role || 'admin',
+    nodes: extras.clusterNodes || [],
+  })
   const expiresAt = normalizePanelExpiresAt(v.expires_at, workerCred?.expires_at)
   const hasToken = isCodex ? !!(v.has_token || v.has_refresh) : !!(v.has_token || workerCred?.has_access)
   const tierKey = isCodex
@@ -1586,9 +1631,12 @@ function enrichVm(v, accountQuota, active, extras = {}) {
         },
         tierKey,
       )
-  const policy = isCodex ? openAIGlobalPolicy : applyVmQuotaPolicy(inheritedPolicy, quotaOverride)
+  const policy = isCodex
+    ? openAIGlobalPolicy
+    : { ...applyVmQuotaPolicy(inheritedPolicy, quotaOverride), ...gatePolicyFields(vmQuotaConfig) }
   const safety = Number(policy.limit_5h ?? policy.safety_ratio ?? 0.85)
   const weeklySafety = Number(policy.limit_7d ?? policy.weekly_safety_ratio ?? 0.8)
+  const quotaGate = quotaGateOf(policy)
   // Codex keeps its own conversation window (vm max_sessions); Claude rows report planner seats.
   const codexSessions = isCodex
     ? accountQuota?.sessions?.snapshot?.(acc?.account_id || v.account_uuid || v.id, {
@@ -1670,6 +1718,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     status: v.status,
     active: v.id === active,
     kernel: v.kernel || null,
+    runtime_type: runtimeKind(v),
+    machine: v.machine || null,
     inference_engine: v.inference_engine || null,
     persona_preset: v.persona_preset || null,
     dataplane: v.dataplane || null,
@@ -1679,6 +1729,9 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     note: v.note || null,
     region: v.region || null,
     node_id: v.node_id || null,
+    ...(canRevealClusterNodes(extras.role || 'admin') && v.node_id
+      ? { node_name: nodeNameOf(extras.clusterNodes, v.node_id) }
+      : {}),
     timezone: v.timezone || null,
     timezone_source: v.timezone_source || 'auto',
     locale: v.locale || null,
@@ -1798,13 +1851,16 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     seats_grace: isCodex ? null : Number(seatRow?.seats_grace) || 0,
     queue_depth: isCodex ? null : Number(seatRow?.queue_depth) || 0,
     conc_waiting: isCodex ? null : Number(seatRow?.conc_waiting) || 0,
-    inflight: isCodex ? openAIRuntimeSignals(v.id).inFlight : (acc?.inflight ?? 0),
+    inflight: isCodex ? openAIRuntimeSignals(v.id).inFlight : Number(seatRow?.inflight ?? acc?.inflight ?? 0),
     requests: acc?.requests ?? v.stats?.requests ?? 0,
     tokens_in: acc?.tokens_in ?? 0,
     tokens_out: acc?.tokens_out ?? 0,
     cache_read_tokens: acc?.cache_read_tokens || 0,
     cache_creation_tokens: acc?.cache_creation_tokens || 0,
-    near_limit: (u5 != null && u5 >= safety) || (u7 != null && u7 >= weeklySafety),
+    near_limit: isCodex
+      ? (u5 != null && u5 >= safety) || (u7 != null && u7 >= weeklySafety)
+      : (u5 != null && gateZone(u5, safety, quotaGate) !== GATE_OPEN) ||
+        (u7 != null && gateZone(u7, weeklySafety, quotaGate) !== GATE_OPEN),
     fingerprint: v.fingerprint || null,
     runtime: v.runtime || null,
     ip: v.ip || v.runtime?.ip || null,

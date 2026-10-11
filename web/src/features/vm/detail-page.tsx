@@ -48,7 +48,7 @@ import { PlatformChip, SlotIdentity } from '@/components/platform-chip'
 import { QueryGate } from '@/components/query-gate'
 import { StatusMark } from '@/components/status-mark'
 import { dashboardQueryOptions } from '@/features/overview/queries'
-import { sortedProxiesByAvailability } from '@/features/proxies/proxy-sort'
+import { proxiesForVmBind } from '@/features/proxies/proxy-sort'
 import { proxiesQueryOptions } from '@/features/proxies/queries'
 import { routingQueryOptions } from '@/features/settings/queries'
 import { VmAccountTab } from '@/features/vm/detail-account-tab'
@@ -60,11 +60,13 @@ import { VmTestTab } from '@/features/vm/detail-test-tab'
 import { NodeChip } from '@/features/vm/node-chip'
 import { probeOutcome, type ProbeCheck } from '@/features/vm/probe-status'
 import { vmQueryOptions, vmSeedQueryOptions } from '@/features/vm/queries'
+import { RuntimeChip } from '@/features/vm/runtime-chip'
 import {
   SchedulableSwitch,
   vmSchedulableProps,
 } from '@/features/vm/schedulable-switch'
 import { SeedPolicyCard } from '@/features/vm/seed-policy-card'
+import { usePoolSeatStream } from '@/features/vm/use-pool-seat-stream'
 import { useVmTestChat } from '@/features/vm/use-vm-test-chat'
 
 function postVm<T = unknown>(id: string, path: string, body?: unknown) {
@@ -83,6 +85,7 @@ export function VmDetailPage() {
   const detail = useQuery(vmQueryOptions(id))
   const seed = useQuery(vmSeedQueryOptions(id))
   const routing = useQuery(routingQueryOptions())
+  usePoolSeatStream()
 
   const [tab, setTab] = useState('overview')
 
@@ -176,16 +179,8 @@ export function VmDetailPage() {
   })
   const pool = proxies.data?.proxies || []
   const boundId = String(proxy.id || vm.proxy_id || '')
-  // 本地代理固定第一，其余按「能不能马上用」排。
-  const free = sortedProxiesByAvailability(
-    pool.filter((p) => {
-      if (!p.enabled || p.status === 'dead' || p.blocked_reason) return false
-      const ids = p.bound_vm_ids || (p.bound_vm_id ? [p.bound_vm_id] : [])
-      return !ids.includes(id) && ids.length < (p.bind_limit || 5)
-    }),
-    id,
-    5
-  )
+  // 本地代理固定第一。已绑到本槽的留在下拉里，否则正在用它时列表里没有。
+  const free = proxiesForVmBind(pool, id, 5)
   const pol =
     (seed.data?.seed_policy as Record<string, unknown> | undefined) || {}
   const syncTelemetry =
@@ -271,6 +266,7 @@ export function VmDetailPage() {
             </Select>
           ) : null}
           <PlatformChip vm={vm} />
+          <RuntimeChip vm={vm} className='text-[11px]' />
           <NodeChip nodeId={vm.node_id} className='text-[11px]' />
           <StatusMark tone={accountStatus(vm)} variant='pill' />
           {claudeTier(vm).key !== 'none' ? (
@@ -441,14 +437,20 @@ export function VmDetailPage() {
           />
           <TabsContent value='seed' className='space-y-3 pt-4'>
             <p className='text-sm text-muted-foreground'>
-              官方 Claude Code 初装之后的后置覆写。开=删键 · 关=写 1。
+              官方 Claude Code 初装之后的后置覆写。遥测只看这一只开关。
             </p>
-            <SeedPolicyCard
-              policy={pol}
-              saving={saveSeed.isPending}
-              syncTelemetry={syncTelemetry}
-              onSave={(next) => saveSeed.mutate(next)}
-            />
+            {seed.data ? (
+              <SeedPolicyCard
+                policy={pol}
+                saving={saveSeed.isPending}
+                syncTelemetry={syncTelemetry}
+                onSave={(next) => saveSeed.mutate(next)}
+              />
+            ) : (
+              <p className='text-sm text-muted-foreground'>
+                {seed.isError ? '种子策略读取失败' : '读取种子策略…'}
+              </p>
+            )}
           </TabsContent>
         </Tabs>
         <ConfirmDialog

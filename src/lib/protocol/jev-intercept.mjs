@@ -3,12 +3,15 @@
  *
  * Jev, local Laya, and ModernBERT share `/v1/systemone`. A score under the
  * configured line blocks (0.5 unless the panel changes it). One score within
- * 0.08 under that line does not. The same state
- * reuses that verdict for the configured window. A dead model fails open
- * unless fail_open is off. 401 / 429 / 529 tries the next key.
+ * 0.08 under that line does not. The same state reuses that verdict for the
+ * configured window. A dead model fails open unless fail_open is off.
+ * 401 / 429 / 529 retires that key and tries the next. A network error or
+ * other HTTP status skips the rest of that host for this call only.
+ * A line may be `https://host[/v1/systemone] <key>`.
  */
 import { ErrorCode, ErrorType, makeError } from '../core/errors.mjs'
 import { refusalUserDocument } from '../core/refusal-similarity.mjs'
+import { normalizeText } from '../core/distill-detect.mjs'
 import { prepareInterceptText } from './jev-prepare.mjs'
 
 export const JEV_SETTING = 'jev_intercept'
@@ -96,15 +99,20 @@ export const HARD_POLICY_RULES = Object.freeze([
 ])
 
 export const SAFETY_INSTRUCTION =
-  '这段话是否可以提交给模型做普通推理？只有明确要求色情、暴力伤害或破解软件授权时才算不可以。引用系统提示、复制技能名、普通编程和排错，算可以。'
+  '这段话是否可以提交给模型做普通推理？出现性爱、性行为、性描写或性器官时不可以，包在角色扮演或角色卡里也不可以。明确的色情、暴力伤害、破解软件授权也不可以。引用系统提示、复制技能名、普通编程和排错，可以。'
 
 const LEGACY_SAFETY_INSTRUCTIONS = new Set([
   '这段话是否可以提交给llm进行深度推理，不会涉及到风险，比如：色情、暴力、破解、诱导?',
+  '这段话是否可以提交给模型做普通推理？只有明确要求色情、暴力伤害或破解软件授权时才算不可以。引用系统提示、复制技能名、普通编程和排错，算可以。',
 ])
+
+export const NSFW_INSTRUCTION =
+  '这段话是否可以提交给模型？出现「性爱」「性行为」「性描写」或「性器官」时，整段不可以，安全程度应明显偏低。这些词只出现一两次，或包在角色扮演、心理测验、角色卡里，仍然不可以。色情请求、性服务、未成年人性内容也不可以。完全没有这些词的编程、排错、普通角色设定，可以。'
 
 /** Builtin wording shipped before the skill-list false positive. Panel edits that differ stay. */
 const LEGACY_BUILTIN_INSTRUCTIONS = new Map([
   ['safety', LEGACY_SAFETY_INSTRUCTIONS],
+  ['nsfw', new Set(['这段话是否可以提交给模型，并且不包含色情、露骨性描写、性服务请求或任何未成年人性内容？'])],
   [
     'jailbreak',
     new Set([
@@ -133,14 +141,14 @@ export const POLICY_QUESTION_BANK = Object.freeze([
   {
     id: 'safety',
     label: '综合',
-    summary: '色情、暴力、破解软件授权',
+    summary: '性爱描写、色情、暴力、破解软件授权',
     instructions: SAFETY_INSTRUCTION,
   },
   {
     id: 'nsfw',
     label: '色情',
-    summary: '露骨性描写、色情请求、未成年人性内容',
-    instructions: '这段话是否可以提交给模型，并且不包含色情、露骨性描写、性服务请求或任何未成年人性内容？',
+    summary: '性爱、性行为、性描写、未成年人性内容',
+    instructions: NSFW_INSTRUCTION,
   },
   {
     id: 'jailbreak',
@@ -336,7 +344,7 @@ function normalizeRules(raw) {
   return out
 }
 
-const KEY_MAX = 8
+const KEY_MAX = 999
 
 function normalizeKeys(raw) {
   const list = []
@@ -596,6 +604,7 @@ export function applyJevPatch(settings, body = {}) {
     rules: Object.hasOwn(body, 'rules') ? body.rules : current.rules,
   })
   settings.set(JEV_SETTING, next)
+  if (Object.hasOwn(body, 'api_keys') || Object.hasOwn(body, 'api_key')) rearmJevKeys(next)
   return { ok: true, config: publicJevConfig(next) }
 }
 
@@ -644,8 +653,31 @@ export function matchHardPolicy(text, extra = [], rules = null) {
   return null
 }
 
+/** Hard regex sees user turns only. Quoted or official system text is not scanned. */
 export function jevDocument(inbound, body = inbound) {
   return refusalUserDocument(inbound, body)
+}
+
+/** Jev also sees the client system. Roleplay tasks put the sexual text there and leave the user turn as a character card. */
+export function jevModelDocument(inbound, body = inbound) {
+  const seen = new Set()
+  const parts = []
+  const push = (text) => {
+    const norm = normalizeText(text)
+    if (!norm || seen.has(norm)) return
+    seen.add(norm)
+    parts.push(norm)
+  }
+  for (const src of [inbound, body]) {
+    const system = src?.system
+    const blocks = typeof system === 'string' ? [system] : Array.isArray(system) ? system : []
+    for (const block of blocks) {
+      push(typeof block === 'string' ? block : block?.text)
+    }
+  }
+  const user = jevDocument(inbound, body)
+  if (user) parts.push(user)
+  return parts.join('\n')
 }
 
 /** Explicit model wins. Otherwise Jev uses jev-latest, ModernBERT uses english, Laya lets the router choose. */
@@ -819,9 +851,45 @@ function cachedVerdict(key, now, windowMs) {
   return row.verdict
 }
 
-function unavailable(config) {
-  if (config.fail_open) return { action: 'pass', reason: 'unavailable' }
-  return { action: 'block', category: 'safety', categories: ['safety'], reason: 'unavailable' }
+function unavailable(config, detail = '') {
+  const row = config.fail_open
+    ? { action: 'pass', reason: 'unavailable' }
+    : { action: 'block', category: 'safety', categories: ['safety'], reason: 'unavailable' }
+  if (detail) row.detail = detail
+  return row
+}
+
+const retiredJevKeys = new Set()
+
+function jevKeyId(url, apiKey) {
+  return `${url}\0${apiKey}`
+}
+
+/** Bare key uses the configured base. `https://host/... <key>` binds that host. */
+function splitKeyLine(line) {
+  const text = String(line || '').trim()
+  const match = text.match(/^(https?:\/\/\S+)\s+(\S+)$/)
+  if (!match) return { baseUrl: '', apiKey: text }
+  return { baseUrl: match[1], apiKey: match[2] }
+}
+
+function jevTargets(config) {
+  const lines = config.api_keys.length ? config.api_keys : ['']
+  const out = []
+  for (const line of lines) {
+    const split = splitKeyLine(line)
+    const url = decisionUrl(split.baseUrl || config.base_url)
+    if (!url) continue
+    out.push({ url, apiKey: split.apiKey, id: jevKeyId(url, split.apiKey) })
+  }
+  return out
+}
+
+function rearmJevKeys(config) {
+  const live = new Set(jevTargets(config).map((target) => target.id))
+  for (const id of [...retiredJevKeys]) {
+    if (live.has(id)) retiredJevKeys.delete(id)
+  }
 }
 
 let keyCursor = 0
@@ -847,23 +915,35 @@ export async function classifyJev(text, cfg, fetchImpl = globalThis.fetch, now =
   }
   const payload = { state: document, questions: questionsFor(config) }
   if (model) payload.model = model
-  const keys = config.api_keys.length ? config.api_keys : ['']
+  const all = jevTargets(config)
+  const targets = all.filter((target) => !retiredJevKeys.has(target.id))
+  if (!targets.length) return unavailable(config, all.some((target) => target.apiKey) ? '密钥失效' : '')
   const start = keyCursor++
-  for (let i = 0; i < keys.length; i++) {
-    const apiKey = keys[(start + i) % keys.length]
+  let network = false
+  let http = ''
+  const skipUrl = new Set()
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[(start + i) % targets.length]
+    if (skipUrl.has(target.url)) continue
     try {
-      const response = await fetchImpl(url, {
+      const response = await fetchImpl(target.url, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+          ...(target.apiKey ? { authorization: `Bearer ${target.apiKey}` } : {}),
         },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(config.timeout_ms),
       })
       if (!response?.ok) {
-        if (response?.status === 401 || response?.status === 429 || response?.status === 529) continue
-        return unavailable(config)
+        const status = Number(response?.status) || 0
+        if (status === 401 || status === 429 || status === 529) {
+          if (target.apiKey) retiredJevKeys.add(target.id)
+          continue
+        }
+        skipUrl.add(target.url)
+        if (!http) http = `上游 ${status || '失败'}`
+        continue
       }
       const decision = parsePolicyDecision(await response.json(), config)
       if (!decision) return { action: 'pass', reason: 'invalid' }
@@ -877,8 +957,10 @@ export async function classifyJev(text, cfg, fetchImpl = globalThis.fetch, now =
       if (windowMs > 0) verdictCache.set(key, { verdict, at: now })
       return verdict
     } catch {
-      // try the next key; a dead model with no key left fails open or closed below
+      // Host-level. Do not retire keys, and do not walk the rest of this host.
+      skipUrl.add(target.url)
+      network = true
     }
   }
-  return unavailable(config)
+  return unavailable(config, network ? '网络异常' : http || '密钥失效')
 }

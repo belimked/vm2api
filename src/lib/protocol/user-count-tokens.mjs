@@ -15,6 +15,11 @@ import {
   isOfficialClaudeCodeTraffic,
   isProxiedOfficialClaudeCode,
 } from '../identity/crs-persona.mjs'
+import {
+  claudeCodeOnlyError,
+  claudeCodeOnlyFromRouting,
+  isClaudeCodeFamilyRequest,
+} from '../identity/claude-code-only.mjs'
 import { canCountTokens, canOfficialUsage, credentialModeOfVm, isApiKeyMode } from '../oauth/credential-mode.mjs'
 import { getUsageCache } from '../oauth/usage-cache.mjs'
 import { probeAccount } from '../oauth/usage-probe.mjs'
@@ -23,7 +28,7 @@ import { countTokensViaWorker } from '../transport/go-worker-client.mjs'
 import { apiKeyBetaHeader, setupTokenBetaHeader } from './claude-code-betas.mjs'
 import { listQuotaFromHeaders, publicUsageWindow, usageWindowsEmpty } from '../pool/quota-window.mjs'
 import { ownerScopeFromRequest } from '../admin/resource-owner.mjs'
-import { keyScopeFromRequest } from '../admin/key-scope.mjs'
+import { keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
 import { detectInboundPlatform } from './platform-detect.mjs'
 import { resolveInboundIdentity } from '../identity/identity-rewrite.mjs'
 export function countTokensUnsupportedError() {
@@ -110,6 +115,8 @@ export async function peekCurrentAccount({
     return { ok: false, code: 'no_eligible_accounts' }
   }
   const keyScope = keyScopeFromRequest(req)
+  const poolDenial = vmPoolDenial(keyScope)
+  if (poolDenial) return { ok: false, code: ErrorCode.VM_POOL_UNAVAILABLE, message: poolDenial.message }
   // Same gate as Messages: a platform-scoped key must not hop to the other platform's VMs.
   if (platform && keyScope.group_type !== 'all' && keyScope.group_type !== platform) {
     return { ok: false, code: ErrorCode.KEY_GROUP_MISMATCH, group_type: keyScope.group_type }
@@ -131,6 +138,15 @@ function sendPoolFail(res, json, peeked) {
       type: ErrorType.PERMISSION,
       code,
       message: `此密钥仅可调用 ${peeked.group_type}`,
+      status: 403,
+    })
+    return json(res, 403, err.body)
+  }
+  if (code === ErrorCode.VM_POOL_UNAVAILABLE) {
+    const err = makeError({
+      type: ErrorType.PERMISSION,
+      code,
+      message: peeked?.message || '账号池不可用',
       status: 403,
     })
     return json(res, 403, err.body)
@@ -238,6 +254,15 @@ export async function handleUserCountTokens(req, res, deps) {
   }
   const parsed = parseCountTokensBody(inbound)
   if (!parsed.ok) return json(res, parsed.error.status, parsed.error.body)
+  const routing = typeof deps.getRoutingConfig === 'function' ? deps.getRoutingConfig() : null
+  if (
+    claudeCodeOnlyFromRouting(routing) &&
+    detectInboundPlatform(parsed.body.model).platform === 'anthropic' &&
+    !isClaudeCodeFamilyRequest(req?.headers || {}, inbound, { routing, countTokens: true })
+  ) {
+    const err = claudeCodeOnlyError()
+    return json(res, err.status, err.body)
+  }
   const blocked = await blockCountTokensBeforeHop(req, parsed.body, deps)
   if (blocked) return json(res, blocked.status, blocked.body)
   const peeked = await peekCurrentAccount({

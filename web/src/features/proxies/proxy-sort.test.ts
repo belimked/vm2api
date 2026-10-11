@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  localBoundGroupLabel,
+  localBoundGroups,
+  proxiesForVmBind,
   proxyLabel,
   proxyMatchesQuery,
+  proxyOptionLabel,
   sortedProxies,
   sortedProxiesByAvailability,
 } from './proxy-sort'
@@ -47,11 +51,19 @@ describe('local proxy', () => {
     },
   ]
 
-  it('is labelled with the VPS it exits from', () => {
-    expect(proxyLabel(local, '203.0.113.7')).toBe(
-      'local:203.0.113.7 · 当前VPS的本地代理'
+  it('is labelled by placement, not the control-plane IP', () => {
+    expect(proxyLabel(local)).toBe('local代理')
+    expect(proxyLabel(local, { revealNode: true, nodeName: '东京-01' })).toBe(
+      '东京-01local代理'
     )
-    expect(proxyLabel(local)).toBe('local:当前VPS · 当前VPS的本地代理')
+    expect(proxyLabel({ ...local, node_name: null })).toBe('当前VPS local代理')
+    expect(proxyLabel({ ...local, node_name: '东京-01' })).toBe(
+      '东京-01local代理'
+    )
+    expect(
+      proxyOptionLabel(local, 5, { revealNode: true, nodeName: '东京-01' })
+    ).toContain('出口为该节点本机')
+    expect(proxyOptionLabel(local, 5)).toContain('所有节点共用')
   })
 
   it('stays first in every ordering', () => {
@@ -65,10 +77,70 @@ describe('local proxy', () => {
   })
 })
 
+describe('proxiesForVmBind', () => {
+  const local = {
+    id: 'px-local',
+    host: 'local',
+    port: 0,
+    scheme: 'local' as const,
+    kind: 'local' as const,
+    enabled: true,
+    status: 'ok' as const,
+    bind_limit: 8,
+    bound_vm_ids: ['vm-14', 'vm-16'],
+  }
+  const socks = {
+    ...base,
+    enabled: true,
+    status: 'ok' as const,
+    bind_limit: 8,
+    bound_vm_ids: [] as string[],
+  }
+
+  it('keeps the local proxy when this slot already uses it', () => {
+    const list = proxiesForVmBind([socks, local], 'vm-14', 5)
+    expect(list.map((p) => p.id)).toEqual(['px-local', 'px-1'])
+  })
+
+  it('drops a full proxy that belongs to other slots', () => {
+    const full = {
+      ...socks,
+      id: 'px-full',
+      bind_limit: 1,
+      bound_vm_ids: ['vm-01'],
+    }
+    const list = proxiesForVmBind([full, local], 'vm-03', 5)
+    expect(list.map((p) => p.id)).toEqual(['px-local'])
+  })
+})
+
 describe('proxyMatchesQuery', () => {
   it('finds a proxy by its name', () => {
     const prx = { ...base, label: 'Tokyo Box' }
     expect(proxyMatchesQuery(prx, 'tokyo', () => '')).toBe(true)
     expect(proxyMatchesQuery(prx, 'osaka', () => '')).toBe(false)
+  })
+})
+
+describe('localBoundGroups', () => {
+  it('groups bound VMs by node and labels the exit', () => {
+    const proxy = {
+      id: 'px-local',
+      kind: 'local' as const,
+      bound_vm_ids: ['vm-local', 'vm-tokyo'],
+      bound_nodes: [
+        { node_id: null, node_name: null, bound_vm_ids: ['vm-local'] },
+        {
+          node_id: 'node-a',
+          node_name: '东京-01',
+          bound_vm_ids: ['vm-tokyo'],
+        },
+      ],
+    }
+    const groups = localBoundGroups(proxy, new Map())
+    expect(groups.map((g) => g.node_id)).toEqual([null, 'node-a'])
+    expect(localBoundGroupLabel(groups[0])).toBe('当前VPS local代理')
+    expect(localBoundGroupLabel(groups[1])).toBe('东京-01local代理')
+    expect(proxyMatchesQuery(proxy, '东京-01', () => '')).toBe(true)
   })
 })

@@ -20,6 +20,7 @@ import {
   classifyJev,
   isPolicyBlockMemory,
   jevDocument,
+  jevModelDocument,
   matchHardPolicy,
   policyBlockError,
 } from './jev-intercept.mjs'
@@ -97,8 +98,8 @@ export function commitProtocolBlock(decision, { repo, devices, policy, requestId
   }
 }
 
-function pass(by) {
-  return { action: 'pass', intercept: gateVerdict({ kind: 'pass', by }) }
+function pass(by, keyword = '') {
+  return { action: 'pass', intercept: gateVerdict({ kind: 'pass', by, keyword }) }
 }
 
 function block(fields) {
@@ -144,6 +145,10 @@ export async function evaluateProtocolIntercept({
   }
 
   const document = prepareInterceptText(jevDocument(inbound, body), {
+    stripReminders: jev?.strip_reminders !== false,
+    expandBase64: jev?.expand_base64 !== false,
+  })
+  const modelDocument = prepareInterceptText(jevModelDocument(inbound, body), {
     stripReminders: jev?.strip_reminders !== false,
     expandBase64: jev?.expand_base64 !== false,
   })
@@ -232,7 +237,7 @@ export async function evaluateProtocolIntercept({
   }
 
   if (jev?.enabled) {
-    const verdict = await classifyJev(document, jev, fetchImpl)
+    const verdict = await classifyJev(modelDocument, jev, fetchImpl)
     if (verdict.action === 'block') {
       const error = policyBlockError(requestId)
       return block({
@@ -261,7 +266,7 @@ export async function evaluateProtocolIntercept({
             ? 'regex'
             : 'unchecked'
           : 'fail-open'
-    return pass(by)
+    return pass(by, verdict.reason === 'unavailable' ? verdict.detail || '' : '')
   }
 
   return pass(scanned ? 'regex' : 'unchecked')

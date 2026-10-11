@@ -120,11 +120,13 @@ test('import creates the slot and rolls a colliding id forward', async (t) => {
   assert.equal(saved.name, 'finished')
   assert.equal(saved.timezone, 'Asia/Tokyo')
   assert.equal(saved.persona_preset, 'official')
+  assert.equal(saved.runtime.type, 'docker')
+  assert.equal(saved.machine.memory, '512m')
   assert.equal(saved.policy.maxConcurrency, 3)
-  assert.equal(saved.policy.inflight, 0)
   assert.equal(saved.stats.requests, undefined)
   assert.equal(saved.proxy.host, '10.2.2.2')
   assert.equal(saved.proxy.password, 's3cret')
+  assert.equal(saved.proxy_cli_enabled, true)
   assert.equal(saved.claude.access_token, undefined)
   const cred = readWorkerCredentialFile(path.join(root, 'vms', 'vm-pkg', 'cli-home'))
   assert.equal(cred.access_token, 'sk-ant-oat01-PACKAGE')
@@ -185,6 +187,7 @@ test('local egress imports as px-local and codex tokens stay out of vm.json', as
   assert.equal(localRes.response.status, 201, localRes.response.body?.error?.message)
   const localVm = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-local.json'), 'utf8'))
   assert.equal(isLocalEgressProxy(localVm.proxy), true)
+  assert.equal(localVm.proxy_cli_enabled, true)
 
   const codex = {
     type: 'vm2api-vm-package',

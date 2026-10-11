@@ -1,5 +1,11 @@
 import crypto from 'node:crypto'
-import { liftMidConversationSystemMessages, stripIllegalContentFields } from './sanitize.mjs'
+import {
+  anthropicContentIsEmpty,
+  liftMidConversationSystemMessages,
+  mergeConsecutiveAnthropicMessages,
+  messageHasTurnControls,
+  stripIllegalContentFields,
+} from './sanitize.mjs'
 import { isAnthropicServerTool } from './web-search.mjs'
 import {
   normalizeThinkingForModel,
@@ -152,45 +158,10 @@ export function stripInvalidThinkingBlocks(body = {}) {
     return filteredThis ? { ...message, content } : message
   })
   if (!changed) return body
-  const withoutEmpty = messages.filter((message) => !messageContentIsEmpty(message?.content))
-  return { ...body, messages: mergeSameRole(withoutEmpty) }
-}
-
-function messageContentIsEmpty(content) {
-  if (content == null) return true
-  if (typeof content === 'string') return !content.trim()
-  if (!Array.isArray(content)) return false
-  if (!content.length) return true
-  return content.every((block) => {
-    if (typeof block === 'string') return !block.trim()
-    if (!block || typeof block !== 'object') return true
-    if (block.type === 'text' || block.type == null) return !String(block.text || '').trim()
-    return false
-  })
-}
-
-function mergeSameRole(messages) {
-  const out = []
-  for (const message of messages) {
-    const last = out[out.length - 1]
-    if (!last || last.role !== message.role) {
-      out.push({ ...message })
-      continue
-    }
-    last.content = mergeContent(last.content, message.content)
-  }
-  return out
-}
-
-function mergeContent(left, right) {
-  if (typeof left === 'string' && typeof right === 'string') return `${left}\n${right}`
-  const blocks = []
-  for (const part of [left, right]) {
-    if (part == null || part === '') continue
-    if (typeof part === 'string') blocks.push({ type: 'text', text: part })
-    else if (Array.isArray(part)) blocks.push(...part)
-  }
-  return blocks
+  const withoutEmpty = messages.filter(
+    (message) => !anthropicContentIsEmpty(message?.content) || messageHasTurnControls(message),
+  )
+  return { ...body, messages: mergeConsecutiveAnthropicMessages(withoutEmpty) }
 }
 
 export const CONTEXT_MANAGEMENT_BETA = 'context-management-2025-06-27'
@@ -205,13 +176,16 @@ export function modelSupportsContextManagement(modelId = '') {
   return true
 }
 
-/** Mid-conversation `role=system` 400s on Haiku 4.5 and Claude 4.x. Haiku 5.5 accepts it. */
+/**
+ * Docs list: Fable 5 / 5.1, Mythos 5 / 5.1, Opus 5.5 / 5 / 4.8, Sonnet 5.5, Haiku 5.5.
+ * Sonnet 5, Haiku 4.5 and other Claude 4.x reject mid-conversation `role=system` (400).
+ */
 export function modelSupportsMidConversationSystem(modelId = '') {
   const id = String(modelId || '')
     .trim()
     .toLowerCase()
     .replace(/\[1m\]$/i, '')
-  return /^claude-(?:opus|sonnet|haiku)-5(?:-5|\.5)?(?:-|$)/.test(id)
+  return /^claude-(?:(?:fable|mythos)-5(?:[-.]1)?|opus-(?:5(?:[-.]5)?|4[-.]8)|(?:sonnet|haiku)-5[-.]5)(?:-|$)/.test(id)
 }
 
 /**

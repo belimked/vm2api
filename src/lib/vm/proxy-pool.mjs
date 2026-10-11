@@ -9,16 +9,18 @@
  * Persistence: `proxies` table + `settings.proxy_pool_config`.
  * Working set stays in memory (probe loop mutates it); save() writes through.
  */
+import { EventEmitter } from 'node:events'
 import net from 'node:net'
 import crypto from 'node:crypto'
 import { resolveStoreDb } from '../db/database.mjs'
 import { ProxiesRepo } from '../db/repos/proxies-repo.mjs'
-import { canBindProxyToVm, normalizeOwnerId, proxyOwnerId } from '../admin/resource-owner.mjs'
+import { canBindProxyToVm, normalizeOwnerId, proxyOwnerId, vmOwnerId } from '../admin/resource-owner.mjs'
 import { validTimezone } from '../core/timezone.mjs'
 import { lookupProxyGeo, lookupProxyGeoV6 } from './proxy-geo.mjs'
 import { DNS_PRIMARY_AUTO, DNS_UPSTREAMS, LOCAL_EGRESS_ID, isLocalEgressProxy, validDnsPrimary } from './egress.mjs'
 import { normalizeSocksHost, socksEndpoint, socksProxyUrl, socksProxyFamily } from './socks-address.mjs'
 import { proxyBlockedReason } from './proxy-policy.mjs'
+import { canRevealClusterNodes, annotatePublicLocalProxy } from './local-proxy-nodes.mjs'
 
 export const MAX_VMS_PER_PROXY = 5
 export const BIND_LIMIT_MIN = 1
@@ -294,7 +296,8 @@ export function parseSocks5Line(line) {
   return null
 }
 
-export class ProxyPool {
+/** Emits 'change' whenever proxy health or bindings may have moved (panel live stream). */
+export class ProxyPool extends EventEmitter {
   constructor({
     dataDir,
     db,
@@ -306,6 +309,9 @@ export class ProxyPool {
     geoLookup,
     geoV6Lookup,
   } = {}) {
+    super()
+    // One listener per open panel stream.
+    this.setMaxListeners(100)
     this.db = resolveStoreDb({ db, dataDir })
     this.repo = new ProxiesRepo(this.db)
     this.onDisableVm = onDisableVm // (vmId, reason, proxyId) => void
@@ -355,6 +361,28 @@ export class ProxyPool {
         bound_vm_id: encodeBoundVmIds(boundVmIdsOf(p)),
       })),
     )
+    this.emit('change')
+  }
+
+  /**
+   * Live health per bound VM for the panel stream: what a VM row shows next to
+   * its SOCKS5 chip, refreshed on every probe instead of the list poll.
+   */
+  liveStatusByVm() {
+    const out = {}
+    for (const p of this.state.proxies) {
+      const view = {
+        id: p.id,
+        status: p.status ?? null,
+        enabled: p.enabled ?? null,
+        blocked_reason: proxyBlockedReason(p, this.state.config.ipv6_enabled) || null,
+        latency_ms: p.latency_ms ?? null,
+        last_error: p.last_error || null,
+        last_probe_at: p.last_probe_at || null,
+      }
+      for (const vmId of boundVmIdsOf(p)) out[vmId] = view
+    }
+    return out
   }
 
   bindLimit() {
@@ -392,6 +420,33 @@ export class ProxyPool {
     }
   }
 
+  /**
+   * Panel-facing snapshot. Quota is still the shared px-local row; this only
+   * attaches per-node bound groups for admin and redacts node names / other
+   * tenants' VM ids for `user`.
+   */
+  panelSnapshot({ role = 'admin', ownerUserId = undefined, vms = [], nodes = [] } = {}) {
+    const reveal = canRevealClusterNodes(role)
+    const owner = role === 'user' ? normalizeOwnerId(ownerUserId) : undefined
+    const snap = this.snapshot({ ownerUserId: owner ? ownerUserId : undefined })
+    const vmList = Array.isArray(vms) ? vms : []
+    const nodeList = Array.isArray(nodes) ? nodes : []
+    const ownerVmIds = owner ? new Set(vmList.filter((vm) => vmOwnerId(vm) === owner).map((vm) => String(vm.id))) : null
+    if (owner) {
+      const hasLocal = snap.proxies.some((p) => isLocalEgressProxy(p))
+      if (!hasLocal) {
+        const raw = this.state.proxies.find((p) => isLocalEgressProxy(p))
+        if (raw && boundVmIdsOf(raw).some((id) => ownerVmIds.has(String(id)))) {
+          snap.proxies.unshift(this.publicProxy(raw))
+        }
+      }
+    }
+    snap.proxies = snap.proxies
+      .map((p) => annotatePublicLocalProxy(p, { reveal, vms: vmList, nodes: nodeList, ownerVmIds }))
+      .filter(Boolean)
+    return snap
+  }
+
   publicProxy(p) {
     const ids = boundVmIdsOf(p)
     const limit = this.bindLimit()
@@ -418,6 +473,7 @@ export class ProxyPool {
       created_at: p.created_at,
       kind: isLocalEgressProxy(p) ? 'local' : 'socks5',
       scheme: isLocalEgressProxy(p) ? 'local' : p.scheme || 'socks5',
+      domain_forward: !!p.domain_forward,
       geo: proxyGeoOf(p),
       geo_guard: {
         base: {
@@ -685,7 +741,7 @@ export class ProxyPool {
     if (!p) return { ok: false, error: 'proxy_not_found' }
     const has = (k) => Object.prototype.hasOwnProperty.call(patch, k)
     const connection = ['host', 'port', 'username', 'password'].some(has)
-    if (!connection && !has('label')) {
+    if (!connection && !has('label') && !has('domain_forward')) {
       return { ok: false, error: 'no_editable_fields' }
     }
     let label = p.label || null
@@ -694,10 +750,18 @@ export class ProxyPool {
       label = String(patch.label || '').trim() || null
       if (label && label.length > PROXY_LABEL_MAX) return { ok: false, error: 'label_too_long', max: PROXY_LABEL_MAX }
     }
+    let domainForward = !!p.domain_forward
+    if (has('domain_forward')) {
+      if (typeof patch.domain_forward !== 'boolean') return { ok: false, error: 'invalid_domain_forward' }
+      if (patch.domain_forward && isLocalEgressProxy(p)) return { ok: false, error: 'domain_forward_unsupported' }
+      domainForward = patch.domain_forward
+    }
+    const domainChanged = domainForward !== !!p.domain_forward
     if (!connection) {
       p.label = label
+      p.domain_forward = domainForward
       this.save()
-      return { ok: true, proxy: this.publicProxy(p), connection_changed: false }
+      return { ok: true, proxy: this.publicProxy(p), connection_changed: false, domain_forward_changed: domainChanged }
     }
     const username = has('username') ? patch.username : p.username
     // SOCKS5 has no password-only auth: socks5Record() drops the password
@@ -725,8 +789,9 @@ export class ProxyPool {
     // store. Rewrite it to host:port so editing also cleans that up.
     p.raw = socksEndpoint(next.host, next.port)
     p.label = label
+    p.domain_forward = domainForward
     this.save()
-    return { ok: true, proxy: this.publicProxy(p), connection_changed: true }
+    return { ok: true, proxy: this.publicProxy(p), connection_changed: true, domain_forward_changed: domainChanged }
   }
 
   updateConfig(patch = {}) {
@@ -1160,7 +1225,7 @@ export class ProxyPool {
     return p ? validTimezone(p.geo_timezone) : ''
   }
 
-  _applyProbeResult(p, result, { cascade = true } = {}) {
+  _applyProbeResultInner(p, result, { cascade = true } = {}) {
     // Disabled by policy is not a failed probe and must not damage health/history.
     if (result.scope === 'policy' || proxyBlockedReason(p, this.state.config.ipv6_enabled)) return
     p.last_probe_at = new Date().toISOString()
@@ -1192,6 +1257,11 @@ export class ProxyPool {
       p.status = 'dead'
       if (cascade) this._cascadeDisableVm(p, `proxy_probe_failed:${p.last_error}`)
     }
+  }
+
+  _applyProbeResult(p, result, opts = {}) {
+    this._applyProbeResultInner(p, result, opts)
+    this.emit('change')
   }
 
   startScheduler() {
