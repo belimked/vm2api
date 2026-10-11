@@ -18,7 +18,7 @@ set -uo pipefail
 
 # ── 配置 ────────────────────────────────────────────────────
 UPSTREAM_URL="https://github.com/dofastted/vm2api.git"
-CUSTOM_BRANCH="cus/v1.3.131"
+CUSTOM_BRANCH="cus/v1.3.146"
 MIRROR_BRANCH="main"                     # belimked/main = 上游纯镜像
 BIOME="@biomejs/biome@2.5.11"
 DO_PUSH=0
@@ -138,12 +138,9 @@ if [ -z "$missing" ]; then ok "${#PATCHES[@]} 个定制补丁全部完好"; else
 V1=$(cat VERSION); V2=$(grep -oE '"version": *"[0-9.]+"' package.json | grep -oE '[0-9.]+' | head -1); V3=$(grep -oE 'vm2api:[0-9.]+' docker-compose.yml | cut -d: -f2 | head -1)
 if [ "$V1" = "$V2" ] && [ "$V1" = "$V3" ]; then ok "版本号一致: $V1"; else warn "版本号不一致 VERSION=$V1 package=$V2 compose=$V3（上游发版疏漏）"; FAIL=1; fi
 
-# 5.5 槽内二进制是否变化 → 是否需要 wrap-cli/sync
+# 5.5 槽内二进制是否变化 → 是否需要 wrap-cli/sync（二进制不进 git，按 deploy/payload.json 钉的 sha256 比）
 SYNC=0
-for f in bin/kin-kernel bin/kin-codex-kernel bin/kin-cookie-auth share/wrap-cli/kin-kernel.bin share/wrap-cli/cli-node; do
-  a=$(git rev-parse "${U}:$f" 2>/dev/null); b=$(git rev-parse "HEAD:$f" 2>/dev/null)
-  [ "$a" != "$b" ] && SYNC=1
-done
+[ "$(git rev-parse "ORIG_HEAD:deploy/payload.json" 2>/dev/null)" != "$(git rev-parse "HEAD:deploy/payload.json" 2>/dev/null)" ] && SYNC=1
 if [ "$SYNC" = 1 ]; then warn "槽内 kernel 已更新 → 部署后需 POST /api/panel/wrap-cli/sync"; else ok "槽内二进制未变 → 无需 wrap-cli/sync"; fi
 
 # 5.6 测试基线: 我们不能比上游同版本多失败（新增测试文件除外）
