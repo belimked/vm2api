@@ -48,8 +48,14 @@ export async function streamRustKernel(opts = {}) {
   return remapVia(await streamGoWorker({ ...opts, exec: withRustKernelExec(opts.exec) }))
 }
 
+// A node slot's kernel.sock is forwarded over the cluster link; one round trip is 0.5-1.1s.
+export const NODE_KERNEL_HEALTH_TIMEOUT_MS = 5000
+
 export async function rustKernelHealth(exec, opts = {}) {
-  const health = await workerHealth(withRustKernelExec(exec), opts)
+  const timeoutMs = exec?.vm?.node_id
+    ? Math.max(Number(opts.timeoutMs) || 0, NODE_KERNEL_HEALTH_TIMEOUT_MS)
+    : opts.timeoutMs
+  const health = await workerHealth(withRustKernelExec(exec), { ...opts, timeoutMs })
   if (health?.source) {
     return { ...health, source: String(health.source).replace(/go-worker/g, 'rust-kernel') }
   }
