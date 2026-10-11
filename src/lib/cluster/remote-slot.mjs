@@ -13,6 +13,7 @@
 import crypto from 'node:crypto'
 import path from 'node:path'
 import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mjs'
+import { workstationMacAddress } from '../identity/workstation-profile.mjs'
 import {
   boundProxyUrl,
   bridgeName,
@@ -333,11 +334,14 @@ export async function releaseRemoteEgress(session, networkMode) {
   return { released: true, network: name }
 }
 
-function slotContainerBody(vm, { image, network, remoteDir, user }) {
+export function slotContainerBody(vm, { image, network, remoteDir, user }) {
   const slotName = displayName(vm.id)
   const mem = parseMemoryBytes(SLOT_MEMORY)
+  const macAllowed = !['host', 'bridge', 'none'].includes(network) && !String(network || '').startsWith('container:')
+  const mac = macAllowed ? workstationMacAddress(vm) : null
   return {
     Image: image,
+    ...(mac ? { MacAddress: mac, NetworkingConfig: { EndpointsConfig: { [network]: { MacAddress: mac } } } } : {}),
     Hostname: String(vm.fingerprint?.hostname || '').trim() || slotName,
     User: user,
     WorkingDir: '/home/kincli',

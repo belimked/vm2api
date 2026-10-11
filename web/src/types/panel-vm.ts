@@ -53,6 +53,16 @@ export type VmProxySnap = {
   scheme?: string
   /** 出口地理位置（IPv4）；从未检测过为 null。 */
   geo?: ProxyGeo | null
+  geo_guard?: {
+    base: {
+      country_code: string | null
+      region: string | null
+      at: string | null
+    }
+    status: 'ok' | 'changed' | 'error' | null
+    checked_at: string | null
+    reason: string | null
+  }
   /** 公网 IPv6 出口地理位置；从未检测过为 null。 */
   geo_v6?: ProxyGeo | null
 }

@@ -4,6 +4,7 @@
  * hostname / 768m cgroup never go outbound. Hardware SKU is 2C4G or 4C8G
  * presentation only — the box cannot actually host those limits.
  */
+import crypto from 'node:crypto'
 import { distroVersionFromPretty } from './telemetry-env.mjs'
 
 export const WORKSTATION_SKUS = Object.freeze({
@@ -35,6 +36,8 @@ export const WORKSTATION_SKUS = Object.freeze({
   }),
 })
 
+export const SKU_ORDER = Object.freeze(['2c4g', '4c8g'])
+
 const FAMILY_KERNELS = Object.freeze({
   ubuntu: Object.freeze(['6.8.0-47-generic', '6.8.0-51-generic', '6.8.0-52-generic', '6.8.0-54-generic']),
   debian: Object.freeze(['6.1.0-25-amd64', '6.1.0-28-amd64', '6.1.0-31-amd64']),
@@ -61,10 +64,59 @@ const HOST_KERNEL_RE = /^(7\.0\.0-\d+-generic|.*\bhost\b)/i
 export const WORKSTATION_TERMINAL = 'xterm-256color'
 export const WORKSTATION_SHELL = '/bin/bash'
 
-export function slotIndex(vm = {}) {
-  const raw = String(vm.id || vm.vmId || '').trim()
-  const m = raw.match(/^vm-(\d+)$/i) || raw.match(/^0*(\d+)$/)
-  return m ? Number(m[1]) : 0
+/**
+ * Vendor OUI prefixes for the slot NIC. Docker hands out 02:42:* — a range
+ * that marks a container at a glance. A workstation carries a real vendor
+ * prefix, so the slot picks one deterministically from its own hash seed.
+ */
+export const NIC_OUIS = Object.freeze([
+  '00:1b:21', // Intel
+  '3c:fd:fe', // Intel
+  'a4:bb:6d', // Intel
+  '00:14:22', // Dell
+  'b8:2a:72', // Dell
+  '00:1f:29', // HP
+  '00:e0:4c', // Realtek
+])
+
+export const MAC_RE = /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/
+
+/**
+ * Stable per-slot hash seed. The slot machine-id comes first so two slots
+ * created back to back get unrelated hardware; vm id only covers the window
+ * before a fingerprint exists.
+ */
+export function slotHashSeed(vm = {}) {
+  const fp = vm.fingerprint || {}
+  return String(fp.guest_machine_id || fp.device_id || vm.id || vm.vmId || '').trim()
+}
+
+function slotHash(seed, salt) {
+  return crypto.createHash('sha256').update(`${salt}:${seed}`).digest().readUInt32BE(0)
+}
+
+/**
+ * Pick from a catalog by slot hash instead of slot index. Index arithmetic
+ * made slot N and slot N+4 share every attribute, which reads as one gateway
+ * cluster rather than N unrelated workstations.
+ */
+export function slotPick(list, vm = {}, salt = '', seed = '') {
+  const items = Array.isArray(list) && list.length ? list : ['']
+  return items[slotHash(seed || slotHashSeed(vm), salt) % items.length]
+}
+
+/** Slot NIC address. A stored fingerprint value wins so a live slot never moves. */
+export function workstationMacAddress(vm = {}, { seed = '' } = {}) {
+  if (!seed) {
+    const pinned = String(vm.fingerprint?.mac_address || '')
+      .trim()
+      .toLowerCase()
+    if (MAC_RE.test(pinned)) return pinned
+  }
+  const src = seed || slotHashSeed(vm)
+  const oui = slotPick(NIC_OUIS, vm, 'mac:oui', src)
+  const tail = crypto.createHash('sha256').update(`mac:nic:${src}`).digest('hex').slice(0, 6)
+  return `${oui}:${tail.slice(0, 2)}:${tail.slice(2, 4)}:${tail.slice(4, 6)}`
 }
 
 export function workstationFamily(vm = {}) {
@@ -77,17 +129,24 @@ export function workstationFamily(vm = {}) {
   return 'ubuntu'
 }
 
-export function workstationSkuId(vm = {}) {
-  const n = slotIndex(vm)
-  if (!n) return '2c4g'
-  return n % 2 === 0 ? '2c4g' : '4c8g'
+/** A stored sku wins; only a fresh pack (explicit seed) rotates it. */
+export function workstationSkuId(vm = {}, { seed = '' } = {}) {
+  if (!seed) {
+    const pinned = String(vm.fingerprint?.sku || '').trim()
+    if (WORKSTATION_SKUS[pinned]) return pinned
+  }
+  return slotPick(SKU_ORDER, vm, 'sku', seed)
 }
 
-export function workstationKernel(vm = {}) {
+/** A stored kernel wins only while it still belongs to the current distro. */
+export function workstationKernel(vm = {}, { seed = '' } = {}) {
   const family = workstationFamily(vm)
   const list = FAMILY_KERNELS[family] || FAMILY_KERNELS.ubuntu
-  const n = slotIndex(vm)
-  return list[(n || 1) % list.length]
+  if (!seed) {
+    const pinned = String(vm.fingerprint?.linux_kernel || '').trim()
+    if (list.includes(pinned)) return pinned
+  }
+  return slotPick(list, vm, `kernel:${family}`, seed)
 }
 
 export function isHostKernel(release = '') {

@@ -19,6 +19,9 @@ permissions:
 
 jobs:
   linux-amd64:
+    # Our +cus custom tags (e.g. v1.3.19+cus.0.4.0) intentionally fail the
+    # tag==VERSION gate and need no ghcr publish, so skip release for them.
+    if: ${{ !contains(github.ref_name, '+cus') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:

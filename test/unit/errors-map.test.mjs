@@ -11,6 +11,7 @@ import {
   isCompleteAssistantMessage,
   isIncompleteAssistantMessage,
   finalizeAssembledAssistantHop,
+  incompleteAssistantClientError,
   mergeAssembledAssistantHop,
   CLIENT_POOL_BUSY_MESSAGE,
   CLIENT_POOL_UNAVAILABLE_MESSAGE,
@@ -345,4 +346,20 @@ test('poolErrorKind separates capacity from nothing-eligible and leaves upstream
   assert.equal(poolErrorKind('upstream_error', 'No eligible Claude accounts remain'), 'unavailable')
   assert.equal(poolErrorKind('upstream_rate_limit', 'Rate limit exceeded'), null)
   assert.equal(poolErrorKind('incomplete_response'), null)
+})
+
+test('incomplete assistant error keeps the reason the hop died (#32)', () => {
+  const ttl400 =
+    "API Error: 400 messages.0.content.2.cache_control.ttl: a ttl='1h' block must not come after a ttl='5m' block"
+  const out = incompleteAssistantClientError({ body: { error: { message: ttl400 } } })
+  assert.equal(out.status, 502)
+  assert.equal(out.body.error.code, 'incomplete_response')
+  assert.match(out.body.error.message, /^Assistant hop ended without visible output or stop_reason: /)
+  assert.ok(out.body.error.message.includes(ttl400))
+})
+
+test('incomplete assistant error stays generic without a reason and never repeats itself', () => {
+  const generic = 'Assistant hop ended without visible output or stop_reason'
+  assert.equal(incompleteAssistantClientError({ body: {} }).body.error.message, generic)
+  assert.equal(incompleteAssistantClientError({ body: { error: { message: generic } } }).body.error.message, generic)
 })
