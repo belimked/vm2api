@@ -19,7 +19,7 @@ import {
   DEFAULT_HEALTH_PROBE,
 } from '../../src/lib/admin/health-probe.mjs'
 
-// The cache/intercept switch ships off, so the intercept cases opt in.
+// The cache switch ships off. Intercept cases opt in.
 const cfg = normalizeHealthProbeConfig({ enabled: true })
 
 const unofficial = { 'user-agent': 'Go-http-client/2.0' }
@@ -52,9 +52,9 @@ function cachedSnap(extra = {}) {
   }
 }
 
-test('probe cache is on by default and can be turned off', () => {
-  assert.equal(DEFAULT_HEALTH_PROBE.enabled, true)
-  assert.equal(normalizeHealthProbeConfig().enabled, true)
+test('probe cache ships off and can be turned on', () => {
+  assert.equal(DEFAULT_HEALTH_PROBE.enabled, false)
+  assert.equal(normalizeHealthProbeConfig().enabled, false)
   assert.equal(normalizeHealthProbeConfig({ enabled: false }).enabled, false)
   // Off means a third-party hello runs a real probe instead of a replay.
   assert.equal(
@@ -327,6 +327,18 @@ test('selectHealthProbeTargets uses summary credential flags', () => {
   )
   const pinned = normalizeHealthProbeConfig({ real: { vm_ids: ['vm-02'] } })
   assert.deepEqual(selectHealthProbeTargets(vms, pinned), [])
+})
+
+test('selectHealthProbeTargets skips slots outside their working window', () => {
+  const now = Date.parse('2026-09-17T12:00:00.000Z')
+  const vms = [
+    { id: 'vm-rest', schedulable: true, status: 'running', has_token: true, active_hours: { start: '20:00', end: '08:00', timezone: 'UTC' } },
+    { id: 'vm-day', schedulable: true, status: 'running', has_token: true, active_hours: { start: '08:00', end: '20:00', timezone: 'UTC' } },
+  ]
+  assert.deepEqual(
+    selectHealthProbeTargets(vms, cfg, now).map((v) => v.id),
+    ['vm-day'],
+  )
 })
 
 test('monitor singleflight writes snapshot and fail_closed decides fail', async () => {

@@ -16,7 +16,7 @@ const serverSrc = [
 
 test('user sees vm / proxies / keys / billing / logs / statistics', () => {
   assert.deepEqual(viewsForRole('user'), ['vm', 'proxies', 'keys', 'billing', 'logs', 'statistics'])
-  assert.deepEqual(viewsForRole('super'), ['overview', 'cluster', 'usage', 'logs', 'statistics', 'vm'])
+  assert.deepEqual(viewsForRole('super'), ['overview', 'cluster', 'logs', 'statistics', 'vm'])
   assert.equal(canViewPage('admin', 'statistics'), true)
   assert.equal(canViewPage('user', 'vm'), true)
   assert.equal(canViewPage('user', 'overview'), false)
@@ -133,6 +133,48 @@ test('admin is unrestricted', () => {
   assert.equal(authorizePanelRoute('GET', '/api/panel/database/metrics', 'admin').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/version', 'admin').ok, true)
   assert.equal(authorizePanelRoute('POST', '/api/panel/update', 'admin').ok, true)
+})
+
+test('user and super can GET/PUT onboarding; POST is admin-only', () => {
+  for (const role of ['user', 'super', 'admin']) {
+    assert.equal(authorizePanelRoute('GET', '/api/panel/onboarding', role).ok, true, `${role} GET`)
+    assert.equal(authorizePanelRoute('PUT', '/api/panel/onboarding', role).ok, true, `${role} PUT`)
+  }
+  assert.equal(authorizePanelRoute('POST', '/api/panel/onboarding', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/onboarding', 'super').ok, false)
+  assert.equal(authorizePanelRoute('DELETE', '/api/panel/onboarding', 'user').ok, false)
+})
+
+test('onboarding profile writes are admin-only', async () => {
+  const { Readable } = await import('node:stream')
+  const { readBody } = await import('../../src/lib/http/respond.mjs')
+  for (const role of ['user', 'super']) {
+    let routingWrites = 0
+    const response = {}
+    const handlePanel = createPanelHandler({
+      cfg: { paths: {} },
+      readBody,
+      persistRoutingPatch() {
+        routingWrites += 1
+        return {}
+      },
+      requireAuth(req) {
+        req.panelUser = 'alice'
+        req.panelRole = role
+        return true
+      },
+      json(_res, status, body) {
+        response.status = status
+        response.body = body
+      },
+    })
+    const req = Readable.from([Buffer.from(JSON.stringify({ action: 'profile', mode: 'personal' }))])
+    req.method = 'PUT'
+    await handlePanel(req, {}, new URL('http://localhost/api/panel/onboarding'))
+    assert.equal(response.status, 403, role)
+    assert.equal(response.body.error.code, 'forbidden', role)
+    assert.equal(routingWrites, 0, role)
+  }
 })
 
 test('managed keys cannot bypass admin role checks through models refresh', async () => {

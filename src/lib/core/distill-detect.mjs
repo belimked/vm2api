@@ -61,7 +61,6 @@ export const DEFAULT_DISTILL_RULES = {
     'systematic long thinking process',
     'as an internal monologue',
     'Please reason step by step, and put your final answer within \\boxed{}',
-    'Respond in the following format: <think>',
     ...HARVEST_NEEDLES,
   ],
   patterns: [...HARD_DISTILL_PATTERNS],
@@ -94,16 +93,15 @@ function contentToText(content) {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
     return content
-      .map((part) => {
-        if (typeof part === 'string') return part
-        if (part && typeof part.text === 'string') return part.text
-        if (part && typeof part.content === 'string') return part.content
-        return ''
-      })
+      .map((part) => contentToText(part))
       .filter(Boolean)
       .join('\n')
   }
-  if (content && typeof content.text === 'string') return content.text
+  if (!content || typeof content !== 'object') return ''
+  if (typeof content.text === 'string') return content.text
+  // Responses items nest their parts one level deeper: message -> content -> input_text.
+  if (typeof content.content === 'string') return content.content
+  if (Array.isArray(content.content)) return contentToText(content.content)
   return ''
 }
 
@@ -111,6 +109,9 @@ function systemText(body) {
   if (!body || typeof body !== 'object') return ''
   if (typeof body.system === 'string') return body.system
   if (Array.isArray(body.system)) return contentToText(body.system)
+  // Responses carries the client system prompt as `instructions`.
+  if (typeof body.instructions === 'string') return body.instructions
+  if (Array.isArray(body.instructions)) return contentToText(body.instructions)
   return ''
 }
 
@@ -125,11 +126,29 @@ function messageRoleTexts(body, roles) {
   return out.filter(Boolean)
 }
 
+/** Responses `input`: a plain string, or items whose roleless or user-role parts carry the prompt. */
+function responsesInputTexts(input) {
+  if (typeof input === 'string') return input ? [input] : []
+  if (!Array.isArray(input)) return []
+  const out = []
+  for (const item of input) {
+    if (typeof item === 'string') {
+      if (item) out.push(item)
+      continue
+    }
+    if (!item || typeof item !== 'object') continue
+    const role = typeof item.role === 'string' ? item.role.toLowerCase() : ''
+    if (role && role !== 'user') continue
+    const text = contentToText(item.content === undefined ? item : item.content)
+    if (text) out.push(text)
+  }
+  return out
+}
+
 function userTexts(body) {
   if (!body || typeof body !== 'object') return []
   const out = messageRoleTexts(body, ['user'])
-  if (typeof body.input === 'string') out.push(body.input)
-  else if (Array.isArray(body.input)) out.push(contentToText(body.input))
+  out.push(...responsesInputTexts(body.input))
   return out.filter(Boolean)
 }
 
@@ -211,11 +230,16 @@ function matchFingerprints(text, fingerprints) {
   return ''
 }
 
-/** Pasted assistant transcripts contain these. They are not a distill template. */
-const BARE_THINK_NEEDLES = new Set(['<think>', '</think>'])
+/**
+ * Not a distill template. Bare tags show up in pasted transcripts. The
+ * "respond in this format" line is a normal client system prompt (NewAPI and
+ * other relays forward it on Go-http-client, so skip_official does not apply).
+ * Saved configs lose these on load; turn distill off to disable the rest.
+ */
+const DROPPED_NEEDLES = new Set(['<think>', '</think>', 'respond in the following format: <think>'])
 
 function dropBareThinkNeedles(needles) {
-  return needles.filter((item) => !BARE_THINK_NEEDLES.has(String(item).trim().toLowerCase()))
+  return needles.filter((item) => !DROPPED_NEEDLES.has(String(item).trim().toLowerCase()))
 }
 
 function matchNeedles(text, needles) {

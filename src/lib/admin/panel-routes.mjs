@@ -13,11 +13,13 @@ import {
   clearPanelSessionCookie,
   revokePanelSession,
   revokePanelSessionsForUser,
+  getPanelAdmin,
 } from '../core/security.mjs'
 import { loadDistillRules, saveDistillRules, validateDistillPatch } from '../core/distill-detect.mjs'
 import { applyRefusalGuardPatch, refusalGuardPolicy } from '../core/refusal-guard.mjs'
 import {
   applyJevPatch,
+  buildScopeInventory,
   listPolicyModels as listDecisionModels,
   publicJevConfig,
   readJevConfig,
@@ -120,8 +122,10 @@ import {
   adoptVmProxyBinding,
   patchVmRecord,
   vmHasClaudeCredential,
+  vmHasSchedulableCredential,
   persistAllowedModels,
   persistSlotEnginePolicy,
+  persistVmActiveHours,
   persistVmScheduleLevel,
   persistVmOwner,
   persistVmTimezone,
@@ -131,6 +135,7 @@ import { validTimezone } from '../core/timezone.mjs'
 import { stampVmKind, isCodexVm } from '../vm/vm-kind.mjs'
 import { parseAllowedModelsPatch } from '../pool/slot-model-gate.mjs'
 import { parseScheduleLevelInput } from '../pool/credential-weight.mjs'
+import { parseActiveHoursInput } from '../pool/active-hours.mjs'
 import { parseVmQuotaOverride } from '../pool/vm-quota-override.mjs'
 import { validateOpenAIQuotaPatch, normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import {
@@ -148,7 +153,7 @@ import {
 import { makeError, ErrorType, ErrorCode } from '../core/errors.mjs'
 import * as panel from './panel-api.mjs'
 import { GATEWAY_CAPABILITIES } from '../vm/execution-context.mjs'
-import { withVmLock, atomicWriteJson, isValidVmId } from '../vm/vm-file.mjs'
+import { withVmLock, atomicWriteJson, isValidVmId, invalidateVmSlotReadCache } from '../vm/vm-file.mjs'
 import { snapshotDatabaseMetrics } from '../db/database-metrics.mjs'
 import { getUsageCache } from '../oauth/usage-cache.mjs'
 import { getDb, getDbPath } from '../db/database.mjs'
@@ -235,6 +240,18 @@ import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
 import { mergeNotifyConfig, publicNotifyConfig, publicRoutingNotify, sendNotifyTest } from './notify.mjs'
 import { UsageLogsView } from '../db/repos/usage-logs-view.mjs'
 import {
+  applyOnboardingAction,
+  buildOnboardingPayload,
+  loadOnboardingState,
+  onboardingRoleOf,
+  onboardingUserOf,
+  recordOf,
+  saveOnboardingState,
+  setOnboardingProfile,
+  vmStepFacts,
+} from './onboarding.mjs'
+import { applyUsageProfile } from './usage-profile.mjs'
+import {
   StatisticsRepo,
   USER_ROLE_DIMENSIONS,
   normalizeDimension,
@@ -253,6 +270,47 @@ function clusterNodesOf(ctx) {
   } catch {
     return []
   }
+}
+
+function collectOnboardingFacts(req, ctx) {
+  const ident = panelIdentity(req)
+  const ownerUserId = ident.role === 'user' ? req.panelUserId : null
+  const vms = listVms(ctx.cfg.paths.project, ctx.routingConfig)
+  const snap = ctx.proxyPool.panelSnapshot({
+    role: ident.role,
+    ownerUserId: ident.role === 'user' ? req.panelUserId : undefined,
+    vms,
+    nodes: clusterNodesOf(ctx),
+  })
+  const visible = filterVmsForPanel(vms, { role: ident.role, userId: ownerUserId })
+  const keys = ctx.apiKeyStore.snapshot().keys || []
+  const mine =
+    ident.role === 'user' ? keys.filter((k) => normalizeOwnerId(k.user_id) === normalizeOwnerId(req.panelUserId)) : keys
+  const admin = getPanelAdmin()
+  return {
+    envPassword: admin.password,
+    envAdminExists: !!ctx.panelUsers.getByUsername(admin.username),
+    proxyCount: (snap.proxies || []).length,
+    ...vmStepFacts(visible),
+    activeKeyCount: mine.filter((k) => k.status === 'active').length,
+    hasFirstRequest: ctx.requestLog.hasSuccessfulRequest({ owner_user_id: ownerUserId }),
+  }
+}
+
+function onboardingPayloadFor(req, ctx) {
+  const user = onboardingUserOf(req)
+  const role = onboardingRoleOf(req)
+  const rec = recordOf(loadOnboardingState(new SettingsRepo()), user)
+  return buildOnboardingPayload({
+    user,
+    role,
+    status: rec.status,
+    profile: rec.profile,
+    guide_used: rec.guide_used,
+    // cfg.base_url falls back to HOST:PORT (often 0.0.0.0); only an explicit public URL beats the browser origin.
+    base_url: process.env.PUBLIC_BASE_URL || null,
+    facts: collectOnboardingFacts(req, ctx),
+  })
 }
 
 /** Scrolling-log query string → `UsageLogsView` filters. Empty strings are dropped. */
@@ -459,7 +517,7 @@ export function createPanelHandler(ctx) {
 
   function restoreSchedulableIfReady(vmId) {
     const vm = getVm(cfg.paths.project, vmId)
-    if (!vmHasClaudeCredential(vm)) {
+    if (!vmHasSchedulableCredential(vm, cfg.paths.project)) {
       setVmSchedulable(cfg.paths.project, vmId, false, 'no_credential')
       return
     }
@@ -573,13 +631,37 @@ export function createPanelHandler(ctx) {
     }
   }
 
+  /**
+   * Account scope chips for the risk page: one entry per live platform+plan,
+   * plus any selected pair that currently has no slot.
+   */
+  function jevScopeInventory(selectedKeys = []) {
+    let vms = []
+    try {
+      vms = listVms(cfg.paths.project)
+    } catch {
+      vms = []
+    }
+    const inventory = buildScopeInventory(
+      vms.map((vm) => ({ ...vm, quota: panel.findAccount(accountQuota, vm)?.unified || null })),
+      selectedKeys,
+    )
+    return {
+      ...inventory,
+      account_type_options: [],
+      account_plan_type_options: [],
+    }
+  }
+
   function jevInterceptSnapshot() {
+    let config
     try {
       const settings = new SettingsRepo()
-      return publicJevConfig(readJevConfig((key, fallback) => settings.get(key, fallback)))
+      config = publicJevConfig(readJevConfig((key, fallback) => settings.get(key, fallback)))
     } catch {
-      return publicJevConfig(null)
+      config = publicJevConfig(null)
     }
+    return { ...config, account_scope: jevScopeInventory(config.account_platform_plans) }
   }
 
   function activateVmSlot(id) {
@@ -999,6 +1081,47 @@ export function createPanelHandler(ctx) {
         denyIfUserMissesProxy(req, res, { proxyPool, json, path: p })
       ) {
         return true
+      }
+      if ((req.method === 'GET' || req.method === 'PUT') && p === '/api/panel/onboarding') {
+        if (req.method === 'PUT') {
+          const body = await readBody(req, 4096).catch(() => ({}))
+          if (body?.action === 'profile' && panelIdentity(req).role !== 'admin') {
+            return json(res, 403, {
+              ok: false,
+              error: { code: 'forbidden', message: '当前权限无法执行此操作' },
+            })
+          }
+          try {
+            const settings = new SettingsRepo()
+            const user = onboardingUserOf(req)
+            const state = loadOnboardingState(settings)
+            let next
+            if (body?.action === 'profile') {
+              applyUsageProfile({
+                mode: body?.mode,
+                persistRouting: (patch) => persistRoutingPatch(patch),
+                settings,
+                distillFile: distillFile(),
+                setDistill: (rules) => {
+                  cfg.distill = rules
+                },
+              })
+              next = setOnboardingProfile(state, user, body?.mode)
+            } else {
+              next = applyOnboardingAction(state, user, body?.action)
+            }
+            saveOnboardingState(settings, next)
+          } catch (e) {
+            if (e.code === 'invalid_action' || e.code === 'invalid_profile') {
+              return json(res, 400, {
+                ok: false,
+                error: { message: String(e.message || e), code: e.code },
+              })
+            }
+            throw e
+          }
+        }
+        return json(res, 200, panel.ok(onboardingPayloadFor(req, ctx)))
       }
       if (p.startsWith('/api/panel/cluster/')) return ctx.clusterRoutes.handle(req, res, url)
       if (req.method === 'GET' && p === '/api/panel/database/metrics') {
@@ -2086,6 +2209,7 @@ export function createPanelHandler(ctx) {
         const hasModels = body && Object.prototype.hasOwnProperty.call(body, 'allowed_models')
         const hasAuthScheme = body && (body.auth_scheme != null || body.authScheme != null)
         const hasScheduleLevel = body && Object.prototype.hasOwnProperty.call(body, 'schedule_level')
+        const hasActiveHours = body && Object.prototype.hasOwnProperty.call(body, 'active_hours')
         const hasTimezone = body && Object.prototype.hasOwnProperty.call(body, 'timezone')
         // `timezone_follow_proxy: true` re-attaches the slot to its exit node's
         // zone, undoing an earlier hand-pinned value.
@@ -2106,6 +2230,7 @@ export function createPanelHandler(ctx) {
           !hasAuthScheme &&
           !hasSlotPolicy &&
           !hasScheduleLevel &&
+          !hasActiveHours &&
           !hasTimezone &&
           !followProxyTz
         ) {
@@ -2113,7 +2238,7 @@ export function createPanelHandler(ctx) {
             ok: false,
             error: {
               message:
-                'max_concurrency, max_rpm, max_sessions, session_slots, quota_override, allowed_models, auth_scheme, inference_engine, persona_preset, schedule_level, timezone or timezone_follow_proxy required',
+                'max_concurrency, max_rpm, max_sessions, session_slots, quota_override, allowed_models, auth_scheme, inference_engine, persona_preset, schedule_level, active_hours, timezone or timezone_follow_proxy required',
             },
           })
         }
@@ -2132,6 +2257,10 @@ export function createPanelHandler(ctx) {
         const parsedScheduleLevel = hasScheduleLevel ? parseScheduleLevelInput(body.schedule_level) : null
         if (parsedScheduleLevel && !parsedScheduleLevel.ok) {
           return json(res, 400, { ok: false, error: { message: parsedScheduleLevel.error } })
+        }
+        const parsedActiveHours = hasActiveHours ? parseActiveHoursInput(body.active_hours) : null
+        if (parsedActiveHours && !parsedActiveHours.ok) {
+          return json(res, 400, { ok: false, error: { message: parsedActiveHours.error } })
         }
         const parsedQuotaOverride = hasQuotaOverride ? parseVmQuotaOverride(body.quota_override) : null
         if (parsedQuotaOverride && !parsedQuotaOverride.ok) {
@@ -2281,6 +2410,10 @@ export function createPanelHandler(ctx) {
         }
         if (parsedScheduleLevel) {
           const vm = persistVmScheduleLevel(cfg.paths.project, id, parsedScheduleLevel.value)
+          if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
+        }
+        if (parsedActiveHours) {
+          const vm = persistVmActiveHours(cfg.paths.project, id, parsedActiveHours.value)
           if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
         }
         if (hasTimezone) {
@@ -2581,6 +2714,7 @@ export function createPanelHandler(ctx) {
           fs.rmSync(path.join(cfg.paths.project, 'vms', id), { recursive: true, force: true })
         } catch {}
         fs.unlinkSync(vmPath)
+        invalidateVmSlotReadCache(cfg.paths.project, id)
         if (active === id) {
           clearActiveVm(cfg.paths.project)
           try {
@@ -3301,7 +3435,7 @@ export function createPanelHandler(ctx) {
         vm = getVm(cfg.paths.project, id) || vm
         const boot = await startSlotReady(vm, cfg.paths.project, { routing: ctx.routingConfig })
         if (!boot.ok) return json(res, 500, { ok: false, error: { message: boot.error || 'runtime start failed' } })
-        const hasCred = vmHasClaudeCredential(vm)
+        const hasCred = vmHasSchedulableCredential(vm, cfg.paths.project)
         vm =
           patchVmRecord(cfg.paths.project, id, {
             status: 'running',
@@ -4298,7 +4432,11 @@ export function createPanelHandler(ctx) {
             },
           })
         }
-        return json(res, 200, panel.ok(patched.config))
+        return json(
+          res,
+          200,
+          panel.ok({ ...patched.config, account_scope: jevScopeInventory(patched.config.account_platform_plans) }),
+        )
       }
       if (req.method === 'POST' && p === '/api/panel/jev-intercept/models') {
         const body = await readBody(req, 8192).catch(() => ({}))
@@ -4675,7 +4813,7 @@ export function createPanelHandler(ctx) {
           (result.proxy?.bound_vm_id ? [result.proxy.bound_vm_id] : [])) {
           const bound = getVm(cfg.paths.project, vmId)
           const reason = String(bound?.schedule_disabled_reason || '')
-          if (vmHasClaudeCredential(bound) && reason !== 'disabled' && reason !== 'stopped') {
+          if (vmHasSchedulableCredential(bound, cfg.paths.project) && reason !== 'disabled' && reason !== 'stopped') {
             setVmSchedulable(cfg.paths.project, vmId, true, null)
           }
         }

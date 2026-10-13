@@ -20,7 +20,10 @@ import {
   classifyJev,
   isPolicyBlockMemory,
   jevDocument,
+  jevAccountInScope,
   jevModelDocument,
+  jevScopeConfigured,
+  jevScopeWaits,
   matchHardPolicy,
   policyBlockError,
 } from './jev-intercept.mjs'
@@ -121,8 +124,27 @@ export async function evaluateProtocolIntercept({
   repo,
   devices,
   requestId,
+  account = null,
   fetchImpl,
 } = {}) {
+  // GPT / Codex skips every layer unless the panel opts it in. Once a scope
+  // is set, the slot decides GPT: a scope with no GPT pair and no named
+  // account is out of range. Claude stays in the gate until a Claude pair
+  // or a named account is selected; a GPT-only scope does not turn it off.
+  if (isOpenaiPlatformModel(inbound, body)) {
+    if (!jevScopeConfigured(jev)) {
+      if (jev?.openai_platform_enabled !== true) return pass('platform')
+    } else if (!jevScopeWaits(jev, 'gpt')) {
+      return pass('scope')
+    } else if (!account) {
+      return pass('scope-wait')
+    } else if (!jevAccountInScope(jev, account)) {
+      return pass('scope')
+    }
+  } else if (jevScopeWaits(jev, 'claude')) {
+    if (!account) return pass('scope-wait')
+    if (!jevAccountInScope(jev, account)) return pass('scope')
+  }
   const distill = detectDistill({ inbound, body, official, zeroInject }, distillRules)
   if (distill.action === 'block') {
     const evidence = (distill.hits || [])
@@ -218,7 +240,7 @@ export async function evaluateProtocolIntercept({
     // Our own Jev/regex block used to be stored here and then blocked every retry.
     if (match && match.kind !== 'device' && isPolicyBlockMemory(match.row?.error_message)) match = null
     if (match) {
-      const error = refusalGuardError(requestId)
+      const error = refusalGuardError(requestId, match)
       return block({
         kind: match.kind,
         via: 'refusal-guard',
@@ -231,7 +253,8 @@ export async function evaluateProtocolIntercept({
         fingerprint: match.fingerprint,
         banDevice: match.kind !== 'device',
         remember: false,
-        reason: match.kind === 'similar' ? 'refusal_similar' : 'refusal_guard',
+        reason:
+          match.kind === 'device' ? 'refusal_device' : match.kind === 'similar' ? 'refusal_similar' : 'refusal_guard',
       })
     }
   }
@@ -239,23 +262,35 @@ export async function evaluateProtocolIntercept({
   if (jev?.enabled) {
     const verdict = await classifyJev(modelDocument, jev, fetchImpl)
     if (verdict.action === 'block') {
+      const unavailable = verdict.reason === 'unavailable'
       const error = policyBlockError(requestId)
+      const detail = String(verdict.detail || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120)
+      if (unavailable) {
+        error.body.error.message = detail
+          ? `${error.body.error.message}: 决策模型不可用（${detail}）。本次请求已拦截，未封禁设备`
+          : `${error.body.error.message}: 决策模型不可用。本次请求已拦截，未封禁设备`
+        error.body.error.details = { reason: 'unavailable', ...(detail ? { detail } : {}) }
+      }
+      const category = verdict.category || 'safety'
       return block({
         kind: 'jev',
         via: 'jev',
         final_state: 'policy_blocked',
         error,
-        errorMessage: `${error.body?.error?.message}: ${verdict.category}`,
-        intercept: gateVerdict({ kind: 'block', by: 'jev', keyword: verdict.category }),
-        category: verdict.category,
+        errorMessage: unavailable ? error.body.error.message : `${error.body?.error?.message}: ${category}`,
+        intercept: gateVerdict({ kind: 'block', by: 'jev', keyword: unavailable ? 'unavailable' : category }),
+        category: unavailable ? 'unavailable' : category,
         deviceId: inboundRefusalDeviceId({ inbound, body, headers }),
         fingerprint: refusalFingerprint(body, inbound),
         signature: refusalPromptSignature(inbound, body),
         model: body?.model || inbound?.model || '',
         preview: refusalPreview(body, inbound),
-        banDevice: true,
+        banDevice: !unavailable,
         remember: false,
-        reason: `jev:${verdict.category}`,
+        reason: unavailable ? 'jev:unavailable' : `jev:${category}`,
       })
     }
     const by =
