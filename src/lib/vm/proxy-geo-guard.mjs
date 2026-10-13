@@ -82,8 +82,7 @@ export class ProxyGeoGuard {
           } else if (failures >= GEO_FAIL_PAUSE_THRESHOLD) {
             p.geo_guard_status = 'unreachable'
             action = pauseMode ? `paused:${bound.join(',')}` : 'notified'
-            action =
-              (await this.onUnreachable?.(p, bound, { failures, error: p.geo_guard_reason, action })) || action
+            action = (await this.onUnreachable?.(p, bound, { failures, error: p.geo_guard_reason, action })) || action
           } else {
             p.geo_guard_status = 'error'
           }
@@ -189,7 +188,8 @@ export class ProxyGeoGuard {
     this.okStreak.delete(p.id)
     this.pool.save()
     this.onRecovered?.(p, boundVmIdsOf(p))
-    if (wasUnreachable) this.onReachable?.(p, boundVmIdsOf(p), { geo: { ip: p.geo_ip, country_code: p.geo_country_code } })
+    if (wasUnreachable)
+      this.onReachable?.(p, boundVmIdsOf(p), { geo: { ip: p.geo_ip, country_code: p.geo_country_code } })
     this.repo.insert({
       proxy_id: p.id,
       proxy_label: p.label,
