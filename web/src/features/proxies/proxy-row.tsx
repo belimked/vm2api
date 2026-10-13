@@ -178,6 +178,14 @@ export function ProxyRow({
               巡检基准 {proxy.geo_guard.base.country_code || '-'} ·{' '}
               {fmtAgo(proxy.geo_guard.checked_at)}
             </span>
+            {proxy.geo_guard.status === 'unreachable' && (
+              <span className='text-destructive'>
+                出口不可达
+                {proxy.geo_guard.reason?.startsWith('recovering')
+                  ? ` · 恢复中 ${proxy.geo_guard.reason.split(' ')[1]}`
+                  : ''}
+              </span>
+            )}
             {proxy.geo_guard.status === 'changed' && (
               <>
                 <span className='text-destructive'>

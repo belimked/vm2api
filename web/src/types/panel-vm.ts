@@ -68,7 +68,7 @@ export type VmProxySnap = {
       region: string | null
       at: string | null
     }
-    status: 'ok' | 'changed' | 'error' | null
+    status: 'ok' | 'changed' | 'error' | 'unreachable' | null
     checked_at: string | null
     reason: string | null
   }

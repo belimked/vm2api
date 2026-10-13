@@ -341,7 +341,7 @@ proxyPool = new ProxyPool({
   onEnableVm: (vmId, _reason, proxyId) => {
     const vm = getVm(cfg.paths.project, vmId)
     const why = String(vm?.schedule_disabled_reason || '')
-    if (why.startsWith('geo_changed|')) return
+    if (why.startsWith('geo_changed|') || why.startsWith('geo_unreachable|')) return
     if (!why.includes(`proxy=${proxyId}`) && !/egress_down|proxy_probe_failed/.test(why)) return
     // A probe failure may have overwritten the geo pause reason; while the
     // guard still holds this exit as country-changed, keep the slot paused
@@ -361,24 +361,73 @@ proxyPool = new ProxyPool({
   repairEgress: (proxy) => ensureProxyEgress(cfg.paths.project, proxy),
 })
 proxyPool.startScheduler()
+// Geo-guard pauses are safety stops, so they bypass the manual schedule lock;
+// a slot already switched off for another reason is left alone.
+const geoPauseSlots = (bound, reason, proxyId) => {
+  const paused = []
+  const skipped = []
+  for (const vmId of bound) {
+    const vm = getVm(cfg.paths.project, vmId)
+    if (!vm) continue
+    const why = String(vm.schedule_disabled_reason || '')
+    if (vm.schedulable === false && !why.endsWith(`|proxy=${proxyId}`)) {
+      skipped.push(vmId)
+      continue
+    }
+    if (why !== `geo_changed|proxy=${proxyId}`)
+      setVmSchedulable(cfg.paths.project, vmId, false, `${reason}|proxy=${proxyId}`, { source: 'force' })
+    paused.push(vmId)
+  }
+  return [paused.length && `paused:${paused.join(',')}`, skipped.length && `already_off:${skipped.join(',')}`]
+    .filter(Boolean)
+    .join(' ')
+}
+const geoResumeSlots = (bound, reason, proxyId) => {
+  const resumed = []
+  for (const vmId of bound) {
+    const vm = getVm(cfg.paths.project, vmId)
+    if (vm?.schedule_disabled_reason !== `${reason}|proxy=${proxyId}`) continue
+    setVmSchedulable(cfg.paths.project, vmId, true, null, { source: 'force' })
+    resumed.push(vmId)
+  }
+  return resumed
+}
 const proxyGeoGuard = new ProxyGeoGuard({
   pool: proxyPool,
   onGeoChanged: (proxy, bound, info) => {
-    if (info.action.startsWith('paused:')) {
-      for (const vmId of bound) setVmSchedulable(cfg.paths.project, vmId, false, `geo_changed|proxy=${proxy.id}`)
-    }
+    const action = info.action.startsWith('paused:')
+      ? geoPauseSlots(bound, 'geo_changed', proxy.id) || 'no_slot'
+      : info.action
     dispatchNotify(routingConfig.notify, {
       title: `代理出口国家变化 ${proxy.label || proxy.id}`,
       subject: `代理出口国家变化 ${proxy.label || proxy.id}`,
-      text: `${info.old.country_code} → ${info.geo.country_code}（${info.geo.city || info.geo.region || '-'}）\nIP: ${info.geo.ip || '-'}\nISP: ${info.geo.isp || '-'}\n槽: ${bound.join(', ')}\n处理: ${info.action}`,
+      text: `${info.old.country_code} → ${info.geo.country_code}（${info.geo.city || info.geo.region || '-'}）\nIP: ${info.geo.ip || '-'}\nISP: ${info.geo.isp || '-'}\n槽: ${bound.join(', ')}\n处理: ${action}`,
     })
+    return action
   },
   onRecovered: (proxy, bound) => {
-    for (const vmId of bound) {
-      const vm = getVm(cfg.paths.project, vmId)
-      if (vm?.schedule_disabled_reason === `geo_changed|proxy=${proxy.id}`)
-        setVmSchedulable(cfg.paths.project, vmId, true)
-    }
+    geoResumeSlots(bound, 'geo_changed', proxy.id)
+  },
+  onUnreachable: (proxy, bound, info) => {
+    const action = info.action.startsWith('paused:')
+      ? geoPauseSlots(bound, 'geo_unreachable', proxy.id) || 'no_slot'
+      : info.action
+    dispatchNotify(routingConfig.notify, {
+      title: `代理出口不可达 ${proxy.label || proxy.id}`,
+      subject: `代理出口不可达 ${proxy.label || proxy.id}`,
+      text: `连续 ${info.failures} 次巡检失败\n错误: ${info.error}\n槽: ${bound.join(', ')}\n处理: ${action}`,
+    })
+    return action
+  },
+  onReachable: (proxy, bound, info) => {
+    const resumed = geoResumeSlots(bound, 'geo_unreachable', proxy.id)
+    const action = resumed.length ? `resumed:${resumed.join(',')}` : 'reachable'
+    dispatchNotify(routingConfig.notify, {
+      title: `代理出口已恢复 ${proxy.label || proxy.id}`,
+      subject: `代理出口已恢复 ${proxy.label || proxy.id}`,
+      text: `连续巡检成功\nIP: ${info.geo?.ip || '-'}（${info.geo?.country_code || '-'}）\n槽: ${bound.join(', ')}\n处理: ${action}`,
+    })
+    return action
   },
 })
 proxyGeoGuard.restart()

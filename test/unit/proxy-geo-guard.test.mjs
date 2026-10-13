@@ -78,6 +78,70 @@ test('巡检：基准、同国家、变化去重、错误、恢复与确认', as
   }
 })
 
+test('巡检：连续失败暂停，连续成功两次恢复', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'geo-guard-unreach-'))
+  const db = createDatabase({ dataDir: dir })
+  try {
+    let next = geo('AU', 'Queensland')
+    const pool = new ProxyPool({ db, geoLookup: async () => next })
+    pool.importLines('127.0.0.1:1080')
+    const p = pool.state.proxies[0]
+    p.bound_vm_id = 'vm-a'
+    p.bound_vm_ids = ['vm-a']
+    pool.save()
+    pool.state.config.geo_guard_action = 'notify_pause'
+    const down = []
+    const up = []
+    const guard = new ProxyGeoGuard({
+      pool,
+      onUnreachable: (_p, bound, info) => {
+        down.push([bound, info])
+        return 'paused:vm-a'
+      },
+      onReachable: (_p, bound) => {
+        up.push(bound)
+        return 'resumed:vm-a'
+      },
+    })
+    await guard.run()
+    next = { ok: false, error: 'geo_transport_error:The user aborted a request.' }
+    for (let i = 0; i < 4; i++) await guard.run()
+    assert.equal(p.geo_guard_status, 'error')
+    assert.equal(down.length, 0)
+    next = geo('AU')
+    await guard.run() // success resets the streak
+    next = { ok: false, error: 'timeout' }
+    for (let i = 0; i < 4; i++) await guard.run()
+    assert.equal(down.length, 0)
+    await guard.run()
+    assert.equal(down.length, 1)
+    assert.equal(down[0][1].failures, 5)
+    assert.equal(p.geo_guard_status, 'unreachable')
+    await guard.run()
+    assert.equal(down.length, 1) // no repeat notification
+    next = geo('AU')
+    await guard.run()
+    assert.equal(p.geo_guard_status, 'unreachable')
+    assert.equal(up.length, 0)
+    next = { ok: false, error: 'timeout' }
+    await guard.run() // failure in between restarts recovery
+    next = geo('AU')
+    await guard.run()
+    assert.equal(up.length, 0)
+    await guard.run()
+    assert.equal(up.length, 1)
+    assert.equal(p.geo_guard_status, 'ok')
+    const actions = new ProxyGeoChecksRepo(db)
+      .list()
+      .items.map((r) => r.action)
+      .filter(Boolean)
+    assert.deepEqual(actions, ['resumed:vm-a', 'paused:vm-a', 'recovered'])
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('巡检日志分页及清理', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'geo-log-'))
   const db = createDatabase({ dataDir: dir })
