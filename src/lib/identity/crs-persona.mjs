@@ -703,8 +703,9 @@ export function personaTemplateVars({
   callerAgent = '',
   leftover = '',
   model = '',
+  indexes = null,
 } = {}) {
-  const billing = buildBillingAttributionText(firstUserText, cliVersion, sessionId)
+  const billing = buildBillingAttributionText(firstUserText, cliVersion, sessionId, indexes)
   const envTimezoneOnly = () => buildOfficialEnvironmentSection(env, { sourceTexts, contextManagement: false })
   return {
     billing,
@@ -1742,6 +1743,7 @@ function applyTemplatePersona(
       callerAgent,
       leftover: midSystem ? '' : leftover,
       model: modelId,
+      indexes: billingIndexesFromMessages(messages),
     }),
   )
   let outMessages = messages
