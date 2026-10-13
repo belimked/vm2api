@@ -95,7 +95,7 @@ test('official Claude Code client leaves system untouched', () => {
 
 test('empty unofficial system still writes official 4 blocks', () => {
   const messages = [{ role: 'user', content: 'ping' }]
-  const out = applyCrsUnofficialPersona({ messages }, { officialClient: false })
+  const out = applyCrsUnofficialPersona({ messages }, { officialClient: false, mode: 'rewrite' })
   assert.equal(out.system.length, 4)
   assert.equal(out.system[0].cache_control, undefined)
   assert.match(
@@ -128,7 +128,7 @@ test('Environment defaults to slot timezone only; caller cwd is kept and tz over
     {
       messages: [{ role: 'user', content: 'hi' }],
     },
-    { officialClient: false, identity: { timezone: 'America/Los_Angeles' } },
+    { officialClient: false, mode: 'rewrite', identity: { timezone: 'America/Los_Angeles' } },
   )
   const bareEnv = environmentSection(bare.system[3].text)
   assert.match(bareEnv, /Timezone: America\/Los_Angeles/)
@@ -145,7 +145,7 @@ test('Environment defaults to slot timezone only; caller cwd is kept and tz over
 `,
       messages: [{ role: 'user', content: 'hi' }],
     },
-    { officialClient: false, identity: { timezone: 'America/New_York' } },
+    { officialClient: false, mode: 'rewrite', identity: { timezone: 'America/New_York' } },
   )
   assert.match(caller.system[3].text, /Primary working directory: \/tmp\/demo/)
   assert.match(caller.system[3].text, /Timezone: America\/New_York/)
@@ -182,7 +182,7 @@ test('inbound official tools keep the official 4-block expansion', () => {
       messages: [{ role: 'user', content: 'ping' }],
       tools: [{ name: 'web_search', type: 'web_search_20250305' }],
     },
-    { officialClient: false },
+    { officialClient: false, mode: 'rewrite' },
   )
   assert.equal(out.system.length, 4)
   assert.equal(out.system[1].text, CRS_OFFICIAL_SYSTEM)
@@ -208,7 +208,7 @@ test('custom forced weather tool skips SWE expansion', () => {
     ],
     tool_choice: { type: 'tool', name: 'get_weather' },
   }
-  const out = applyCrsUnofficialPersona(body, { officialClient: false })
+  const out = applyCrsUnofficialPersona(body, { officialClient: false, mode: 'rewrite' })
   assert.equal(shouldAttachSystemExpansion(body), true)
   assert.equal(out.system.length, 4)
   assert.equal(out.system[1].text, CRS_OFFICIAL_SYSTEM)
@@ -221,7 +221,7 @@ test('custom tools without force also skip SWE expansion', () => {
       messages: [{ role: 'user', content: 'tokyo weather' }],
       tools: [{ name: 'get_weather' }],
     },
-    { officialClient: false },
+    { officialClient: false, mode: 'rewrite' },
   )
   assert.equal(out.system.length, 4)
   assert.equal(out.system[1].text, CRS_OFFICIAL_SYSTEM)
@@ -234,7 +234,7 @@ test('Claude Code Bash tool still gets expansion', () => {
       messages: [{ role: 'user', content: 'ls' }],
       tools: [{ name: 'Bash' }],
     },
-    { officialClient: false },
+    { officialClient: false, mode: 'rewrite' },
   )
   assert.equal(out.system.length, 4)
   assert.equal(out.system[2].text, CRS_AGENT_EXPANSION)
@@ -247,7 +247,7 @@ test('forced official web_search still gets expansion', () => {
       tools: [{ name: 'web_search', type: 'web_search_20250305' }],
       tool_choice: { type: 'tool', name: 'web_search' },
     },
-    { officialClient: false },
+    { officialClient: false, mode: 'rewrite' },
   )
   assert.equal(out.system.length, 4)
   assert.equal(out.system[2].text, CRS_AGENT_EXPANSION)
@@ -256,7 +256,10 @@ test('forced official web_search still gets expansion', () => {
 test('persona_expansion any_tools restores old expand-on-any-tools behavior', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-persona-exp-'))
   const file = path.join(dir, 'routing.json')
-  fs.writeFileSync(file, JSON.stringify({ compatibility: { persona_expansion: 'any_tools' } }))
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ compatibility: { persona_inject: 'rewrite', persona_expansion: 'any_tools' } }),
+  )
   const out = applyCrsUnofficialPersona(
     {
       messages: [{ role: 'user', content: 'weather' }],
@@ -266,7 +269,7 @@ test('persona_expansion any_tools restores old expand-on-any-tools behavior', ()
   )
   assert.equal(out.system.length, 4)
   assert.equal(out.system[2].text, CRS_AGENT_EXPANSION)
-  fs.writeFileSync(file, JSON.stringify({ compatibility: { persona_expansion: 'never' } }))
+  fs.writeFileSync(file, JSON.stringify({ compatibility: { persona_inject: 'rewrite', persona_expansion: 'never' } }))
   const never = applyCrsUnofficialPersona(
     {
       messages: [{ role: 'user', content: 'search' }],
@@ -297,7 +300,7 @@ test('last-night style 3-block inbound becomes official 4 blocks plus leftover -
     ],
     messages: [{ role: 'user', content: firstUser }],
   }
-  const out = applyCrsUnofficialPersona(body, { officialClient: false })
+  const out = applyCrsUnofficialPersona(body, { officialClient: false, mode: 'rewrite' })
   assert.equal(out.system.length, 5)
   assert.equal(out.system[1].text, CRS_OFFICIAL_SYSTEM)
   assert.equal(out.system[2].text, CRS_AGENT_EXPANSION)
@@ -312,10 +315,13 @@ test('last-night style 3-block inbound becomes official 4 blocks plus leftover -
 })
 
 test('standalone official line does not insert System Instructions', () => {
-  const out = applyCrsUnofficialPersona({
-    system: [{ type: 'text', text: CRS_OFFICIAL_SYSTEM }],
-    messages: [{ role: 'user', content: 'hi' }],
-  })
+  const out = applyCrsUnofficialPersona(
+    {
+      system: [{ type: 'text', text: CRS_OFFICIAL_SYSTEM }],
+      messages: [{ role: 'user', content: 'hi' }],
+    },
+    { mode: 'rewrite' },
+  )
   assert.equal(out.system.length, 4)
   assert.equal(out.system[1].text, CRS_OFFICIAL_SYSTEM)
   assert.equal(out.system[2].text, CRS_AGENT_EXPANSION)
@@ -1022,7 +1028,7 @@ test('test14 forced weather converts to official 4-block and keeps caller tools'
     tools,
     tool_choice: { type: 'tool', name: 'get_weather' },
   }
-  const out = applyCrsUnofficialPersona(body, { officialClient: false })
+  const out = applyCrsUnofficialPersona(body, { officialClient: false, mode: 'rewrite' })
   assert.equal(out.system.length, 4)
   assert.equal(out.system[1].text, CRS_OFFICIAL_SYSTEM)
   assert.equal(out.system[2].text, CRS_AGENT_EXPANSION)
@@ -1109,6 +1115,7 @@ test('refreshOfficialSystemEnvironment keeps caller env and only rewrites timezo
     },
     {
       officialClient: false,
+      mode: 'rewrite',
       identity: {
         kernel: '7.0.0-14-generic',
         timezone: 'America/New_York',
@@ -1149,7 +1156,7 @@ test('Environment inherits caller git/shell and Windows cwd', () => {
 `,
       messages: [{ role: 'user', content: 'hi' }],
     },
-    { officialClient: false },
+    { officialClient: false, mode: 'rewrite' },
   )
   assert.equal(out.system.length, 5)
   assert.match(out.system[3].text, /Primary working directory: X:\\Users\\me\\proj/)
