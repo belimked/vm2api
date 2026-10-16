@@ -160,3 +160,32 @@ test('巡检日志分页及清理', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('巡检：节点本地出口经该节点出网查询，控制面本地出口直连', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'geo-guard-'))
+  const db = createDatabase({ dataDir: dir })
+  try {
+    const urls = []
+    const pool = new ProxyPool({
+      db,
+      geoLookup: async (url) => {
+        urls.push(url)
+        return geo('JP')
+      },
+      localExitUrl: async (nodeId) => `socks5://127.0.0.1:9/${nodeId}`,
+    })
+    pool.ensureLocalForNode(null)
+    pool.ensureLocalForNode('node-a')
+    for (const p of pool.state.proxies) {
+      p.enabled = true
+      p.bound_vm_ids = [`vm-${p.id}`]
+      p.bound_vm_id = `vm-${p.id}`
+    }
+    pool.save()
+    await new ProxyGeoGuard({ pool }).run()
+    assert.deepEqual(urls.sort(), ['', 'socks5://127.0.0.1:9/node-a'])
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -1,6 +1,6 @@
 import { ProxyGeoChecksRepo } from '../db/repos/proxy-geo-checks-repo.mjs'
 import { boundVmIdsOf } from './proxy-pool.mjs'
-import { isLocalEgressProxy } from './egress.mjs'
+import { isLocalEgressProxy, localEgressNodeId } from './egress.mjs'
 import { proxyBlockedReason } from './proxy-policy.mjs'
 
 export const GEO_FAIL_PAUSE_THRESHOLD = 5
@@ -49,7 +49,13 @@ export class ProxyGeoGuard {
         const start = this.now()
         let response
         try {
-          response = await this.pool.geoLookup(isLocalEgressProxy(p) ? '' : this.pool._withAuth(p).url, {
+          let url = this.pool._withAuth(p).url
+          if (isLocalEgressProxy(p)) {
+            // Node local rows must be looked up through that node's exit, not the control plane's.
+            const nodeId = localEgressNodeId(p.id)
+            url = nodeId ? await this.pool.localExitUrl(nodeId) : ''
+          }
+          response = await this.pool.geoLookup(url, {
             timeoutMs: this.pool.state.config.geo_timeout_ms,
           })
         } catch (error) {
