@@ -29,7 +29,7 @@ import {
   proxyKey,
 } from '../vm/egress.mjs'
 import { OS_CATALOG } from '../vm/os-catalog.mjs'
-import { resolveKernelDataplane } from '../vm/slot-engine.mjs'
+import { REMOTE_KERNEL_ENTRY, resolveKernelDataplane } from '../vm/slot-engine.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { isKvmRuntime, runtimeKind } from '../vm/runtime-kind.mjs'
@@ -492,7 +492,8 @@ export function slotContainerBody(vm, { image, network, remoteDir, user, routing
       `KIN_VM_NAME=${slotName}`,
       `KIN_VM_OS=${vm.kernel}`,
     ],
-    Cmd: slotContainerCommand(vm),
+    // Node slot images ship the kernel under /opt/kin, not the control plane's /usr/local/bin mount.
+    Cmd: codex ? slotContainerCommand(vm) : [REMOTE_KERNEL_ENTRY, '--gateway-worker', '--config', '/run/kin/kernel.json'],
     Labels: {
       'kin.vm': '1',
       'kin.vm.id': vm.id,
@@ -630,6 +631,13 @@ export function codexRoleMatches(info, vm) {
   return isCodexVm(vm) ? role === CODEX_SLOT_ROLE : role !== CODEX_SLOT_ROLE
 }
 
+/** A Docker Claude slot created with the control-plane kernel path never starts on a node image. */
+export function kernelEntryMatches(info, vm) {
+  if (isKvmRuntime(vm) || runtimeLabelOf(info) === 'kvm' || isCodexVm(vm)) return true
+  const entry = info?.Config?.Cmd?.[0]
+  return !entry || entry === REMOTE_KERNEL_ENTRY
+}
+
 async function startRemoteTelemetry(docker, vm, name) {
   const target = { ...vm, runtime: { ...(vm.runtime || {}), container: name, type: runtimeKind(vm) } }
   const { Cmd, User } = slotExecCmd(target, [REMOTE_WORKER_BIN, 'telemetry', '--config', '/run/kin/worker.json'], {
@@ -668,6 +676,7 @@ export async function startRemoteSlot(vm, projectRoot, { recreate = false, routi
       existing.Config?.Labels?.['kin.vm.layout'] === SLOT_LAYOUT &&
       runtimeLabelOf(existing) === runtimeKind(vm) &&
       codexRoleMatches(existing, vm) &&
+      kernelEntryMatches(existing, vm) &&
       !recreate
     const common = {
       nodeId,
@@ -739,7 +748,8 @@ export async function reloadRemoteSlot(vm, projectRoot, { routing } = {}) {
       existing.HostConfig?.NetworkMode !== eg.network ||
       existing.Config?.Labels?.['kin.vm.layout'] !== SLOT_LAYOUT ||
       runtimeLabelOf(existing) !== runtimeKind(vm) ||
-      !codexRoleMatches(existing, vm)
+      !codexRoleMatches(existing, vm) ||
+      !kernelEntryMatches(existing, vm)
     ) {
       return startRemoteSlot(vm, projectRoot, { recreate: !!existing, routing })
     }
