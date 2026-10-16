@@ -28,6 +28,7 @@ import { withRequestProtocolBetas } from './claude-code-betas.mjs'
 import {
   refreshOfficialSystemEnvironment,
   stampBillingPromptId,
+  collapseSystemBudgetReminders,
   CRS_OFFICIAL_SYSTEM,
   CRS_OFFICIAL_CLI_SYSTEM,
   CRS_COMPACT_IDENTITY,
@@ -172,18 +173,28 @@ function stabilizeMessageBudgets(body) {
  */
 export function prepareCliHopBody(
   canonicalBody,
-  { stream = true, repaired = false, cacheTtl = DEFAULT_CACHE_TTL, requestContext = null } = {},
+  {
+    stream = true,
+    repaired = false,
+    cacheTtl = DEFAULT_CACHE_TTL,
+    requestContext = null,
+    preserveSystem = false,
+    preserveThinkingBlocks = false,
+  } = {},
 ) {
   if (requestContext?.purpose === 'auto_mode_classifier') return prepareClassifierBody(canonicalBody, { stream })
   let body = officialMessagesBody(canonicalBody, { stream })
   delete body.metadata
-  const leftover = stripCliOwnedSystem(body.system)
-  if (leftover == null) delete body.system
-  else body.system = leftover
+  if (!preserveSystem) {
+    const leftover = stripCliOwnedSystem(body.system)
+    if (leftover == null) delete body.system
+    else body.system = leftover
+  }
   body = stabilizeSystemBudget(body)
   body = stabilizeMessageBudgets(body)
   // cli-node sends mid-conversation-system. Only models that reject the role need the lift.
   if (!modelSupportsMidConversationSystem(body.model)) body = liftMidConversationSystemMessages(body)
+  body = collapseSystemBudgetReminders(body)
 
   if (!repaired) {
     body = ensureUnofficialAdaptiveThinking(body)
@@ -192,12 +203,12 @@ export function prepareCliHopBody(
     body = ensureUnofficialEffortHigh(body)
     body = ensureClearThinkingContextManagement(body)
   }
-  body = stripInvalidThinkingBlocks(body)
+  body = stripInvalidThinkingBlocks(body, { preserveThinkingBlocks })
   body = applyModelRequestRules(body)
   body = ensureOutputConfigSchema(body)
   body = alignSamplingWithThinking(body)
   body = stripIllegalCacheControlFields(body)
-  body = removeCacheControlFields(body)
+  body = removeCacheControlFields(body, { keepSystem: preserveSystem })
   body = applyMessageBreakpoints(body, normalizeCacheTtl(cacheTtl), 'rewrite')
   return body
 }
@@ -220,6 +231,7 @@ export function prepareOutboundAttempt({
   toolNameRewrite = true,
   cacheTtl = null,
   cacheBreakpoints = null,
+  preserveThinkingBlocks = false,
   reqHeaders = {},
   officialClient,
   sessionId: sessionIdOverride,
@@ -290,6 +302,7 @@ export function prepareOutboundAttempt({
     cacheBreakpoints: keepCallerSession ? null : cacheBreakpoints,
     cacheTtl: cacheTtl || undefined,
     inbound,
+    preserveThinkingBlocks,
   })
   cleaned = stripIllegalCacheControlFields(cleaned)
   if (cacheTtl) cleaned = applyCacheTtlToBody(cleaned, cacheTtl)
@@ -320,6 +333,7 @@ export function prepareOutboundEnvelope({
   toolNameRewrite = true,
   cacheTtl = null,
   cacheBreakpoints = null,
+  preserveThinkingBlocks = false,
   reqHeaders = {},
   homeDir = '',
   officialClient,
@@ -352,6 +366,7 @@ export function prepareOutboundEnvelope({
     toolNameRewrite,
     cacheTtl,
     cacheBreakpoints,
+    preserveThinkingBlocks,
     reqHeaders,
     officialClient,
     sessionId,

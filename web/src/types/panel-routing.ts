@@ -46,7 +46,11 @@ export type DistillRules = {
     min_max_tokens: number
     require_no_tools: boolean
     require_single_turn: boolean
+    /** 结构收割用的赛题正则。空字符串表示不做这项。 */
+    contest_pattern: string
   }
+  /** 官方客户端和 0 注入也拦。面板删掉即停，不会被代码补回。 */
+  hard_needles: string[]
   needles: string[]
   /** Extra regexes. Built-in distillation / CoT patterns live on the hard rules. */
   patterns: string[]
@@ -206,6 +210,14 @@ export type NotifyTelegramConfig = {
   chat_id: string
 }
 
+export type NotifyWecomConfig = {
+  enabled: boolean
+  /** 企业微信群机器人 webhook 地址或 key；GET 永远为空，仅以 webhook_set 表示已配置。 */
+  webhook: string
+  webhook_set?: boolean
+  mention_all: boolean
+}
+
 /** `GET /routing -> notify` 与 `GET /notify -> config` 的脱敏通知配置。 */
 export type NotifyConfig = {
   enabled: boolean
@@ -217,6 +229,7 @@ export type NotifyConfig = {
   console_url: string
   events: NotifyEvents
   telegram: NotifyTelegramConfig
+  wecom: NotifyWecomConfig
   email?: Record<string, unknown>
 }
 
@@ -226,7 +239,12 @@ export type NotifyStatus = {
   last_events?: { type?: string; title?: string }[]
   last_error?: string | null
   last_run_at?: string | null
-  channels?: { email?: boolean; telegram?: boolean; any?: boolean }
+  channels?: {
+    email?: boolean
+    telegram?: boolean
+    wecom?: boolean
+    any?: boolean
+  }
 }
 
 export type BackupsPayload = {

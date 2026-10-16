@@ -25,6 +25,57 @@ export function streamIdleTimeoutMs(routing, fallbackMs = Number(process.env.KIN
   return Math.min(STREAM_IDLE_TIMEOUT_MAX_MS, Math.max(STREAM_IDLE_TIMEOUT_MIN_MS, Math.round(ms)))
 }
 
+/**
+ * How long a Claude stream may sit in the queue before the first downstream
+ * byte. Cloudflare returns 524 when the origin writes nothing for ~100s.
+ * The default is under that window and after one seat wait (fallback 30s,
+ * sticky 45s), so a short miss can still answer HTTP 429/529. Values above
+ * 90s are capped: the first byte has to land before the proxy gives up.
+ * `0` writes the first ping immediately.
+ */
+export const DEFAULT_QUEUE_KEEPALIVE_DELAY_MS = 60_000
+export const QUEUE_KEEPALIVE_DELAY_MAX_MS = 90_000
+
+export function queueKeepaliveDelayMs(routing, fallbackMs) {
+  const envRaw = process.env.KIN_QUEUE_KEEPALIVE_DELAY
+  const envMs = envRaw == null || String(envRaw).trim() === '' ? Number.NaN : Number(envRaw)
+  const fallback = Number.isFinite(Number(fallbackMs))
+    ? Number(fallbackMs)
+    : Number.isFinite(envMs) && envMs >= 0
+      ? envMs
+      : DEFAULT_QUEUE_KEEPALIVE_DELAY_MS
+  const raw = routing?.failover?.queue_keepalive_delay_ms
+  const ms = raw == null || raw === '' ? fallback : Number(raw)
+  const chosen = Number.isFinite(ms) && ms >= 0 ? ms : fallback >= 0 ? fallback : DEFAULT_QUEUE_KEEPALIVE_DELAY_MS
+  return Math.min(QUEUE_KEEPALIVE_DELAY_MAX_MS, Math.round(chosen))
+}
+
+export const DEFAULT_MAX_REQUEST_BYTES = 32 * 1024 * 1024
+const MAX_REQUEST_MIB_MIN = 8
+const MAX_REQUEST_MIB_MAX = 128
+
+/**
+ * Bytes the slot kernel will buffer. The panel value
+ * (failover.max_request_mib) is the receive size; axum rejects anything
+ * larger with 413 before the CLI runs. Absent or invalid keeps fallbackBytes
+ * (32 MiB on the kernel, the process ceiling on the gateway).
+ */
+export function maxRequestBytes(routing, fallbackBytes = DEFAULT_MAX_REQUEST_BYTES) {
+  const mib = Number(routing?.failover?.max_request_mib)
+  if (!Number.isFinite(mib) || mib <= 0) return fallbackBytes
+  const clamped = Math.min(MAX_REQUEST_MIB_MAX, Math.max(MAX_REQUEST_MIB_MIN, Math.round(mib)))
+  return clamped * 1024 * 1024
+}
+
+/** Protocol ingress limit. A panel value cannot exceed the process ceiling. */
+export function inboundBodyLimit(routing, ceilingBytes) {
+  const ceiling = Number(ceilingBytes)
+  const cap = Number.isFinite(ceiling) && ceiling > 0 ? ceiling : DEFAULT_MAX_REQUEST_BYTES
+  const mib = Number(routing?.failover?.max_request_mib)
+  if (!Number.isFinite(mib) || mib <= 0) return cap
+  return Math.min(cap, maxRequestBytes(routing))
+}
+
 /** Live routing.json. KIN_ROUTING_FILE wins; otherwise <project>/src/config/routing.json. */
 export function routingConfigFile(projectRoot = PROJECT) {
   const override = String(process.env.KIN_ROUTING_FILE || '').trim()
@@ -142,6 +193,7 @@ export function loadConfig() {
       upstream_timeout_ms: Number(process.env.KIN_UPSTREAM_TIMEOUT || 600000),
       stream_idle_timeout_ms: streamIdleTimeoutMs(),
       stream_keepalive_ms: Number(process.env.KIN_STREAM_KEEPALIVE || 10000),
+      queue_keepalive_delay_ms: queueKeepaliveDelayMs(null),
       rate_capacity: Number(process.env.KIN_RATE_CAP || 60),
       rate_refill: Number(process.env.KIN_RATE_REFILL || 1),
     },

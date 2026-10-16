@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
+import { FailoverRunner } from '../../src/lib/pool/failover-runner.mjs'
 import { CRS_OFFICIAL_AGENT_PROMPT } from '../../src/lib/identity/crs-persona.mjs'
 import { sessionIdFromOutboundBody } from '../../src/lib/identity/identity-rewrite.mjs'
 import { DEFAULT_AGENT_STANDING } from '../../src/lib/identity/persona-template.mjs'
@@ -288,6 +289,233 @@ test('logs the session id actually sent upstream, not the caller one', async () 
     assert.equal(logged.session_id, 'caller-sess')
     assert.equal(logged.outbound_session_id, sent)
     assert.notEqual(logged.outbound_session_id, 'caller-sess')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+for (const previousVm of [null, 'vm-01']) {
+  test(`queued OAuth turns reuse the outbound session ${previousVm ? 'after a VM move' : 'on first bind'}`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-queued-session-'))
+    const routingFile = path.join(root, 'routing.json')
+    fs.writeFileSync(routingFile, JSON.stringify({ compatibility: {} }))
+    const sticky = new StickyRouter({ dataDir: path.join(root, 'data'), config: { sticky: { enabled: true } } })
+    const key = sticky.canonicalSessionKey('queued-caller')
+    if (previousVm) {
+      sticky.bind(key, { accountId: 'account-1', vmId: previousVm, sessionId: 'previous-outbound' })
+    }
+    const vm = { id: 'vm-02', claude: { mode: 'oauth' } }
+    const selected = {
+      ok: true,
+      vmId: vm.id,
+      accountId: 'account-1',
+      vm,
+      exec: { vmId: vm.id, vm, homeDir: path.join(root, 'home'), oauth: { account_uuid: 'account-1' } },
+    }
+    const runner = new FailoverRunner({
+      scheduler: { selectAndReserve: async () => selected, markSuccess() {} },
+      stickyRouter: sticky,
+    })
+    let releaseFirst
+    let enteredFirst
+    let enteredSecond
+    const firstGate = new Promise((resolve) => {
+      releaseFirst = resolve
+    })
+    const firstReady = new Promise((resolve) => {
+      enteredFirst = resolve
+    })
+    const secondReady = new Promise((resolve) => {
+      enteredSecond = resolve
+    })
+    t.after(() => {
+      releaseFirst()
+      sticky.db.close()
+      fs.rmSync(root, { recursive: true, force: true })
+    })
+    const sent = []
+    const logged = []
+    let runs = 0
+    let requests = 0
+    const handler = createHandleProtocol({
+      json: (res, status, body) => {
+        res.status = status
+        return body
+      },
+      writeSSEHeaders() {},
+      readBody: async () => ({
+        model: 'claude-haiku-4-5',
+        stream: false,
+        max_tokens: 32,
+        messages: [
+          { role: 'user', content: 'Continue this diagnostic conversation with the same device and session.' },
+        ],
+        metadata: { user_id: JSON.stringify({ device_id: 'queued-device', session_id: 'queued-caller' }) },
+      }),
+      requireAuth: () => true,
+      cfg: {
+        rewrite: { enabled: false },
+        intercept: { rules: [] },
+        distill: { enabled: false },
+        limits: { max_body_bytes: 1024 * 1024, upstream_timeout_ms: 2000, stream_idle_timeout_ms: 2000 },
+        paths: { data: path.join(root, 'data'), project: root },
+      },
+      requestLog: {
+        start: () => ({ request_id: `queued-${++requests}`, mode: 'normal', t0: Date.now() }),
+        finish: (_ctx, extra) => logged.push(extra.outbound_session_id),
+      },
+      stickyRouter: sticky,
+      accountQuota: {},
+      apiKeyStore: {},
+      apiScheduler: {},
+      apiEndpointStore: {},
+      stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
+      routingConfigPath: routingFile,
+      routingConfig: { compatibility: {}, failover: {} },
+      groupsRepo: { rateMultiplier: () => 1 },
+      failoverRunner: {
+        async run(opts) {
+          const index = ++runs
+          if (index === 2) enteredSecond()
+          return runner.run({
+            ...opts,
+            applyAttempt: async (body, candidate, extra) => {
+              if (index === 1) {
+                enteredFirst()
+                await firstGate
+              }
+              return opts.applyAttempt(body, candidate, { ...extra, attemptStartedAt: index * 1000 })
+            },
+            callAttempt: async ({ body }) => {
+              sent.push(sessionIdFromOutboundBody(body))
+              return {
+                ok: true,
+                status: 200,
+                terminalState: 'verified',
+                body: {
+                  type: 'message',
+                  role: 'assistant',
+                  content: [{ type: 'text', text: 'continued' }],
+                  stop_reason: 'end_turn',
+                },
+              }
+            },
+          })
+        },
+      },
+    })
+    async function invoke() {
+      const res = {
+        ...fakeResponse(),
+        on: (event, fn) => {
+          if (event === 'finish') res.finish = fn
+        },
+      }
+      const req = {
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { authorization: 'Bearer master', 'user-agent': 'claude-cli/2.1.293 (external, cli)' },
+        apiKeyKind: 'master',
+        once() {},
+        off() {},
+      }
+      await handler.handleProtocol(req, res, 'anthropic.messages', '/v1/messages')
+      res.finish?.()
+      assert.equal(res.status, 200)
+    }
+    const first = invoke()
+    await firstReady
+    const second = invoke()
+    await secondReady
+    releaseFirst()
+    await Promise.all([first, second])
+    await invoke()
+    assert.notEqual(sent[0], 'queued-caller')
+    assert.notEqual(sent[0], 'previous-outbound')
+    assert.deepEqual(sent, [sent[0], sent[0], sent[0]])
+    assert.deepEqual(logged, [sent[0], sent[0], sent[0]])
+    assert.equal(sticky.resolve(key).sessionId, sent[0])
+    assert.equal(sticky.resolve(key).vmId, vm.id)
+  })
+}
+
+async function runManagedKeyHop(root, result) {
+  const routingFile = path.join(root, 'routing.json')
+  fs.writeFileSync(routingFile, JSON.stringify({ compatibility: {} }))
+  const vm = { id: 'vm-01', claude: { mode: 'oauth' } }
+  const selected = {
+    vmId: vm.id,
+    accountId: 'account-1',
+    vm,
+    exec: { vmId: vm.id, vm, homeDir: path.join(root, 'home'), oauth: { account_uuid: 'account-1' } },
+  }
+  const charges = []
+  const logged = []
+  const response = { ...fakeResponse(), on: (event, fn) => event === 'finish' && (response.finish = fn) }
+  const handler = createHandleProtocol({
+    json: (_res, status, body) => {
+      response.status = status
+      return body
+    },
+    writeSSEHeaders() {},
+    readBody: async () => ({ model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hello' }] }),
+    requireAuth: () => true,
+    cfg: {
+      rewrite: { enabled: false },
+      intercept: { rules: [] },
+      distill: { enabled: false },
+      limits: { max_body_bytes: 1024 * 1024, upstream_timeout_ms: 2000, stream_idle_timeout_ms: 2000 },
+      paths: { data: root, project: root },
+    },
+    requestLog: { start: () => ({ request_id: 'key-billing', mode: 'normal' }), finish: (_c, row) => logged.push(row) },
+    stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
+    accountQuota: { ingestHeaders() {} },
+    apiKeyStore: {
+      acquire: () => ({ ok: true }),
+      release() {},
+      recordUsage: (key, usage, opts) => charges.push({ key, usage, opts }),
+    },
+    apiScheduler: {},
+    apiEndpointStore: {},
+    stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
+    routingConfigPath: routingFile,
+    routingConfig: { compatibility: {}, failover: {} },
+    failoverRunner: {
+      async run(opts) {
+        await opts.applyAttempt(opts.canonicalBody, selected)
+        return result
+      },
+    },
+    groupsRepo: { rateMultiplier: () => 2 },
+  })
+  const req = {
+    method: 'POST',
+    url: '/v1/messages',
+    headers: { authorization: 'Bearer sk-vm-x', 'user-agent': 'claude-cli/2.1.241 (external, cli)' },
+    apiKeyKind: 'managed',
+    apiKeyRecord: { id: 'key-1', group_id: 1 },
+    once() {},
+    off() {},
+  }
+  await handler.handleProtocol(req, response, 'anthropic.messages', '/v1/messages')
+  response.finish?.()
+  return { charges, logged }
+}
+
+test('a managed key is charged exactly once for a hop billed inline', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-key-inline-'))
+  try {
+    const usage = { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 5000 }
+    const { charges, logged } = await runManagedKeyHop(root, {
+      ok: false,
+      status: 503,
+      accountId: 'account-1',
+      usage,
+      body: { error: { type: 'server_error', code: 'x', message: 'stop' } },
+    })
+    assert.equal(charges.length, 1)
+    assert.equal(charges[0].opts.rateMultiplier, 2)
+    assert.equal(charges[0].opts.officialCost, logged[0].total_cost)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

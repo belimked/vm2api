@@ -4,12 +4,15 @@ import type { Vm } from '@/types/panel-vm'
 import {
   BarChart3,
   Download,
+  LifeBuoy,
   Link2,
   MoreHorizontal,
   Play,
   RefreshCw,
   RotateCcw,
   Trash2,
+  Undo2,
+  UserRoundPlus,
 } from 'lucide-react'
 import { canRefreshCredential, credTypeOf } from '@/lib/cred-type'
 import { cn } from '@/lib/utils'
@@ -24,6 +27,7 @@ import {
 import { meQueryOptions } from '@/features/auth/queries'
 import { restrictionTitle } from '@/features/vm/clear-restriction'
 import { useVmActions } from '@/features/vm/vm-actions-context'
+import { canReclaimVm } from '@/features/vm/vm-owner'
 import { VmPackageDialog } from '@/features/vm/vm-package-dialog'
 
 /** 无法刷新时给出原因，与详情页 refreshBlocked 文案一致。 */
@@ -35,7 +39,7 @@ export function refreshBlockedReason(vm: Vm): string {
 }
 
 /**
- * 行尾扩展菜单：测试链接 / 查看统计 / 重新授权 / 刷新令牌 / 恢复状态，
+ * 行尾扩展菜单：测试链接 / 查看统计 / 重新授权 / 刷新令牌 / 恢复状态 / 恢复服务，
  * 破坏性操作（重置、删除）收在分隔线之后。
  */
 export function VmActionMenu({
@@ -96,6 +100,24 @@ export function VmActionMenu({
               打包 JSON
             </DropdownMenuItem>
           ) : null}
+          {admin && actions.openAssignOwner ? (
+            <DropdownMenuItem
+              disabled={actions.ownerBusyId === vm.id}
+              onSelect={() => actions.openAssignOwner?.(vm)}
+            >
+              <UserRoundPlus />
+              分配给租户
+            </DropdownMenuItem>
+          ) : null}
+          {admin && actions.reclaimOwner && canReclaimVm(vm) ? (
+            <DropdownMenuItem
+              disabled={actions.ownerBusyId === vm.id}
+              onSelect={() => actions.reclaimOwner?.(vm)}
+            >
+              <Undo2 />
+              收回
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuSeparator />
           <DropdownMenuItem
             disabled={!restricted || actions.recoveringId === vm.id}
@@ -104,6 +126,10 @@ export function VmActionMenu({
           >
             <RotateCcw />
             恢复状态
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => actions.openRecovery(vm)}>
+            <LifeBuoy />
+            恢复服务
           </DropdownMenuItem>
           {actions.reset || actions.remove ? <DropdownMenuSeparator /> : null}
           {actions.reset ? (

@@ -29,19 +29,21 @@ import {
   proxyKey,
 } from '../vm/egress.mjs'
 import { OS_CATALOG } from '../vm/os-catalog.mjs'
-import { REMOTE_KERNEL_ENTRY, resolveKernelDataplane } from '../vm/slot-engine.mjs'
+import { resolveKernelDataplane } from '../vm/slot-engine.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { isKvmRuntime, runtimeKind } from '../vm/runtime-kind.mjs'
 import { slotMemory, memoryMiB, normalizeVmConfig, VM_CONFIG_DEFAULTS } from '../vm/machine-spec.mjs'
 import { slotExecArgv, slotExecCmd } from '../vm/slot-exec.mjs'
 import {
+  CODEX_SLOT_ROLE,
   containerName,
   displayName,
   kvmBindChownArgv,
   normalizeTimezone,
   KVM_CAPS,
   STANDARD_LOCALE,
+  slotContainerCommand,
   writeWorkerFiles,
 } from '../vm/vm-runtime.mjs'
 import {
@@ -159,6 +161,49 @@ export function slotEgressNames(vmId) {
 }
 
 /**
+ * kin-egress container body. The helper reads a 0600 config written by the SSH
+ * user, so it runs as that same uid:gid; with a root login the image default
+ * (kincli) could not open the root-owned file and crash-looped on EACCES. The
+ * user is part of the digest so a helper created under the old spec is rebuilt.
+ */
+export function remoteEgressContainer({ vmId, proxyId, dir, imageRef, body, host }) {
+  const user = `${host.uid}:${host.gid}`
+  const digest = crypto.createHash('sha256').update(body).update(imageRef).update(user).digest('hex').slice(0, 16)
+  return {
+    digest,
+    spec: {
+      Image: imageRef,
+      User: user,
+      Cmd: ['/usr/local/bin/kin-egress', '-config', '/etc/kin-egress/egress.json'],
+      Labels: {
+        'kin.egress': '1',
+        'kin.egress.vm': vmId,
+        'kin.egress.proxy': proxyId,
+        'kin.egress.cfg': digest,
+        'vm2api.cluster': '1',
+      },
+      HostConfig: {
+        NetworkMode: 'host',
+        Binds: [`${dir}:/etc/kin-egress:ro`],
+        RestartPolicy: { Name: 'unless-stopped' },
+        ReadonlyRootfs: true,
+        CapDrop: ['ALL'],
+        SecurityOpt: ['no-new-privileges'],
+      },
+    },
+  }
+}
+
+/** Keep the running helper only when it is healthy and matches the spec. A crash loop reports Running too. */
+export function canReuseRemoteEgress(existing, digest) {
+  return !!(
+    existing?.State?.Running &&
+    !existing.State.Restarting &&
+    existing.Config?.Labels?.['kin.egress.cfg'] === digest
+  )
+}
+
+/**
  * Build the VM's exit on the node. px-local = shared masquerading bridge (node's
  * own IP, no process). SOCKS = the slot's own non-masquerading bridge + its
  * kin-egress (host-network container from the slot image) + iptables REDIRECT,
@@ -203,35 +248,15 @@ export async function ensureRemoteEgress(session, vm, { imageRef }) {
   const dnsEmptyTypes = configuredDnsEmptyTypes()
   if (dnsEmptyTypes.length) cfg.dns_empty_types = dnsEmptyTypes
   const body = `${JSON.stringify(cfg, null, 2)}\n`
-  const digest = crypto.createHash('sha256').update(body).update(imageRef).digest('hex').slice(0, 16)
   // Beside the slot tree, outside every guest bind: the guest never sees the proxy password.
   const dir = `${remoteSlotDir(session.host, vm.id)}/egress`
-  const owner = session.host.uid === 0 ? null : { uid: session.host.uid, gid: session.host.gid }
+  const { digest, spec } = remoteEgressContainer({ vmId: vm.id, proxyId, dir, imageRef, body, host: session.host })
   const existing = await inspectContainerOrNull(session.docker, names.egress)
-  if (!(existing?.State?.Running && existing.Config?.Labels?.['kin.egress.cfg'] === digest)) {
+  if (!canReuseRemoteEgress(existing, digest)) {
     await runRemote(session.client, `umask 077 && mkdir -p ${shellQuote(dir)} && chmod 700 ${shellQuote(dir)}`)
     await writeRemoteFile(await openSftp(session.client), `${dir}/egress.json`, body, { mode: 0o600 })
     if (existing) await removeContainer(session.docker, names.egress)
-    await createContainerRaw(session.docker, names.egress, {
-      Image: imageRef,
-      ...(owner ? { User: `${owner.uid}:${owner.gid}` } : {}),
-      Cmd: ['/usr/local/bin/kin-egress', '-config', '/etc/kin-egress/egress.json'],
-      Labels: {
-        'kin.egress': '1',
-        'kin.egress.vm': vm.id,
-        'kin.egress.proxy': proxyId,
-        'kin.egress.cfg': digest,
-        'vm2api.cluster': '1',
-      },
-      HostConfig: {
-        NetworkMode: 'host',
-        Binds: [`${dir}:/etc/kin-egress:ro`],
-        RestartPolicy: { Name: 'unless-stopped' },
-        ReadonlyRootfs: true,
-        CapDrop: ['ALL'],
-        SecurityOpt: ['no-new-privileges'],
-      },
-    })
+    await createContainerRaw(session.docker, names.egress, spec)
     await containerAction(session.docker, names.egress, 'start')
   }
   // Passive: a TCP connect would enter kin-egress's transparent path (it refuses self-destined conns).
@@ -451,6 +476,7 @@ export function slotContainerBody(vm, { image, network, remoteDir, user, routing
   const mem = parseMemoryBytes(slotMemory(vm, routing))
   const macAllowed = !['host', 'bridge', 'none'].includes(network) && !String(network || '').startsWith('container:')
   const mac = macAllowed ? workstationMacAddress(vm) : null
+  const codex = isCodexVm(vm)
   return {
     Image: image,
     ...(mac ? { MacAddress: mac, NetworkingConfig: { EndpointsConfig: { [network]: { MacAddress: mac } } } } : {}),
@@ -466,7 +492,7 @@ export function slotContainerBody(vm, { image, network, remoteDir, user, routing
       `KIN_VM_NAME=${slotName}`,
       `KIN_VM_OS=${vm.kernel}`,
     ],
-    Cmd: [REMOTE_KERNEL_ENTRY, '--gateway-worker', '--config', '/run/kin/kernel.json'],
+    Cmd: slotContainerCommand(vm),
     Labels: {
       'kin.vm': '1',
       'kin.vm.id': vm.id,
@@ -474,6 +500,7 @@ export function slotContainerBody(vm, { image, network, remoteDir, user, routing
       'kin.vm.os': vm.kernel,
       'kin.vm.layout': SLOT_LAYOUT,
       'kin.vm.runtime': 'docker',
+      ...(codex ? { 'kin.vm.role': CODEX_SLOT_ROLE } : {}),
       'vm2api.cluster': '1',
     },
     HostConfig: {
@@ -554,9 +581,6 @@ async function ensureNodeSlotImage(session, nodeId, projectRoot, kernel, runtime
 }
 
 async function prepare(vm, projectRoot, routing) {
-  if (isCodexVm(vm)) {
-    return { fail: { ok: false, code: 'remote_unsupported', error: 'GPT 槽位暂不支持放到集群节点' } }
-  }
   if (resolveKernelDataplane(vm, routing || {}) === 'crag') {
     return { fail: { ok: false, code: 'remote_unsupported', error: 'crag 数据面暂不支持集群节点' } }
   }
@@ -589,6 +613,21 @@ async function prepare(vm, projectRoot, routing) {
 
 function runtimeLabelOf(info) {
   return info?.Config?.Labels?.['kin.vm.runtime'] || 'docker'
+}
+function roleLabelOf(info) {
+  return info?.Config?.Labels?.['kin.vm.role'] || ''
+}
+
+/**
+ * Docker GPT slots idle as PID 1. One still running kin-kernel crash-loops and
+ * must be recreated. KVM has no such label: its runner boots the guest, and the
+ * Codex kernel stays on the control plane, so requiring the role would remove
+ * a freshly built VM on every start.
+ */
+export function codexRoleMatches(info, vm) {
+  if (isKvmRuntime(vm) || runtimeLabelOf(info) === 'kvm') return true
+  const role = roleLabelOf(info)
+  return isCodexVm(vm) ? role === CODEX_SLOT_ROLE : role !== CODEX_SLOT_ROLE
 }
 
 async function startRemoteTelemetry(docker, vm, name) {
@@ -628,6 +667,7 @@ export async function startRemoteSlot(vm, projectRoot, { recreate = false, routi
       existing.HostConfig?.NetworkMode === eg.network &&
       existing.Config?.Labels?.['kin.vm.layout'] === SLOT_LAYOUT &&
       runtimeLabelOf(existing) === runtimeKind(vm) &&
+      codexRoleMatches(existing, vm) &&
       !recreate
     const common = {
       nodeId,
@@ -698,7 +738,8 @@ export async function reloadRemoteSlot(vm, projectRoot, { routing } = {}) {
       existing.Config?.Image !== image ||
       existing.HostConfig?.NetworkMode !== eg.network ||
       existing.Config?.Labels?.['kin.vm.layout'] !== SLOT_LAYOUT ||
-      runtimeLabelOf(existing) !== runtimeKind(vm)
+      runtimeLabelOf(existing) !== runtimeKind(vm) ||
+      !codexRoleMatches(existing, vm)
     ) {
       return startRemoteSlot(vm, projectRoot, { recreate: !!existing, routing })
     }

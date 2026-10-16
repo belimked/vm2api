@@ -17,10 +17,10 @@ import { parseVmQuotaOverride } from '../pool/vm-quota-override.mjs'
 import { defaultSeedPolicy, standardSeedPolicy } from '../protocol/seed-policy.mjs'
 import {
   applyGeneratedFingerprint,
-  generateWorkstationFingerprint,
   takenFingerprintKeys,
   writeGuestMachineIdFile,
 } from '../identity/workstation-fingerprint.mjs'
+import { assignComputerFingerprint } from '../identity/slot-computer.mjs'
 import { VM_ORIGIN, canBindProxyToVm, normalizeOwnerId } from '../admin/resource-owner.mjs'
 import { readCodexAccounts, writeCodexAccounts } from './codex-slot.mjs'
 import { hasBoundExit, isLocalEgressProxy } from './egress.mjs'
@@ -539,7 +539,8 @@ async function attachProxy(projectRoot, id, spec, proxyPool, ownerUserId) {
     if (!proxyId) return fail('proxy_import_failed', '本机直连出口不可用')
     const bound = proxyPool.bind(proxyId, id)
     if (!bound.ok) return fail(bound.error || 'proxy_bind_failed', '绑定直连出口失败')
-    bindVmProxy(projectRoot, id, proxyPool.getProxyByIdWithAuth(proxyId))
+    // bind() lands a node slot on its own VPS's local row, not the control plane's.
+    bindVmProxy(projectRoot, id, proxyPool.getProxyByIdWithAuth(bound.proxy?.id || proxyId))
     return { ok: true }
   }
   const ensured = proxyPool.ensureSocks(spec.proxy, { ownerUserId, label: spec.proxy.label })
@@ -618,8 +619,9 @@ export async function commitVmPackage({
   let vm
   if (create) {
     const existing = listVms(projectRoot)
-    const generated = generateWorkstationFingerprint(
-      { id, kernel: spec.vm.kernel, timezone: spec.vm.timezone, locale: spec.vm.locale },
+    const generated = assignComputerFingerprint(
+      projectRoot,
+      { id, kernel: spec.vm.kernel, timezone: spec.vm.timezone, locale: spec.vm.locale, runtime: { type: 'docker' } },
       { taken: takenFingerprintKeys(existing) },
     )
     vm = {

@@ -77,6 +77,7 @@ jobs:
             dist/kin-worker
             dist/kin-egress
             dist/kin-oauth-auth
+            dist/kin-computer
             dist/cli-node
             dist/cc-node
 

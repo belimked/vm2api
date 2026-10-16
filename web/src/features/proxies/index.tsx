@@ -44,7 +44,7 @@ import {
   proxyBoundIds,
   proxyLabel,
   proxyInFilter,
-  proxyIsLocal,
+  proxyIsControlLocal,
   proxyMatchesQuery,
   readPositive,
   sortedProxies,
@@ -504,7 +504,7 @@ export function ProxiesPage() {
                 geoGuardAction={String(cfg.geo_guard_action || 'notify_pause')}
               />
             ) : (
-              <ProxyImportPanel hasLocal={list.some(proxyIsLocal)} />
+              <ProxyImportPanel hasLocal={list.some(proxyIsControlLocal)} />
             )}
           </div>
         </SheetContent>

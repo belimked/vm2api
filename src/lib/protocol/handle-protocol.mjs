@@ -3,7 +3,11 @@
  * server wiring; this factory owns convert → pool → Go/Rust hop → client.
  */
 import { applyIntercept } from '../core/intercept.mjs'
-import { streamIdleTimeoutMs as idleTimeoutFromRouting } from '../core/config.mjs'
+import {
+  streamIdleTimeoutMs as idleTimeoutFromRouting,
+  inboundBodyLimit,
+  queueKeepaliveDelayMs,
+} from '../core/config.mjs'
 import { applyEagerToolStreaming } from './eager-tool-streaming.mjs'
 import {
   inboundRefusalDeviceId,
@@ -39,6 +43,8 @@ import { sanitizeInboundBody, defaultSeedPolicy } from './seed-policy.mjs'
 import { fingerprintRequest } from './client-fingerprint.mjs'
 import { validateOfficialModel } from './models.mjs'
 import { handleCodexProtocol, handleCodexSearch } from './handle-codex.mjs'
+import { disjointOpenaiUsage } from './openai-usage.mjs'
+import { costColumnsFromUsage } from '../admin/pricing.mjs'
 import { detectInboundPlatform } from './platform-detect.mjs'
 import { normalizeCodexRouting } from './codex-route.mjs'
 import { hasClaudeCode1mSuffix } from './context-1m.mjs'
@@ -106,6 +112,7 @@ import {
   extractFirstUserText,
   isOfficialClaudeCodeTraffic,
   isProxiedOfficialClaudeCode,
+  officialCcPassthroughFromRouting,
   personaHidesUsageFromRoutingFile,
   standingUsageFromRoutingFile,
   personaModeFromRoutingFile,
@@ -116,7 +123,7 @@ import {
   isClaudeCodeFamilyRequest,
 } from '../identity/claude-code-only.mjs'
 import { createDownstreamKeepalive } from './stream-keepalive.mjs'
-import { createAnthropicStreamTracker, isRecoverableTruncation } from './stream-truncation.mjs'
+import { buildAnthropicSseError, createAnthropicStreamTracker, isRecoverableTruncation } from './stream-truncation.mjs'
 import {
   hidePersonaUsageInSseLine,
   hidePersonaUsageOnMessage,
@@ -170,6 +177,27 @@ export function createHandleProtocol(deps) {
     typeof deps.getFailoverRunner === 'function' ? deps.getFailoverRunner() : deps.failoverRunner
   function responseClosed(res) {
     return !!(res?.destroyed || res?.writableEnded || res?.closed)
+  }
+
+  function usageForLog(usage, { cacheTtl = null, requestedSpeed = null } = {}) {
+    let next = usage
+    if (next && cacheTtl) next = applyCacheTtlToUsage(next, cacheTtl)
+    if (next && requestedSpeed) next = { ...next, requested_speed: requestedSpeed }
+    return disjointOpenaiUsage(next)
+  }
+
+  function attachPricing(logBag, { managedKey = null, rateMultiplier = 1, bill = false } = {}) {
+    const model = logBag.upstream_model || logBag.model
+    const priced = costColumnsFromUsage(logBag.usage || {}, model)
+    Object.assign(logBag, priced)
+    if (!bill || !managedKey) return
+    try {
+      apiKeyStore.recordUsage(managedKey, logBag.usage || {}, {
+        model,
+        rateMultiplier,
+        officialCost: priced.total_cost,
+      })
+    } catch {}
   }
 
   function finishClientCancel(res, result, logBag) {
@@ -483,7 +511,7 @@ export function createHandleProtocol(deps) {
 
     let inbound
     try {
-      inbound = await readBody(req, cfg.limits.max_body_bytes)
+      inbound = await readBody(req, inboundBodyLimit(getRouting(), cfg.limits.max_body_bytes))
     } catch (error) {
       stats.errors++
       logBag.error_code = error?.body?.error?.code || ErrorCode.INVALID_JSON
@@ -922,6 +950,28 @@ export function createHandleProtocol(deps) {
           standing: standingUsageFromRoutingFile(routingConfigPath),
         })
 
+    if (
+      inferenceBackend === 'api' &&
+      !requestContext &&
+      officialTraffic &&
+      !officialCcPassthroughFromRouting(getRouting() || {})
+    ) {
+      ctx.body = applyCrsUnofficialPersona(ctx.body, {
+        officialClient: false,
+        forceConfigured: true,
+        routingFile: routingConfigPath,
+        headers: req.headers,
+        sessionId: outboundSessionId,
+        model: ctx.body?.model,
+        cliVersion: OFFICIAL_CLI_VERSION,
+      })
+      personaHideTokens = personaHideForUnofficial(personaIn, ctx.body, {
+        officialClient: false,
+        mode: personaMode,
+        hides: personaHidesUsageFromRoutingFile(routingConfigPath),
+        standing: standingUsageFromRoutingFile(routingConfigPath),
+      })
+    }
     if (inferenceBackend === 'api') {
       const managedKey = req.apiKeyRecord || null
       if (managedKey) {
@@ -994,21 +1044,18 @@ export function createHandleProtocol(deps) {
       logBag.account_id = result?.accountId || null
       logBag.final_account_id = result?.accountId || null
       logBag.upstream_status = result?.status ?? null
-      logBag.usage = result?.body?.usage || result?.usage || null
+      logBag.usage = usageForLog(result?.body?.usage || result?.usage || null, { cacheTtl })
       logBag.upstream_model = result?.model || null
       // API transport still stamps the first data: line; subtract t0 for queue wait only.
       logBag.first_token_ms = Number.isFinite(result?.firstTokenAt)
         ? Math.max(0, result.firstTokenAt - logCtx.t0)
         : (result?.ttftMs ?? null)
       logBag.final_state = result?.terminalState || null
-      if (result?.ok && managedKey) {
-        try {
-          apiKeyStore.recordUsage(managedKey, logBag.usage || {}, {
-            model: logBag.upstream_model || logBag.model,
-            rateMultiplier: deps.groupsRepo.rateMultiplier(managedKey.group_id ?? 1),
-          })
-        } catch {}
-      }
+      attachPricing(logBag, {
+        managedKey,
+        rateMultiplier: deps.groupsRepo.rateMultiplier(managedKey?.group_id ?? 1),
+        bill: !!(result?.ok && managedKey),
+      })
       if (clientStream) {
         if (isClientCancelledResult(result)) return finishClientCancel(res, result, logBag)
         if (!res.headersSent) {
@@ -1038,6 +1085,9 @@ export function createHandleProtocol(deps) {
     const streamKeepaliveMs = Number(
       getRouting()?.failover?.stream_keepalive_ms ?? cfg.limits.stream_keepalive_ms ?? 15_000,
     )
+    // First downstream byte during a queue wait. Short misses stay HTTP 429/529;
+    // anything still waiting past this writes SSE so Cloudflare does not 524.
+    const queueKeepaliveDelay = queueKeepaliveDelayMs(getRouting(), cfg.limits?.queue_keepalive_delay_ms)
     const streamIdleTimeoutMs = idleTimeoutFromRouting(
       getRouting(),
       Number(cfg.limits.stream_idle_timeout_ms) || 180_000,
@@ -1065,6 +1115,26 @@ export function createHandleProtocol(deps) {
 
     const clientStream = isClientStream(inbound, req.headers)
     const streamTracker = clientStream && protocol === 'anthropic.messages' ? createAnthropicStreamTracker() : null
+    // One keepalive for the whole Claude stream, including session/seat queues
+    // and the gaps between failover attempts. OpenAI keeps its per-attempt one.
+    let activeAttemptCommit = null
+    const anthropicKeepalive =
+      clientStream && protocol === 'anthropic.messages' && streamKeepaliveMs > 0
+        ? createDownstreamKeepalive({
+            intervalMs: streamKeepaliveMs,
+            userAgent: req.headers['user-agent'] || req.headers['User-Agent'] || '',
+            protocol,
+            write: (chunk) => {
+              if (res.writableEnded || res.destroyed) return
+              if (!res.headersSent) writeSSEHeaders(res)
+              res.write(chunk)
+              // A queue ping commits the HTTP response only. The slot commits
+              // while an attempt is active, same as an in-attempt ping.
+              activeAttemptCommit?.()
+            },
+          })
+        : null
+    anthropicKeepalive?.armAfter(queueKeepaliveDelay)
     const upstreamStream = true
     const requestedDelivery = String(
       req.headers['x-kin-delivery'] || getRouting()?.failover?.delivery_mode || 'realtime',
@@ -1137,9 +1207,11 @@ export function createHandleProtocol(deps) {
           } catch {}
           const identity = loadVmIdentity(selected.exec)
           const attemptStartedAt = extra.attemptStartedAt ?? Date.now()
-          const keptSession = extra.freshSlot ? '' : stickyBound?.sessionId || ''
-          const keptAccount = extra.freshSlot ? '' : stickyBound?.accountId || ''
-          const keptVm = extra.freshSlot ? '' : stickyBound?.vmId || ''
+          // The runner snapshots after this session's queue turn, before VM prebinding.
+          const attemptBound = extra.stickyBound
+          const keptSession = extra.freshSlot ? '' : attemptBound?.sessionId || ''
+          const keptAccount = extra.freshSlot ? '' : attemptBound?.accountId || ''
+          const keptVm = extra.freshSlot ? '' : attemptBound?.vmId || ''
           const attemptSessionId = resolveOutboundSessionId(callerSession, {
             ...sessionContext,
             accountId: selected.accountId,
@@ -1155,25 +1227,42 @@ export function createHandleProtocol(deps) {
           const credMode = credentialModeFromOauth(selected.vm?.claude || {})
           const modeOverride = slotPersonaModeOverride(selected.vm)
           const routingNow = getRouting()
+          const repaired = extra.repaired === true
+          const preserveThinkingBlocks =
+            !repaired &&
+            routingNow?.failover?.signature_repair !== true &&
+            (!keptAccount || keptAccount === selected.accountId)
+          // cli-node receives the cleaned body after this boundary. Keep every
+          // thinking block on the first hop and only let a repaired retry strip it.
+          const preserveCliHopThinkingBlocks = !repaired
+          const officialPassthrough = officialTraffic && officialCcPassthroughFromRouting(routingNow)
           const cliHop = resolveOfficialCcInference(selected.vm, routingNow) === 'cli-hop'
           let hopBody = body
           if (cliHop) {
-            const repaired = extra.repaired === true
             const resolvedPersona = resolveSlotPersonaPreset(selected.vm, routingNow)
-            const cliAppliesNodePersona =
-              !requestContext && !officialTraffic && resolvedPersona !== 'zero' && resolvedPersona !== 'official_full'
-            if (cliAppliesNodePersona) {
-              hopBody = applyCrsUnofficialPersona(structuredClone(personaIn), {
+            // Classifier keeps its own system. Official family keeps its inbound
+            // system only when the protocol tab turns passthrough on.
+            const panelRewrite = !requestContext && !officialPassthrough
+            hopBody = prepareCliHopBody(repaired ? body : hopBody, {
+              stream: upstreamStream,
+              repaired,
+              cacheTtl: requestedCacheTtl,
+              requestContext,
+              preserveSystem: officialPassthrough,
+              preserveThinkingBlocks: preserveCliHopThinkingBlocks,
+            })
+            hopBody = await materializeRemoteImageSources(hopBody)
+            if (panelRewrite) {
+              hopBody = applyCrsUnofficialPersona(hopBody, {
                 officialClient: false,
+                forceConfigured: true,
                 routingFile: routingConfigPath,
                 mode: resolvedPersona,
-                headers: req.headers,
                 sessionId: attemptSessionId,
-                model: personaIn?.model,
+                model: hopBody?.model || personaIn?.model,
                 cliVersion: OFFICIAL_CLI_VERSION,
                 identity,
               })
-              // The slot preset may differ from the global one; its panel mask applies.
               personaHideTokens = personaHideForUnofficial(personaIn, hopBody, {
                 officialClient: false,
                 mode: resolvedPersona,
@@ -1181,13 +1270,6 @@ export function createHandleProtocol(deps) {
                 standing: standingUsageFromRoutingFile(routingConfigPath, resolvedPersona),
               })
             }
-            hopBody = prepareCliHopBody(repaired ? body : hopBody, {
-              stream: upstreamStream,
-              repaired,
-              cacheTtl: requestedCacheTtl,
-              requestContext,
-            })
-            hopBody = await materializeRemoteImageSources(hopBody)
             if (identity) {
               hopBody = applyCrsIdentityReplace(hopBody, identity, inbound, req.headers, {
                 officialClient: officialTraffic,
@@ -1204,20 +1286,7 @@ export function createHandleProtocol(deps) {
             cacheTtl = requestedCacheTtl
             if (logCtx.capture_outbound) logBag.outbound_body = hopBody
 
-            // 0注入 hides CLI billing + env and the standing Node left in the leftover.
-            // 官方提示词 must show real usage.
-            const cliHide = requestContext
-              ? 0
-              : resolvedPersona === 'official'
-                ? 0
-                : personaHideForCliZero(personaIn, hopBody, {
-                    officialClient: officialTraffic,
-                    timezone: selected.vm?.timezone || selected.vm?.fingerprint?.timezone,
-                    // A re-applied Node persona's hide (summed below) already counts its overlay.
-                    overlay: cliAppliesNodePersona ? 0 : personaHideTokens?.overlay,
-                    hides: personaHidesUsageFromRoutingFile(routingConfigPath, resolvedPersona),
-                  })
-            personaHideTokens = cliAppliesNodePersona ? (Number(personaHideTokens) || 0) + cliHide : cliHide
+            if (!panelRewrite) personaHideTokens = 0
             logBag.inference_engine = resolveInferenceEngine(selected.vm, routingNow)
             logBag.persona_preset = resolveSlotPersonaPreset(selected.vm, routingNow)
             logBag.official_cc_inference = 'cli-hop'
@@ -1239,12 +1308,13 @@ export function createHandleProtocol(deps) {
           }
 
           cacheTtl = requestedCacheTtl
-          if (!requestContext && !officialTraffic && modeOverride) {
+          if (!requestContext && !officialPassthrough && (modeOverride || officialTraffic)) {
+            const configuredMode = modeOverride || resolveSlotPersonaPreset(selected.vm, routingNow)
             const rewritten = applyCrsUnofficialPersona(structuredClone(personaIn), {
-              officialClient: officialTraffic,
+              officialClient: false,
+              forceConfigured: true,
               routingFile: routingConfigPath,
-              mode: modeOverride,
-              headers: req.headers,
+              mode: configuredMode,
               sessionId: attemptSessionId,
               model: personaIn?.model,
               cliVersion: OFFICIAL_CLI_VERSION,
@@ -1252,10 +1322,10 @@ export function createHandleProtocol(deps) {
             })
             hopBody = officialMessagesBody(rewritten)
             personaHideTokens = personaHideForUnofficial(personaIn, rewritten, {
-              officialClient: officialTraffic,
-              mode: modeOverride,
-              hides: personaHidesUsageFromRoutingFile(routingConfigPath, modeOverride),
-              standing: standingUsageFromRoutingFile(routingConfigPath, modeOverride),
+              officialClient: false,
+              mode: configuredMode,
+              hides: personaHidesUsageFromRoutingFile(routingConfigPath, configuredMode),
+              standing: standingUsageFromRoutingFile(routingConfigPath, configuredMode),
             })
           }
           logBag.inference_engine = resolveInferenceEngine(selected.vm, routingNow)
@@ -1271,9 +1341,9 @@ export function createHandleProtocol(deps) {
             officialClient: officialTraffic,
             sessionId: attemptSessionId,
             accountId: selected.accountId,
-            boundSessionId: stickyBound?.sessionId || '',
-            boundAccountId: stickyBound?.accountId || '',
-            boundVmId: stickyBound?.vmId || '',
+            boundSessionId: keptSession,
+            boundAccountId: keptAccount,
+            boundVmId: keptVm,
             vmId: selected.vmId,
             epoch: attemptStartedAt,
             mode: sessionMode,
@@ -1286,6 +1356,7 @@ export function createHandleProtocol(deps) {
             toolNameRewrite: openaiCompat ? false : getRouting()?.compatibility?.tool_name_rewrite !== false,
             cacheTtl,
             cacheBreakpoints,
+            preserveThinkingBlocks,
             reqHeaders: req.headers,
             homeDir: selected.exec?.homeDir || '',
             credentialMode: credMode,
@@ -1337,17 +1408,23 @@ export function createHandleProtocol(deps) {
           } else if (protocol === 'openai.responses') {
             state = createResponsesStreamState(inbound.model || body.model, candidate.vmId)
           }
-          const keepalive = createDownstreamKeepalive({
-            intervalMs: streamKeepaliveMs,
-            userAgent: req.headers['user-agent'] || req.headers['User-Agent'] || '',
-            protocol,
-            write: (chunk) => {
-              if (res.writableEnded || res.destroyed) return
-              if (!res.headersSent) writeSSEHeaders(res)
-              res.write(chunk)
-            },
-          })
-          keepalive.start()
+          const keepalive =
+            anthropicKeepalive ||
+            createDownstreamKeepalive({
+              intervalMs: streamKeepaliveMs,
+              userAgent: req.headers['user-agent'] || req.headers['User-Agent'] || '',
+              protocol,
+              write: (chunk) => {
+                if (res.writableEnded || res.destroyed) return
+                if (!res.headersSent) writeSSEHeaders(res)
+                res.write(chunk)
+                // A ping is already a downstream byte. Commit so a later upstream
+                // failure cannot switch slots onto this socket.
+                onCommit()
+              },
+            })
+          if (anthropicKeepalive) activeAttemptCommit = onCommit
+          keepalive.arm()
           try {
             return await dispatchStreamInference({
               exec: candidate.exec,
@@ -1401,11 +1478,15 @@ export function createHandleProtocol(deps) {
               },
             })
           } finally {
-            keepalive.stop()
+            if (anthropicKeepalive) {
+              activeAttemptCommit = null
+              anthropicKeepalive.endAttempt()
+            } else keepalive.stop()
           }
         },
       })
     } finally {
+      anthropicKeepalive?.stop()
       clientAbort.settle()
       if (managedKey) {
         try {
@@ -1427,10 +1508,10 @@ export function createHandleProtocol(deps) {
     logBag.attempt_count = result?.attemptCount ?? 0
     logBag.final_state = result?.finalState || result?.terminalState || null
     logBag.upstream_status = result?.status ?? null
-    logBag.usage = result?.body?.usage || result?.usage || null
-    if (logBag.usage && cacheTtl) logBag.usage = applyCacheTtlToUsage(logBag.usage, cacheTtl)
-    // Fast mode bills 2x; upstream usage.speed wins, the request speed is only a fallback.
-    if (logBag.usage && wantsFastMode(ctx.body)) logBag.usage = { ...logBag.usage, requested_speed: 'fast' }
+    logBag.usage = usageForLog(result?.body?.usage || result?.usage || null, {
+      cacheTtl,
+      requestedSpeed: wantsFastMode(ctx.body) ? 'fast' : null,
+    })
     logBag.upstream_model = result?.body?.model || result?.model || null
     // Kernel stream firstTokenAt is generated content; include admission/setup via t0.
     logBag.first_token_ms = Number.isFinite(result?.firstTokenAt)
@@ -1475,14 +1556,11 @@ export function createHandleProtocol(deps) {
           if (vm) pool.syncQuotaSchedule(vm)
         }
       } catch {}
-      if (managedKey) {
-        try {
-          apiKeyStore.recordUsage(managedKey, logBag.usage || {}, {
-            model: logBag.upstream_model || logBag.model,
-            rateMultiplier: deps.groupsRepo.rateMultiplier(managedKey.group_id ?? 1),
-          })
-        } catch {}
-      }
+      attachPricing(logBag, {
+        managedKey,
+        rateMultiplier: deps.groupsRepo.rateMultiplier(managedKey?.group_id ?? 1),
+        bill: !!managedKey,
+      })
     }
 
     if (clientStream) {
@@ -1501,6 +1579,17 @@ export function createHandleProtocol(deps) {
         logBag.error_message = result?.body?.error?.message || 'Stream did not reach a verified terminal state'
         const closing = isRecoverableTruncation(result) && !res.writableEnded ? streamTracker?.closingEvents() : null
         if (closing) res.write(closing)
+        else if (
+          protocol === 'anthropic.messages' &&
+          !res.writableEnded &&
+          !streamTracker?.hasStarted() &&
+          !streamTracker?.isFinished()
+        ) {
+          // Headers already went out (queue ping or an in-attempt ping), so the
+          // status can no longer be 429/529/503. Close with the Anthropic event.
+          const mapped = mapProtocolClientError(result, logBag, logBag.error_code)
+          res.write(buildAnthropicSseError(mapped.body?.error || {}))
+        }
       }
       rememberRefusal({ inbound, body: ctx.body, headers: req.headers, result, logBag, requestId: logCtx.request_id })
       return res.end()
@@ -1580,7 +1669,7 @@ export function createHandleProtocol(deps) {
     }
     let body
     try {
-      body = await readBody(req, cfg.limits.max_body_bytes)
+      body = await readBody(req, inboundBodyLimit(getRouting(), cfg.limits.max_body_bytes))
     } catch (error) {
       stats.errors++
       logBag.error_code = error?.body?.error?.code || ErrorCode.INVALID_JSON
