@@ -4,16 +4,58 @@ import {
   buildKinSeedJson,
   isHostKernel,
   KIN_SEED_SCHEMA,
+  MAC_RE,
+  NIC_OUIS,
   resolveWorkstationProfile,
+  SKU_ORDER,
   workstationFamily,
   workstationKernel,
+  workstationMacAddress,
   workstationSkuId,
 } from '../../src/lib/identity/workstation-profile.mjs'
 
-test('sku splits even 2c4g and odd 4c8g; missing id is 2c4g', () => {
-  assert.equal(workstationSkuId({ id: 'vm-10' }), '2c4g')
-  assert.equal(workstationSkuId({ id: 'vm-05' }), '4c8g')
-  assert.equal(workstationSkuId({}), '2c4g')
+test('sku is a catalog id, stable per slot, and a stored value wins', () => {
+  for (const id of ['vm-01', 'vm-05', 'vm-10', '']) {
+    const sku = workstationSkuId({ id })
+    assert.ok(SKU_ORDER.includes(sku), `${id} -> ${sku}`)
+    assert.equal(workstationSkuId({ id }), sku)
+  }
+  assert.equal(workstationSkuId({ id: 'vm-05', fingerprint: { sku: '2c4g' } }), '2c4g')
+  assert.equal(workstationSkuId({ id: 'vm-05', fingerprint: { sku: 'bogus' } }), workstationSkuId({ id: 'vm-05' }))
+})
+
+test('slot attributes carry no index arithmetic', () => {
+  // Index rotation made every slot N and N+4 share distro, kernel and sku,
+  // which reads as one gateway cluster instead of unrelated workstations.
+  const packFor = (n) => {
+    const vm = { id: `vm-${String(n).padStart(2, '0')}`, kernel: 'ubuntu-24.04' }
+    return `${workstationSkuId(vm)}|${workstationKernel(vm)}`
+  }
+  let mismatches = 0
+  for (let n = 1; n <= 16; n++) if (packFor(n) !== packFor(n + 4)) mismatches += 1
+  assert.ok(mismatches >= 10, `N vs N+4 repeated too often: ${16 - mismatches}/16`)
+
+  const skus = new Set()
+  for (let n = 1; n <= 16; n++) skus.add(workstationSkuId({ id: `vm-${n}` }))
+  assert.equal(skus.size, 2)
+})
+
+test('slot mac is a vendor OUI, never the docker 02:42 range', () => {
+  const seen = new Set()
+  for (let n = 1; n <= 24; n++) {
+    const mac = workstationMacAddress({ id: `vm-${String(n).padStart(2, '0')}` })
+    assert.match(mac, MAC_RE)
+    assert.ok(NIC_OUIS.includes(mac.slice(0, 8)), mac)
+    assert.equal(mac.startsWith('02:42'), false)
+    seen.add(mac)
+  }
+  assert.equal(seen.size, 24)
+  // Stable for a slot, and a stored value pins it across restarts.
+  assert.equal(workstationMacAddress({ id: 'vm-07' }), workstationMacAddress({ id: 'vm-07' }))
+  assert.equal(
+    workstationMacAddress({ id: 'vm-07', fingerprint: { mac_address: '00:14:22:AB:CD:EF' } }),
+    '00:14:22:ab:cd:ef',
+  )
 })
 
 test('family follows guest distro, not host kernel', () => {
@@ -36,6 +78,7 @@ test('kernel is distro generic and never the host 7.0.0-14-generic', () => {
   assert.equal(ubuntu.linux_distro_version, '24.04.4')
   assert.equal(ubuntu.linux_kernel, '6.8.0-51-generic')
   assert.equal(ubuntu.os_version, 'Linux 6.8.0-51-generic')
+  assert.equal(ubuntu.cpus, 4)
   assert.equal(ubuntu.package_managers, 'apt')
   assert.equal(ubuntu.terminal, 'xterm-256color')
   assert.equal(ubuntu.process.constrained_memory, 0)
@@ -46,7 +89,7 @@ test('kernel is distro generic and never the host 7.0.0-14-generic', () => {
     kernel: 'debian-12',
     fingerprint: { os_id: 'debian', os_pretty: 'Debian GNU/Linux 12 (bookworm)', kernel_release: '7.0.0-14-generic' },
   })
-  assert.equal(debian.sku, '2c4g')
+  assert.ok(['2c4g', '4c8g'].includes(debian.sku))
   assert.equal(debian.linux_distro_id, 'debian')
   assert.match(debian.linux_kernel, /6\.1\.0-\d+-amd64/)
   assert.equal(debian.package_managers, 'apt')

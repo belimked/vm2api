@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Vm, VmProxySnap } from '@/types/panel-vm'
 import {
   Activity,
@@ -13,6 +14,8 @@ import {
   Trash2,
   TriangleAlert,
 } from 'lucide-react'
+import { toast } from 'sonner'
+import { api } from '@/lib/api'
 import { fmtAgo } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -111,6 +114,7 @@ export function ProxyRow({
   const id = proxy.id || ''
   const { onBind, onUnbind, onProbe } = actions
   const lit = useProxyHovered(hover, id)
+  const geoAlert = geoGuardAlert(proxy)
   const [over, setOver] = useState(false)
   const [open, setOpen] = useState(false)
   const ids = proxyBoundIds(proxy)
@@ -234,6 +238,14 @@ export function ProxyRow({
               )}
               aria-label={`最近错误：${error}`}
             />
+          ) : null}
+          {geoAlert ? (
+            <span
+              className='shrink-0 text-[11px] text-destructive'
+              title={geoAlert}
+            >
+              巡检异常
+            </span>
           ) : null}
         </button>
 
@@ -519,6 +531,11 @@ function ProxyDetail({
             </span>
           )}
         </DetailField>
+        {proxy.geo_guard?.checked_at ? (
+          <DetailField label='巡检'>
+            <GeoGuardStatus proxy={proxy} />
+          </DetailField>
+        ) : null}
         <DetailField label='探测'>
           <span className='text-muted-foreground'>
             {proxy.last_probe_at
@@ -728,5 +745,62 @@ function Latency({ proxy, local }: { proxy: VmProxySnap; local: boolean }) {
         {proxy.latency_ms != null ? `${proxy.latency_ms}ms` : '—'}
       </span>
     </div>
+  )
+}
+
+function geoGuardAlert(proxy: VmProxySnap): string {
+  const g = proxy.geo_guard
+  if (g?.status === 'changed')
+    return `国家变化 ${g.base.country_code || '-'}→${proxy.geo?.country_code || '-'}`
+  if (g?.status === 'unreachable') return '出口不可达'
+  return ''
+}
+
+function GeoGuardStatus({ proxy }: { proxy: VmProxySnap }) {
+  const id = proxy.id || ''
+  const g = proxy.geo_guard
+  const qc = useQueryClient()
+  const confirmGeo = useMutation({
+    mutationFn: () =>
+      api(`/api/panel/proxies/${encodeURIComponent(id)}/geo-guard/confirm`, {
+        method: 'POST',
+      }),
+    onSuccess: () => {
+      toast.success('已确认新国家')
+      void qc.invalidateQueries({ queryKey: ['panel', 'proxies'] })
+    },
+    onError: (error: Error) => toast.error(error.message),
+  })
+  if (!g?.checked_at) return null
+  return (
+    <span className='inline-flex flex-wrap items-center gap-2'>
+      <span className='text-muted-foreground'>
+        基准 {g.base.country_code || '-'} · {fmtAgo(g.checked_at)}
+      </span>
+      {g.status === 'unreachable' ? (
+        <span className='text-destructive'>
+          出口不可达
+          {g.reason?.startsWith('recovering')
+            ? ` · 恢复中 ${g.reason.split(' ')[1]}`
+            : ''}
+        </span>
+      ) : null}
+      {g.status === 'changed' ? (
+        <>
+          <span className='text-destructive'>
+            国家变化 {g.base.country_code}→{proxy.geo?.country_code}
+          </span>
+          <Button
+            size='sm'
+            variant='outline'
+            className='h-6 px-2 text-xs'
+            onClick={() => confirmGeo.mutate()}
+            disabled={confirmGeo.isPending}
+          >
+            确认新国家
+          </Button>
+        </>
+      ) : null}
+    </span>
   )
 }
