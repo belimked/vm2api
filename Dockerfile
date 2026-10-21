@@ -2,6 +2,8 @@
 # prebuilt slot payloads come from the release pinned in deploy/payload.json.
 
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ENV npm_config_registry=$NPM_REGISTRY
 RUN npm install -g pnpm@10
 WORKDIR /src/web
 COPY web/package.json web/pnpm-lock.yaml ./
@@ -29,13 +31,17 @@ COPY scripts/fetch-payload.mjs scripts/fetch-payload.mjs
 RUN node scripts/fetch-payload.mjs --dest /payload
 
 FROM node:22-bookworm-slim
-RUN apt-get update \
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG APT_MIRROR=mirrors.aliyun.com
+RUN sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" \
+      /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true; \
+    apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates iptables iproute2 python3 \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /opt/vm2api
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --registry=$NPM_REGISTRY
 COPY src ./src
 COPY scripts ./scripts
 COPY VERSION CHANGELOG.md ./

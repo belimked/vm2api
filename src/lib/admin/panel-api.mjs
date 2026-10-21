@@ -978,7 +978,7 @@ export async function buildClaudeResetQuery({ cfg, id, transport, now } = {}) {
   })
 }
 
-export async function buildClaudeResetRedeem({ cfg, id, idempotencyKey, transport, now } = {}) {
+export async function buildClaudeResetRedeem({ cfg, accountQuota, id, idempotencyKey, transport, now } = {}) {
   const result = await redeemClaudeResetCredit({
     projectRoot: cfg.paths.project,
     vmId: id,
@@ -987,6 +987,11 @@ export async function buildClaudeResetRedeem({ cfg, id, idempotencyKey, transpor
     ...(now ? { now } : {}),
   })
   if (!result.ok) return claudeResetFail(result)
+  if (result.outcome === 'reset' && !result.replayed && accountQuota) {
+    const vm = getVm(cfg.paths.project, id)
+    const acc = vm ? findAccount(accountQuota, vm) : null
+    if (acc?.account_id) accountQuota.applyClaudeReset(acc.account_id, result.cleared)
+  }
   return ok({
     vm_id: id,
     source: 'claude-reset-redeem',
