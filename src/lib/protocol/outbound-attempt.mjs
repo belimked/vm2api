@@ -276,6 +276,8 @@ export function prepareCliHopBody(
     repaired = false,
     cacheTtl = DEFAULT_CACHE_TTL,
     requestContext = null,
+    preserveSystem = false,
+    personaRewrite = false,
     preserveThinkingBlocks = false,
     preserveCallerEnvironment = false,
     autoCompactWindow = null,
@@ -283,20 +285,25 @@ export function prepareCliHopBody(
   } = {},
 ) {
   if (requestContext?.purpose === 'auto_mode_classifier') return prepareClassifierBody(canonicalBody, { stream })
+  if (preserveSystem) validateCacheBreakpoints(canonicalBody)
   let body = officialMessagesBody(canonicalBody, { stream, preserveContentShape: true })
   const windowTokens = Number(autoCompactWindow)
   if (Number.isInteger(windowTokens) && windowTokens >= 100_000 && windowTokens <= 1_000_000) {
     body.auto_compact_window = windowTokens
   }
   delete body.metadata
-  const leftover = stripCliOwnedSystem(body.system, { preserveCallerEnvironment })
-  if (leftover == null) delete body.system
-  else body.system = leftover
-  body = stabilizeSystemBudget(body)
-  body = stabilizeMessageBudgets(body)
+  // Official family keeps the inbound system and its markers when the
+  // protocol tab turns passthrough on.
+  if (!preserveSystem) {
+    const leftover = stripCliOwnedSystem(body.system, { preserveCallerEnvironment })
+    if (leftover == null) delete body.system
+    else body.system = leftover
+    body = stabilizeSystemBudget(body)
+    body = stabilizeMessageBudgets(body)
+  }
   // cli-node sends mid-conversation-system. Only models that reject the role need the lift.
   if (!modelSupportsMidConversationSystem(body.model)) body = liftMidConversationSystemMessages(body)
-  body = collapseSystemBudgetReminders(body)
+  if (!preserveSystem) body = collapseSystemBudgetReminders(body)
 
   if (!repaired) {
     normalizeThinkingForModel(body)
@@ -312,8 +319,9 @@ export function prepareCliHopBody(
   if (Object.prototype.hasOwnProperty.call(body, 'top_k')) delete body.top_k
   if (Object.prototype.hasOwnProperty.call(body, 'context_management')) delete body.context_management
   if (Object.prototype.hasOwnProperty.call(body, 'cache_control')) delete body.cache_control
-  if (!requestContext) {
-    body = { ...body, system: officialSystemTemplate(body.system) }
+  if (!requestContext && !preserveSystem) {
+    // The panel persona owns system[] when it rewrites after this step.
+    if (!personaRewrite) body = { ...body, system: officialSystemTemplate(body.system) }
     body.messages = officialMessageMarker(body.messages)
     if (Array.isArray(body.tools)) body = { ...body, tools: stripEagerInputStreaming(body.tools) }
   }
