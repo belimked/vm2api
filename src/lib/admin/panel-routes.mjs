@@ -3053,6 +3053,7 @@ export function createPanelHandler(ctx) {
         const id = p.split('/')[4]
         const result = await panel.buildClaudeResetRedeem({
           cfg,
+          accountQuota,
           id,
           idempotencyKey: req.headers['idempotency-key'],
         })
