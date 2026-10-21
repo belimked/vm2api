@@ -3,7 +3,8 @@
  * `--test-isolation=process` is Node 24+; CI stays on Node 22 to match prod.
  */
 import { spawnSync } from 'node:child_process'
-import { readdirSync } from 'node:fs'
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
 const dir = process.argv[2]
@@ -24,12 +25,18 @@ if (!files.length) {
 }
 
 let failed = 0
+// Tests mkdtemp under os.tmpdir() without cleanup; scope each file's TMPDIR and drop it afterwards.
 for (const file of files) {
-  const result = spawnSync(process.execPath, ['--test', file], {
-    stdio: 'inherit',
-    env: process.env,
-  })
-  if (result.status !== 0) failed += 1
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'vm2api-test-'))
+  try {
+    const result = spawnSync(process.execPath, ['--test', file], {
+      stdio: 'inherit',
+      env: { ...process.env, TMPDIR: tmp },
+    })
+    if (result.status !== 0) failed += 1
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
 }
 
 if (failed) {

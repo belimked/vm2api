@@ -38,6 +38,8 @@ import { normalizeOfficialCcConfig } from './lib/oauth/official-cc-bootstrap.mjs
 import { invalidateLiveCredentialCache } from './lib/admin/panel-live-credentials.mjs'
 import { normalizeHealthProbeConfig, createHealthProbeMonitor, HEALTH_REAL_HEADER } from './lib/admin/health-probe.mjs'
 import { normalizeNotifyConfig, createNotifyMonitor, dispatchNotify } from './lib/admin/notify.mjs'
+import { ProxyGeoGuard } from './lib/vm/proxy-geo-guard.mjs'
+import { ProxyGeoChecksRepo } from './lib/db/repos/proxy-geo-checks-repo.mjs'
 import { runVmTestChat } from './lib/admin/vm-test-chat.mjs'
 import { VmTestScheduleRunner } from './lib/admin/vm-test-schedule.mjs'
 import { StickyRouter } from './lib/pool/sticky-router.mjs'
@@ -365,7 +367,20 @@ proxyPool = new ProxyPool({
   onEnableVm: (vmId, _reason, proxyId) => {
     const vm = getVm(cfg.paths.project, vmId)
     const why = String(vm?.schedule_disabled_reason || '')
+    if (why.startsWith('geo_changed|') || why.startsWith('geo_unreachable|')) return
     if (!why.includes(`proxy=${proxyId}`) && !/egress_down|proxy_probe_failed/.test(why)) return
+    // A probe failure may have overwritten the geo pause reason; while the
+    // guard still holds this exit as country-changed, keep the slot paused
+    // (restamp the reason) so geo recovery, not probe recovery, re-enables it.
+    const px = proxyPool.state.proxies.find((x) => x.id === proxyId)
+    if (
+      proxyPool.state.config.geo_guard_enabled &&
+      proxyPool.state.config.geo_guard_action === 'notify_pause' &&
+      px?.geo_guard_status === 'changed'
+    ) {
+      setVmSchedulable(cfg.paths.project, vmId, false, `geo_changed|proxy=${proxyId}`)
+      return
+    }
     setVmSchedulable(cfg.paths.project, vmId, true)
   },
   egressCheck: (proxy) => proxyEgressReady(proxy, cfg.paths.project),
@@ -378,6 +393,84 @@ try {
   console.warn('[bootstrap] slot-guest-bin refresh failed:', err?.message || err)
 }
 proxyPool.startScheduler()
+// Geo-guard pauses are safety stops, so they bypass the manual schedule lock;
+// a slot already switched off for another reason is left alone.
+const geoPauseSlots = (bound, reason, proxyId) => {
+  const paused = []
+  const skipped = []
+  for (const vmId of bound) {
+    const vm = getVm(cfg.paths.project, vmId)
+    if (!vm) continue
+    const why = String(vm.schedule_disabled_reason || '')
+    if (vm.schedulable === false && !why.endsWith(`|proxy=${proxyId}`)) {
+      skipped.push(vmId)
+      continue
+    }
+    if (why !== `geo_changed|proxy=${proxyId}`)
+      setVmSchedulable(cfg.paths.project, vmId, false, `${reason}|proxy=${proxyId}`, { source: 'force' })
+    paused.push(vmId)
+  }
+  return [paused.length && `paused:${paused.join(',')}`, skipped.length && `already_off:${skipped.join(',')}`]
+    .filter(Boolean)
+    .join(' ')
+}
+const geoResumeSlots = (bound, reason, proxyId) => {
+  const resumed = []
+  for (const vmId of bound) {
+    const vm = getVm(cfg.paths.project, vmId)
+    if (vm?.schedule_disabled_reason !== `${reason}|proxy=${proxyId}`) continue
+    setVmSchedulable(cfg.paths.project, vmId, true, null, { source: 'force' })
+    resumed.push(vmId)
+  }
+  return resumed
+}
+const proxyGeoGuard = new ProxyGeoGuard({
+  pool: proxyPool,
+  onGeoChanged: (proxy, bound, info) => {
+    const action = info.action.startsWith('paused:')
+      ? geoPauseSlots(bound, 'geo_changed', proxy.id) || 'no_slot'
+      : info.action
+    dispatchNotify(routingConfig.notify, {
+      title: `代理出口国家变化 ${proxy.label || proxy.id}`,
+      subject: `代理出口国家变化 ${proxy.label || proxy.id}`,
+      text: `${info.old.country_code} → ${info.geo.country_code}（${info.geo.city || info.geo.region || '-'}）\nIP: ${info.geo.ip || '-'}\nISP: ${info.geo.isp || '-'}\n槽: ${bound.join(', ')}\n处理: ${action}`,
+    })
+    return action
+  },
+  onRecovered: (proxy, bound) => {
+    geoResumeSlots(bound, 'geo_changed', proxy.id)
+  },
+  onUnreachable: (proxy, bound, info) => {
+    const action = info.action.startsWith('paused:')
+      ? geoPauseSlots(bound, 'geo_unreachable', proxy.id) || 'no_slot'
+      : info.action
+    dispatchNotify(routingConfig.notify, {
+      title: `代理出口不可达 ${proxy.label || proxy.id}`,
+      subject: `代理出口不可达 ${proxy.label || proxy.id}`,
+      text: `连续 ${info.failures} 次巡检失败\n错误: ${info.error}\n槽: ${bound.join(', ')}\n处理: ${action}`,
+    })
+    return action
+  },
+  onReachable: (proxy, bound, info) => {
+    const resumed = geoResumeSlots(bound, 'geo_unreachable', proxy.id)
+    const action = resumed.length ? `resumed:${resumed.join(',')}` : 'reachable'
+    dispatchNotify(routingConfig.notify, {
+      title: `代理出口已恢复 ${proxy.label || proxy.id}`,
+      subject: `代理出口已恢复 ${proxy.label || proxy.id}`,
+      text: `连续巡检成功\nIP: ${info.geo?.ip || '-'}（${info.geo?.country_code || '-'}）\n槽: ${bound.join(', ')}\n处理: ${action}`,
+    })
+    return action
+  },
+})
+proxyGeoGuard.restart()
+setImmediate(() => {
+  try {
+    const out = proxyPool.reconcileEgress()
+    if (out.repaired?.length) console.log(JSON.stringify({ event: 'egress_reconcile', repaired: out.repaired }))
+  } catch (e) {
+    console.error(JSON.stringify({ event: 'egress_reconcile_failed', error: String(e?.message || e) }))
+  }
+})
 
 // 首次安装的出口池是空的，槽没有可绑出口就起不来。本机出口永远成立，先补上。
 try {
@@ -572,6 +665,8 @@ backupService.onRestored((db) => {
   for (const store of [apiKeyStore, apiEndpointStore, panelUsers, accountQuota, stickyRouter, proxyPool, requestLog]) {
     store.rebind(db)
   }
+  proxyGeoGuard.repo = new ProxyGeoChecksRepo(db)
+  proxyGeoGuard.restart()
   groupsRepo = new GroupsRepo(db)
   apiScheduler.reload(apiEndpointStore.listRaw())
 
@@ -990,6 +1085,7 @@ const handlePanel = createPanelHandler({
   get proxyPool() {
     return proxyPool
   },
+  proxyGeoGuard,
   apiKeyStore,
   apiEndpointStore,
   apiScheduler,
@@ -1251,6 +1347,7 @@ function shutdown(signal) {
     backupService.stopScheduler()
   } catch {}
   try {
+    proxyGeoGuard.stop()
     proxyPool.stopScheduler()
   } catch {}
   try {
