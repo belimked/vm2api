@@ -286,6 +286,7 @@ export function prepareCliHopBody(
     cacheTtl = DEFAULT_CACHE_TTL,
     requestContext = null,
     preserveSystem = false,
+    personaRewrite = false,
     preserveThinkingBlocks = false,
     preserveCallerEnvironment = false,
     autoCompactWindow = null,
@@ -328,8 +329,9 @@ export function prepareCliHopBody(
   if (Object.prototype.hasOwnProperty.call(body, 'top_k')) delete body.top_k
   if (Object.prototype.hasOwnProperty.call(body, 'context_management')) delete body.context_management
   if (Object.prototype.hasOwnProperty.call(body, 'cache_control')) delete body.cache_control
-  if (!requestContext) {
-    body = { ...body, system: officialSystemTemplate(body.system, cacheTtl) }
+  if (!requestContext && !preserveSystem) {
+    // The panel persona owns system[] when it rewrites after this step.
+    if (!personaRewrite) body = { ...body, system: officialSystemTemplate(body.system, cacheTtl) }
     body.messages = officialMessageMarker(body.messages, cacheTtl)
     if (Array.isArray(body.tools)) body = { ...body, tools: stripEagerInputStreaming(body.tools) }
   }

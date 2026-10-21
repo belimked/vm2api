@@ -1304,14 +1304,16 @@ export function createHandleProtocol(deps) {
           )
           let hopBody = body
           if (cliHop) {
-            // The front rewrite already produces the official two-block shape.
-            const panelRewrite = false
+            // Classifier keeps its own system. Official family keeps its inbound
+            // system only when the protocol tab turns passthrough on.
+            const panelRewrite = !requestContext && !officialPassthrough
             hopBody = prepareCliHopBody(repaired ? body : hopBody, {
               stream: upstreamStream,
               repaired,
               cacheTtl: requestedCacheTtl,
               requestContext,
-              preserveSystem: false,
+              preserveSystem: officialPassthrough,
+              personaRewrite: panelRewrite,
               preserveThinkingBlocks: preserveCliHopThinkingBlocks,
               preserveCallerEnvironment,
               autoCompactWindow: ctx.autoCompactWindow,
