@@ -421,6 +421,8 @@ Claude 槽测试走官方 CC 入站（`/v1/messages`）。GPT/Codex 槽测试走
 | GET | `/proxies` |
 | POST | `/proxies/import` · `/proxies/probe` · `/proxies/geo` |
 | GET/PUT | `/proxies/config` |
+| GET | `/proxies/geo-checks` |
+| POST | `/proxies/geo-guard/run` · `/proxies/:id/geo-guard/confirm` |
 | PUT | `/proxies/:id` 改 host/port/账密 |
 | POST | `/proxies/:id/enable` · `/disable` · `/bind` · `/unbind` · `/reveal` · `/geo` |
 | DELETE | `/proxies/:id` |
@@ -439,6 +441,11 @@ kin-egress 的 UDP DNS 与 TCP 一致：上游全部不可达或解析失败时�
 
 `GET /proxies` 和 `GET /proxies/config` 仅向管理员返回 `dns_primary`；租户响应省略该字段（自定义 URL 的路径 / 查询参数可能包含私有令牌），其它配置字段保持不变。
 
+### 出口国家巡检（定制补丁）
+
+`PUT /proxies/config`：`geo_guard_enabled`（默认 false）、`geo_guard_interval_sec`（默认 300，范围 60–86400）、`geo_guard_action`（默认 notify_pause，可选 notify）。只比较出口国家代码（忽略大小写及首尾空格），不比较 IP/城市/地区。仅检查启用、可用且有绑定槽的代理；查询失败不暂停槽。首次成功查询建立基准，国家变化只在新变化时通知；恢复基准或确认新国家只恢复由该代理巡检暂停的槽。
+
+管理员可调用 `GET /proxies/geo-checks?proxy_id=&result=&limit=&before_id=` 分页查看日志（最多 500 条/页，保留七天且总计最多 20000 条），`POST /proxies/geo-guard/run` 立即巡检，`POST /proxies/:id/geo-guard/confirm` 以最近成功查询的地区确认为新基准。迁移 `900_proxy_geo_guard.sql`（早期版本为 `030`，启动时自动改记为 900）新增代理基准列与巡检日志表；回退旧版不会回滚迁移，但旧版 `replaceAll` 显式列清空重写代理行会丢失基准，回退前请备份。
 ### 本地代理（每台 VPS 一条）
 
 本地代理按机器拆分：控制面是 `px-local`，每个集群节点一条 `px-local-<节点 id>`（行上带 `node_id`；管理员另带 `node_name`，租户不返回节点名）。启用了本地代理（`px-local` 存在）后，接入节点时自动建立该节点的行，删除节点时清掉没有绑定的行；升级后首次启动会把仍挂在 `px-local` 上的节点槽迁到各自节点的行，并改写槽位记录里的 `proxy.id`，槽位所在机器的 docker 网络不变。

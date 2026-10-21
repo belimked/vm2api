@@ -13,6 +13,7 @@
 import crypto from 'node:crypto'
 import path from 'node:path'
 import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mjs'
+import { workstationMacAddress } from '../identity/workstation-profile.mjs'
 import {
   boundProxyUrl,
   bridgeName,
@@ -472,10 +473,13 @@ export function slotContainerBody(vm, { image, network, remoteDir, user, routing
   if (isKvmRuntime(vm)) return kvmSlotContainerBody(vm, { image, network, remoteDir, routing, accel, slotUser: user })
   const slotName = displayName(vm.id)
   const mem = parseMemoryBytes(slotMemory(vm, routing))
+  const macAllowed = !['host', 'bridge', 'none'].includes(network) && !String(network || '').startsWith('container:')
+  const mac = macAllowed ? workstationMacAddress(vm) : null
   const cpus = slotDockerCpus(vm)
   const codex = isCodexVm(vm)
   return {
     Image: image,
+    ...(mac ? { MacAddress: mac, NetworkingConfig: { EndpointsConfig: { [network]: { MacAddress: mac } } } } : {}),
     Hostname: String(vm.fingerprint?.hostname || '').trim() || slotName,
     User: user,
     WorkingDir: '/home/kincli',
@@ -739,6 +743,13 @@ export function codexRoleMatches(info, vm) {
   return isCodexVm(vm) ? role === CODEX_SLOT_ROLE : role !== CODEX_SLOT_ROLE
 }
 
+/** A Docker Claude slot created with the control-plane kernel path never starts on a node image. */
+export function kernelEntryMatches(info, vm) {
+  if (isKvmRuntime(vm) || runtimeLabelOf(info) === 'kvm' || isCodexVm(vm)) return true
+  const entry = info?.Config?.Cmd?.[0]
+  return !entry || entry === REMOTE_KERNEL_ENTRY
+}
+
 async function startRemoteTelemetry(docker, vm, name) {
   const target = { ...vm, runtime: { ...(vm.runtime || {}), container: name, type: runtimeKind(vm) } }
   const { Cmd, User } = slotExecCmd(target, [REMOTE_WORKER_BIN, 'telemetry', '--config', '/run/kin/worker.json'], {
@@ -778,6 +789,7 @@ export async function startRemoteSlot(vm, projectRoot, { recreate = false, routi
       existing.Config?.Labels?.['kin.vm.layout'] === SLOT_LAYOUT &&
       runtimeLabelOf(existing) === runtimeKind(vm) &&
       codexRoleMatches(existing, vm) &&
+      kernelEntryMatches(existing, vm) &&
       // Running stays true during Docker restart-policy backoff. Recreate the
       // loop just like the local runtime; otherwise watchdog revival is a no-op.
       !existing.State?.Restarting &&
@@ -853,7 +865,8 @@ export async function reloadRemoteSlot(vm, projectRoot, { routing } = {}) {
       existing.HostConfig?.NetworkMode !== eg.network ||
       existing.Config?.Labels?.['kin.vm.layout'] !== SLOT_LAYOUT ||
       runtimeLabelOf(existing) !== runtimeKind(vm) ||
-      !codexRoleMatches(existing, vm)
+      !codexRoleMatches(existing, vm) ||
+      !kernelEntryMatches(existing, vm)
     ) {
       return startRemoteSlot(vm, projectRoot, { recreate: !!existing, routing })
     }

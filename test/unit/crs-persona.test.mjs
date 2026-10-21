@@ -50,6 +50,7 @@ import { DEFAULT_AGENT_STANDING } from '../../src/lib/identity/persona-template.
 import { officialSystemKinds } from '../../src/lib/protocol/case-features.mjs'
 import { sanitizeInboundCwd } from '../../src/lib/identity/official-cc-system-2.1.241.mjs'
 import { officialMessagesBody } from '../../src/lib/protocol/anthropic-messages.mjs'
+import { workstationKernel } from '../../src/lib/identity/workstation-profile.mjs'
 
 function firstUserContent(out) {
   const content = out.messages?.[0]?.content
@@ -202,7 +203,7 @@ test('overwrite inject writes full official agent and full Environment', () => {
   assert.match(out.system[2].text, /You have been invoked/)
   assert.match(out.system[2].text, /Timezone: America\/Los_Angeles/)
   assert.match(out.system[2].text, /Locale: en_US\.UTF-8/)
-  assert.match(out.system[2].text, /OS Version: Linux 6\.8\.0-51-generic/)
+  assert.ok(out.system[2].text.includes(`OS Version: Linux ${workstationKernel({})}`))
   assert.ok(!out.system[2].text.includes('7.0.0-14-generic'))
   assert.ok(out.system[1].text.includes('# Doing tasks'))
 })

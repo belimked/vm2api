@@ -1,10 +1,8 @@
 # PR/main gate: Node + Go + pinned amd64 payload ELFs + web + native ARM64 deployment.
 name: ci
 
+# Fork: manual only, to keep Actions usage low (GitHub auto-disabled workflows on this fork once).
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 concurrency:
