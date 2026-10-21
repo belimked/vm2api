@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { SLOT_CAPS_NODE } from '../../src/lib/cluster/placement.mjs'
-import { codexRoleMatches, slotContainerBody } from '../../src/lib/cluster/remote-slot.mjs'
+import { codexRoleMatches, kernelEntryMatches, slotContainerBody } from '../../src/lib/cluster/remote-slot.mjs'
 import { REMOTE_KERNEL_ENTRY } from '../../src/lib/vm/slot-engine.mjs'
 import { CODEX_SLOT_ROLE, slotContainerCommand } from '../../src/lib/vm/vm-runtime.mjs'
 import { slotHost } from '../../src/lib/vm/slot-host.mjs'
@@ -99,4 +99,12 @@ test('a failed remote GPT boot is returned and does not start the Codex kernel',
   })
   assert.equal(result, boot)
   assert.equal(kernelStarts, 0)
+})
+
+test('a node Claude container booting the control-plane kernel path is recreated', () => {
+  const broken = { Config: { Cmd: ['/usr/local/bin/kin-kernel', '--gateway-worker'], Labels: { 'kin.vm.runtime': 'docker' } } }
+  const good = { Config: { Cmd: ['/opt/kin/kin-kernel', '--gateway-worker'], Labels: { 'kin.vm.runtime': 'docker' } } }
+  assert.equal(kernelEntryMatches(broken, claude), false)
+  assert.equal(kernelEntryMatches(good, claude), true)
+  assert.equal(kernelEntryMatches({ Config: { Cmd: ['sleep', 'infinity'] } }, gpt), true)
 })
