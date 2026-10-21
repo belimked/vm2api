@@ -966,6 +966,39 @@ export class AccountQuota {
     return true
   }
 
+  // Header windows only refresh on live traffic, and the official-copy debounce keeps a
+  // post-reset 0% out, so a redeemed account would stay gated until the old window ends.
+  applyClaudeReset(accountId, cleared = []) {
+    if (!accountId || !Array.isArray(cleared)) return null
+    const keys = []
+    if (cleared.includes('five_hour')) keys.push('5h')
+    if (cleared.includes('seven_day')) keys.push('7d')
+    const oi = cleared.includes('seven_day_overage_included')
+    if (!keys.length && !oi) return null
+    const acc = this.repo.get(accountId)
+    if (!acc?.unified) return null
+    const at = new Date().toISOString()
+    const open = { utilization: 0, reset: null, status: 'allowed' }
+    acc.unified.headers = acc.unified.headers || {}
+    for (const key of keys) {
+      acc.unified.headers[key] = { ...open }
+      writeOfficialWindow(acc, key, open)
+      if (acc.last_blocked?.window === key) acc.last_blocked = null
+    }
+    if (oi) acc.unified['7d_oi'] = { ...open }
+    acc.unified.headers.sampled_at = at
+    acc.unified.updated_at = at
+    const saved = this.repo.save(acc)
+    this._writeSessionWindow(saved)
+    this._observeUtil(accountId, {
+      u5: keys.includes('5h') ? 0 : null,
+      u7: keys.includes('7d') ? 0 : null,
+      source: 'official',
+    })
+    if (this.headerUnderSafety(saved)) this.clearQuotaExhaustedCooldown(accountId)
+    return saved
+  }
+
   _lastUsedAt(accountId) {
     try {
       const ms = Number(this.runtimeRepo?.get(accountId)?.last_used_at)
