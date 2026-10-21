@@ -191,6 +191,11 @@ export function applyMigrations(db, { migrationsDir } = {}) {
     applied_at TEXT
   )`)
 
+  // Fork-only: geo guard shipped as 030 before upstream claimed 030 for refusal_near.
+  db.prepare(
+    "UPDATE schema_migrations SET version = '900', name = '900_proxy_geo_guard.sql' WHERE version = '030' AND name = '030_proxy_geo_guard.sql'",
+  ).run()
+
   const files = fs.existsSync(dir)
     ? fs
         .readdirSync(dir)
