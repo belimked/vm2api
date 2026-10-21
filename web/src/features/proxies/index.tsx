@@ -15,6 +15,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PageHeader } from '@/components/page-header'
 import { SectionSkeleton } from '@/components/page-skeletons'
@@ -22,6 +23,7 @@ import { QueryGate } from '@/components/query-gate'
 import { meQueryOptions } from '@/features/auth/queries'
 import { ProxyBulkActions } from './proxy-bulk-actions'
 import { ProxyEditDialog } from './proxy-edit-dialog'
+import { ProxyGeoLog } from './proxy-geo-log'
 import { createProxyHover } from './proxy-hover'
 import { ProxyImportPanel } from './proxy-import-panel'
 import { ProxyList } from './proxy-list'
@@ -453,37 +455,48 @@ export function ProxiesPage() {
                 writeRailCollapsed(next)
               }}
             />
-            <ProxyList
-              all={sorted}
-              rows={rows}
-              vms={vms}
-              vmById={vmById}
-              ownerOf={ownerOf}
-              poolLimit={bindLimit}
-              query={query}
-              onQuery={setQuery}
-              filter={filter}
-              onFilter={setFilter}
-              regionText={regionText}
-              onClearRegion={() => setRegion(REGION_ANY)}
-              sortKey={sortKey}
-              sortDir={sortDir}
-              onSort={sortBy}
-              onSortKey={changeSortKey}
-              onSortDir={() =>
-                setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
-              }
-              hover={hover}
-              dragVm={dragVm}
-              pending={{
-                probe: firstOf(probing),
-                geo: firstOf(geoing),
-                copy: firstOf(copying),
-                toggle: firstOf(toggling),
-                binding: bind.isPending || unbind.isPending,
-              }}
-              actions={actions}
-            />
+            <Tabs defaultValue='list' className='min-w-0'>
+              <TabsList>
+                <TabsTrigger value='list'>代理列表</TabsTrigger>
+                <TabsTrigger value='logs'>巡检日志</TabsTrigger>
+              </TabsList>
+              <TabsContent value='list'>
+                <ProxyList
+                  all={sorted}
+                  rows={rows}
+                  vms={vms}
+                  vmById={vmById}
+                  ownerOf={ownerOf}
+                  poolLimit={bindLimit}
+                  query={query}
+                  onQuery={setQuery}
+                  filter={filter}
+                  onFilter={setFilter}
+                  regionText={regionText}
+                  onClearRegion={() => setRegion(REGION_ANY)}
+                  sortKey={sortKey}
+                  sortDir={sortDir}
+                  onSort={sortBy}
+                  onSortKey={changeSortKey}
+                  onSortDir={() =>
+                    setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+                  }
+                  hover={hover}
+                  dragVm={dragVm}
+                  pending={{
+                    probe: firstOf(probing),
+                    geo: firstOf(geoing),
+                    copy: firstOf(copying),
+                    toggle: firstOf(toggling),
+                    binding: bind.isPending || unbind.isPending,
+                  }}
+                  actions={actions}
+                />
+              </TabsContent>
+              <TabsContent value='logs'>
+                <ProxyGeoLog proxies={list} />
+              </TabsContent>
+            </Tabs>
           </div>
         </div>
       </QueryGate>
@@ -503,7 +516,7 @@ export function ProxiesPage() {
             </SheetTitle>
             <SheetDescription className='text-xs'>
               {drawer.kind === 'settings'
-                ? '绑定上限、自动探测、出口 DNS 与时区跟随，对整个代理池生效。'
+                ? '绑定上限、自动探测、出口 DNS、时区跟随与出口巡检，对整个代理池生效。'
                 : '粘贴 SOCKS5 行批量导入，或添加走所在 VPS 出口的本地代理。'}
             </SheetDescription>
           </SheetHeader>
@@ -516,6 +529,9 @@ export function ProxiesPage() {
                 dnsPrimary={String(cfg.dns_primary || 'auto')}
                 dnsDisableSvcbHttps={cfg.dns_disable_svcb_https === true}
                 followProxyTimezone={cfg.follow_proxy_timezone !== false}
+                geoGuardEnabled={cfg.geo_guard_enabled === true}
+                geoGuardInterval={Number(cfg.geo_guard_interval_sec || 300)}
+                geoGuardAction={String(cfg.geo_guard_action || 'notify_pause')}
               />
             ) : (
               <ProxyImportPanel hasLocal={list.some(proxyIsControlLocal)} />
