@@ -32,6 +32,8 @@ export function AboutPane() {
   const changelog = useQuery(changelogQueryOptions())
   const [confirmOpen, setConfirmOpen] = useState(false)
   const data = version.data
+  const checkFailed =
+    version.isError || !!data?.source_error || data?.check_status === 'failed'
   const updateRunning = !!upgradeTarget || data?.upgrade?.state === 'running'
 
   useEffect(() => {
@@ -138,10 +140,12 @@ export function AboutPane() {
             <div>
               <dt className='text-muted-foreground'>GitHub 最新</dt>
               <dd className='flex items-center gap-2 font-mono'>
-                {data?.latest_tag || '—'}
-                {data?.update_available ? (
+                {checkFailed ? '—' : data?.latest_tag || '—'}
+                {checkFailed ? (
+                  <Badge variant='destructive'>检查失败</Badge>
+                ) : data?.update_available ? (
                   <Badge>有更新</Badge>
-                ) : data ? (
+                ) : data?.update_available === false ? (
                   <Badge variant='secondary'>已是最新</Badge>
                 ) : null}
               </dd>
@@ -194,7 +198,9 @@ export function AboutPane() {
         </CardHeader>
         <CardContent className='space-y-3'>
           <p className='text-sm text-muted-foreground'>
-            在宿主机执行。保留 .env / vms / data，不 docker rm 槽。
+            在宿主机执行。保留 .env / vms / data。本地槽同步 kernel 与
+            CLI；集群槽按同一份 kernel、cli-node 和 Go
+            遥测重建镜像并换容器，不改凭证和指纹。
           </p>
           <pre className='overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-xs'>
             {data?.upgrade_command ||
@@ -218,7 +224,10 @@ export function AboutPane() {
             <Button
               size='sm'
               disabled={
-                !data?.update_available || upgrade.isPending || updateRunning
+                checkFailed ||
+                !data?.update_available ||
+                upgrade.isPending ||
+                updateRunning
               }
               onClick={() => setConfirmOpen(true)}
             >

@@ -154,7 +154,8 @@ func TestRunReloadsTelemetryWithoutRestart(t *testing.T) {
 	id1 := strings.Repeat("ab", 32)
 	id2 := strings.Repeat("cd", 32)
 	write := func(enabled bool, device string) {
-		raw := fmt.Sprintf(`{"telemetry":{"enabled":%t,"betas":"thinking-binding-controls-2026-08-01","identity":{"user_id":%q,"platform":"linux","cli_version":"2.1.278","env":{"version":"2.1.278","platform":"linux","shell":"zsh"}}}}`, enabled, device)
+		cpu := "CPU-" + device[:2]
+		raw := fmt.Sprintf(`{"telemetry":{"enabled":%t,"betas":"thinking-binding-controls-2026-08-01","identity":{"user_id":%q,"platform":"linux","cli_version":"2.1.278","env":{"version":"2.1.278","platform":"linux","shell":"zsh","cpu_model":%q,"cpu_cores":8,"memory_bytes":8589934592}}}}`, enabled, device, cpu)
 		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -210,5 +211,40 @@ func TestRunReloadsTelemetryWithoutRestart(t *testing.T) {
 	}
 	if strings.Contains(got, "2.1.241") {
 		t.Fatalf("stale version in %s", got)
+	}
+	if !strings.Contains(got, `"cpu_model":"CPU-cd"`) || !strings.Contains(got, `"memory_bytes":8589934592`) {
+		t.Fatalf("reloaded body missing hardware: %s", got)
+	}
+}
+
+func TestUploadLogKeepsFortyLinesAndDropsIdentity(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Config{ConfigPath: filepath.Join(dir, "worker.json")}
+	payload := Event{EventType: "ClaudeCodeInternalEvent", EventData: map[string]any{
+		"event_name": "tengu_init",
+		"email":      "person@example.com",
+		"device_id":  "abc",
+		"auth":       map[string]any{"account_uuid": "acct", "organization_uuid": "org"},
+		"env":        map[string]any{"platform": "linux"},
+	}}
+	for range 45 {
+		recordUpload(cfg, "batch", "tengu_init", nil, BatchRequest{Events: []Event{payload}})
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "telemetry-upload.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(lines) != uploadLogLines {
+		t.Fatalf("lines=%d", len(lines))
+	}
+	for _, secret := range []string{"person@example.com", "account_uuid", "organization_uuid", "device_id"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("log kept %s", secret)
+		}
+	}
+	if !strings.Contains(text, `"events":[`) || !strings.Contains(text, `"platform":"linux"`) || !strings.Contains(text, "batch tengu_init ok") {
+		t.Fatalf("log lost the upload shape: %s", text)
 	}
 }
