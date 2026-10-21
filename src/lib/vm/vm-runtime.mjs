@@ -18,6 +18,7 @@ import { assertCliHopAllowed, resolveOfficialCcInference } from './slot-engine.m
 import { ensureSlotClaudeOwnership, chownSlotRuntimeFile, replaceSlotOwnedFile } from '../oauth/oauth-credentials.mjs'
 import { materializeWrapCli } from './wrap-cli-runtime.mjs'
 import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mjs'
+import { slotPick, workstationMacAddress } from '../identity/workstation-profile.mjs'
 import { ensureSlotComputer, rememberComputer } from '../identity/slot-computer.mjs'
 import { coerceRfc4122Uuid } from '../identity/rfc4122-uuid.mjs'
 import { boundProxyUrl, ensureProxyEgress, isLocalEgressProxy, slotNetworkForVm } from './egress.mjs'
@@ -56,12 +57,17 @@ export { OS_REGISTRY, OS_CATALOG, OS_ORDER, imageForKernel } from './os-catalog.
 export { normalizeTimezone, normalizeTimezone as normalizeUsTimezone, US_TIMEZONES } from '../core/timezone.mjs'
 export const STANDARD_LOCALE = 'en_US.UTF-8'
 
+/**
+ * Guest OS and zone come from a hash of the slot id, not its ordinal.
+ * Index arithmetic put slot N and slot N+4 on the same distro, kernel, zone
+ * and sku — a mod-4 fleet reads as one cluster instead of N workstations.
+ */
 export function kernelForIndex(i) {
-  return OS_ORDER[(Number(i) - 1) % OS_ORDER.length]
+  return slotPick(OS_ORDER, {}, 'os', `vm-${Number(i) || 0}`)
 }
 
 export function timezoneForIndex(i) {
-  return US_TIMEZONES[(Number(i) - 1) % US_TIMEZONES.length]
+  return slotPick(US_TIMEZONES, {}, 'tz', `vm-${Number(i) || 0}`)
 }
 
 /**
@@ -1071,6 +1077,9 @@ export async function startVmRuntime(vm, projectRoot, { recreate = false, routin
       name,
       '--hostname',
       host,
+      // Docker's own 02:42:* range marks the NIC as a container.
+      '--mac-address',
+      workstationMacAddress(vm),
       '--network',
       netName,
       '--restart',

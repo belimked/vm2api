@@ -315,6 +315,24 @@ unixTest('Rust health and inference authenticate with the namespaced kernel head
   }
 })
 
+unixTest('a node slot kernel gets a longer health timeout than a local one', async () => {
+  const fx = await fixture(async (req, res) => {
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ ok: true, engine: 'rust', healthy: true, ready_slots: 20 }))
+  })
+  try {
+    fx.exec.vm.runtime.kernel_socket = fx.exec.vm.runtime.worker_socket
+    const local = await rustKernelHealth(fx.exec, { timeoutMs: 800 })
+    assert.equal(local.ok, false)
+    fx.exec.vm.node_id = 'node-test'
+    const remote = await rustKernelHealth(fx.exec, { timeoutMs: 800 })
+    assert.equal(remote.ok, true)
+  } finally {
+    await fx.close()
+  }
+})
+
 unixTest('API kernel forwarding uses the header required by its Go authorize handler', async () => {
   const fx = await fixture(async (req, res) => {
     res.setHeader('content-type', 'application/json')

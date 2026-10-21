@@ -57,6 +57,16 @@ export type VmProxySnap = {
   domain_forward?: boolean
   /** 出口地理位置（IPv4）；从未检测过为 null。 */
   geo?: ProxyGeo | null
+  geo_guard?: {
+    base: {
+      country_code: string | null
+      region: string | null
+      at: string | null
+    }
+    status: 'ok' | 'changed' | 'error' | 'unreachable' | null
+    checked_at: string | null
+    reason: string | null
+  }
   /** 公网 IPv6 出口地理位置；从未检测过为 null。 */
   geo_v6?: ProxyGeo | null
   /** 本地代理所在节点：池行是它那台 VPS（控制面为 null），槽位视图是槽所在节点。 */
