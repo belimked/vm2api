@@ -36,6 +36,8 @@ function fixture({
         State: { Running: running, Restarting: restarting },
       }
   const io = {
+    // cus: custom entry check called by startRemoteSlot; fixture containers carry no Cmd.
+    kernelEntryMatches: () => true,
     prepare: async () => ({
       nodeId: target.node_id,
       session: { docker: {}, client: {} },
