@@ -6,6 +6,7 @@ import { getVm, listVms, persistCodexUsage, syncCodexQuotaSchedule } from '../vm
 import { isValidVmId } from '../vm/vm-file.mjs'
 import { isCodexProtocolAllowed, isCodexVm, normalizeCodexRouting } from './codex-route.mjs'
 import { keyAllowsVm, keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
+import { ownerScopeFromRequest, vmMatchesOwnerScope } from '../admin/resource-owner.mjs'
 import { normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { restrictCodexClient } from './codex-restriction.mjs'
 import {
@@ -183,7 +184,7 @@ export function isRetryableSameCodexAccount(
   return false
 }
 
-function applyCodexRebuildBody(body, sessionId, mode) {
+export function applyCodexRebuildBody(body, sessionId, mode) {
   const out = { ...body }
   if (mode !== 'rebuild') return out
   out.prompt_cache_key = sessionId
@@ -207,9 +208,10 @@ function pinnedVmId(req) {
 export function pickCodexCandidates(
   projectRoot,
   req,
-  { stickyRouter = null, sessions = null, body = null, excluded = null, routing = {} } = {},
+  { stickyRouter = null, sessions = null, body = null, excluded = null, routing = {}, ownerScope = null } = {},
 ) {
   const pin = pinnedVmId(req)
+  const owner = ownerScope || ownerScopeFromRequest(req)
   const model = body?.model || null
   const routingPolicy = normalizeCodexRouting(routing.codex || routing).quota
   const scope = keyScopeFromRequest(req)
@@ -237,7 +239,9 @@ export function pickCodexCandidates(
   const stickyKeys = stickyRouter?.collectPoolKeys?.(req, body || {}, { platform: 'openai' }) || []
   const sessionKey = stickyRouter?.extractPoolKey?.(req, body || {}, { platform: 'openai' }) || stickyKeys[0] || null
   const bound = sessionKey ? stickyRouter?.resolve?.(sessionKey) : null
-  const vms = listVms(projectRoot, { codex: { quota: routingPolicy } }).filter((vm) => keyAllowsVm(scope, vm))
+  const vms = listVms(projectRoot, { codex: { quota: routingPolicy } }).filter(
+    (vm) => vmMatchesOwnerScope(vm, owner) && keyAllowsVm(scope, vm),
+  )
   const continuesResponse = !!body?.previous_response_id && !!bound?.vmId
   if (scope.vm_pool_id && vms.length === 0 && !continuesResponse) {
     return { error: 'vm_pool_unavailable', message: '账号池没有可调度的 GPT 槽位', ids: [], candidates: [] }
@@ -516,6 +520,7 @@ export async function handleCodexProtocol({
   captureOutbound = false,
   requestStartedAt = Date.now(),
   accountGate = null,
+  ownerScope = null,
 }) {
   const codex = normalizeCodexRouting(routing.codex)
   const allowed = isCodexProtocolAllowed(protocol, { codex })
@@ -540,7 +545,10 @@ export async function handleCodexProtocol({
       error: { type: 'permission_error', code: restriction.code, message: restriction.message },
     })
   }
-  const converted = toCodexResponses(protocol, ctx.body, codex.convert)
+  const officialCodexPassthrough = codex.official_passthrough === true && restriction.kind === 'official_codex'
+  const converted = toCodexResponses(protocol, ctx.body, codex.convert, {
+    officialPassthrough: officialCodexPassthrough,
+  })
   if (!converted.ok) {
     stats.errors++
     logBag.via = 'codex-kernel'
@@ -566,7 +574,7 @@ export async function handleCodexProtocol({
   })
   const stream = inbound?.stream !== false && ctx.body?.stream !== false
   const inboundSession = sessionFrom(req, converted.body)
-  const sessionMode = outboundSessionMode(routing)
+  const sessionMode = officialCodexPassthrough ? 'rebuild' : outboundSessionMode(routing)
   const callerSession = extractCallerSession({
     inbound: converted.body,
     body: converted.body,
@@ -589,6 +597,7 @@ export async function handleCodexProtocol({
     body: body || converted.body || inbound,
     excluded: new Set(),
     routing,
+    ownerScope,
   }
   const deadline = Date.now() + codexWaitTimeoutMs(routing)
   const gone = clientGoneSignal(req, res)
@@ -1124,6 +1133,7 @@ export async function handleCodexSearch({
   projectRoot,
   stickyRouter = null,
   ops = {},
+  ownerScope = null,
 }) {
   logBag.via = 'codex-search'
   const reject = (status, type, code, message) => {
@@ -1142,7 +1152,7 @@ export async function handleCodexSearch({
   for (const key of CODEX_SEARCH_DROP_FIELDS) delete outbound[key]
   const turnMetadata = headerString(req.headers, 'x-codex-turn-metadata')
   const post = ops.postCodexSearch || postCodexSearch
-  const pickOpts = { stickyRouter, sessions: null, body: outbound, excluded: new Set() }
+  const pickOpts = { stickyRouter, sessions: null, body: outbound, excluded: new Set(), ownerScope }
   const deadline = Date.now() + codexWaitTimeoutMs(routing)
   const gone = clientGoneSignal(req, res)
   let last = null
