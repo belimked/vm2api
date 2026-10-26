@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   CONTEXT_LIMIT_STATUS,
   IMAGE_TOKENS,
+  assessContextLimit,
   checkContextLimit,
   contextWindowFor,
   estimateRequestTokens,
@@ -116,4 +117,12 @@ test('web search results, redacted thinking and unknown binary blocks are not co
   }
   const n = estimateRequestTokens(body)
   assert.ok(n < 2000, `estimate ${n} must not include encrypted/binary payloads`)
+})
+
+test('assessContextLimit returns the estimate for logging even when the request passes', () => {
+  const body = { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'x'.repeat(4000) }] }
+  const out = assessContextLimit(body, {})
+  assert.equal(out.error, null)
+  assert.equal(out.window, 200000)
+  assert.ok(out.estimated >= 1000 && out.estimated <= 1100, `estimate ${out.estimated}`)
 })

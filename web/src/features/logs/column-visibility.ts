@@ -7,6 +7,7 @@ export const LOGS_TABLE_COLUMNS = [
   { id: 'provider', label: '供应商' },
   { id: 'reasoningEffort', label: '思考强度' },
   { id: 'tokens', label: 'Tokens' },
+  { id: 'context', label: '上下文' },
   { id: 'cache', label: '缓存' },
   { id: 'performance', label: '性能' },
   { id: 'cost', label: '成本' },

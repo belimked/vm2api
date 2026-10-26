@@ -209,6 +209,10 @@ export function toUsageLogRow(row, names, chain = []) {
     context1mApplied: row.long_context == null ? null : row.long_context === 1,
     reasoningEffort: row.reasoning_effort ?? null,
     inboundDeviceId: row.inbound_device_id ?? null,
+    /** Upstream-billed prompt size: input + cache read + cache write. 0 when the request never reached upstream. */
+    promptTokens: inputTokens + cacheRead + cacheCreation,
+    /** Gateway pre-flight estimate of the same prompt; the only size available for requests rejected before upstream. */
+    estimatedInputTokens: nullableNum(row.estimated_input_tokens),
     errorClass: row.error_class ?? null,
     errorLabel: row.error_label ?? null,
     errorOwner: row.error_owner ?? null,

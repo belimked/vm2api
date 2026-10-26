@@ -98,10 +98,15 @@ export function contextWindowFor(modelId = '', headers = {}) {
   return base
 }
 
-/** null when the request may proceed, otherwise { status, body } for the client. */
-export function checkContextLimit(body = {}, headers = {}, { margin = CONTEXT_LIMIT_MARGIN } = {}) {
+/** { estimated, window, error }: error is null when the request may proceed. */
+export function assessContextLimit(body = {}, headers = {}, { margin = CONTEXT_LIMIT_MARGIN } = {}) {
   const window = contextWindowFor(body?.model, headers)
   const estimated = estimateRequestTokens(body)
-  if (estimated <= window * margin) return null
-  return contextLimitError({ estimated, window })
+  const error = estimated <= window * margin ? null : contextLimitError({ estimated, window })
+  return { estimated, window, error }
+}
+
+/** null when the request may proceed, otherwise { status, body } for the client. */
+export function checkContextLimit(body = {}, headers = {}, opts = {}) {
+  return assessContextLimit(body, headers, opts).error
 }

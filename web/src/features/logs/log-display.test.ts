@@ -4,6 +4,7 @@ import {
   cacheCostSplit,
   cacheWriteSplit,
   chainItemStatus,
+  contextTokens,
   finalChainItem,
   formatShortDistance,
   latencySegments,
@@ -204,5 +205,23 @@ describe('logs search', () => {
 
   it('counts a time range as one active filter', () => {
     expect(activeFilterCount({ startTime: 1, endTime: 2, model: 'm' })).toBe(2)
+  })
+})
+
+describe('contextTokens', () => {
+  it('prefers the upstream-billed prompt size', () => {
+    expect(contextTokens({ promptTokens: 650_000, estimatedInputTokens: 1_700_000 })).toEqual({
+      value: 650_000,
+      estimated: false,
+    })
+  })
+  it('falls back to the gateway estimate when the request never reached upstream', () => {
+    expect(contextTokens({ promptTokens: 0, estimatedInputTokens: 1_711_187 })).toEqual({
+      value: 1_711_187,
+      estimated: true,
+    })
+  })
+  it('is null for historical rows without either value', () => {
+    expect(contextTokens({ promptTokens: 0, estimatedInputTokens: null })).toBeNull()
   })
 })

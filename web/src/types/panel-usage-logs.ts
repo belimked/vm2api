@@ -99,6 +99,10 @@ export type UsageLogRow = {
   clientSessionId: string | null
   /** 入站剥离前的客户端 device id。 */
   inboundDeviceId: string | null
+  /** 上游实际处理的 prompt 大小：输入 + 缓存读 + 缓存写；未到上游时为 0。 */
+  promptTokens: number
+  /** 网关预检估算的 prompt 大小；被 405 等拦下的请求只有这个值。null = 旧行或非 Messages 路径。 */
+  estimatedInputTokens: number | null
   /** 最终服务的账号展示名（`final_account_id` 优先）。 */
   providerName: string | null
   accountId: string | null

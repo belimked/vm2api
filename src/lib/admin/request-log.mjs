@@ -566,6 +566,10 @@ export class RequestLogStore {
       outbound_session_id: sessionIdForLog(extra.outbound_session_id),
       reasoning_effort: REASONING_EFFORTS.has(extra.reasoning_effort) ? extra.reasoning_effort : null,
       inbound_device_id: sessionIdForLog(extra.inbound_device_id),
+      // Pre-flight prompt estimate (context-limit gate); real size is input + cache_read + cache_creation.
+      estimated_input_tokens: Number.isFinite(Number(extra.estimated_input_tokens))
+        ? Math.max(0, Math.round(Number(extra.estimated_input_tokens)))
+        : null,
       // Gate verdict JSON from intercept-gate; the risk audit groups on it.
       intercept: extra.intercept ? String(extra.intercept).slice(0, 400) : null,
       // sub2api ownership + billing columns
@@ -815,6 +819,9 @@ const EXPORT_COLUMNS = [
   'first_token_ms',
   'input_tokens',
   'output_tokens',
+  'cache_read_tokens',
+  'cache_creation_tokens',
+  'estimated_input_tokens',
   'total_cost',
   'api_key_id',
   'api_key_kind',

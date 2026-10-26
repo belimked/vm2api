@@ -363,3 +363,17 @@ export function latencySegments(input: {
 export function segmentWidth(segment: LatencySegment): number {
   return segment.ms > 0 ? Math.max(segment.percent, 3) : 0
 }
+
+/**
+ * 本次请求的上下文大小。优先上游实际值（输入 + 缓存读 + 缓存写）；
+ * 请求没到上游（405 预检、池错误）时退回网关预估值并标记 estimated。
+ */
+export function contextTokens(
+  row: Pick<UsageLogRow, 'promptTokens' | 'estimatedInputTokens'>
+): { value: number; estimated: boolean } | null {
+  if (row.promptTokens > 0) return { value: row.promptTokens, estimated: false }
+  if (row.estimatedInputTokens != null && row.estimatedInputTokens > 0) {
+    return { value: row.estimatedInputTokens, estimated: true }
+  }
+  return null
+}

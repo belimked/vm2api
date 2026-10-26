@@ -409,6 +409,10 @@ export function SummaryTab({
           </SectionTitle>
           <div className='space-y-3 rounded-lg border bg-card p-4'>
             <div className='space-y-2 text-sm'>
+              <BillingRow label='上下文'>
+                {formatTokenAmount(row.promptTokens)} tokens
+                <span className='text-muted-foreground'>（输入 + 缓存读 + 缓存写）</span>
+              </BillingRow>
               <BillingRow label='输入'>
                 {formatTokenAmount(row.inputTokens)} tokens
                 <Cost value={breakdown?.input} />

@@ -26,7 +26,7 @@ import {
   StatusBadge,
   ThinkingEffortDisplay,
 } from './log-cells'
-import { cacheWriteSplit, copyText, hasFastMode } from './log-display'
+import { cacheWriteSplit, contextTokens, copyText, hasFastMode } from './log-display'
 import { ProviderCell } from './provider-chain-popover'
 import { usageLogsBatchQueryOptions } from './queries'
 import { RelativeTime } from './relative-time'
@@ -111,6 +111,7 @@ function LogRow({
   onOpenDetail: OpenDetail
 }) {
   const nonBilling = isNonBillingEndpoint(row.endpoint)
+  const context = contextTokens(row)
   const cache = cacheWriteSplit({
     total: row.cacheCreationInputTokens,
     fiveM: row.cacheCreation5mInputTokens,
@@ -238,6 +239,38 @@ function LogRow({
               <div>输出: {formatTokenAmount(row.outputTokens)}</div>
             </TooltipContent>
           </Tooltip>
+        </div>
+      )}
+      {hidden('context') ? null : (
+        <div className='min-w-[70px] flex-[0.7] px-1.5 text-right font-mono text-xs'>
+          {context ? (
+            <Tooltip delayDuration={250}>
+              <TooltipTrigger asChild>
+                <div
+                  className={cn(
+                    'cursor-help tabular-nums',
+                    context.estimated && 'text-muted-foreground'
+                  )}
+                >
+                  {context.estimated ? '≈' : ''}
+                  {formatTokenAmount(context.value)}
+                </div>
+              </TooltipTrigger>
+              <TooltipContent align='end' className='space-y-1 text-xs'>
+                {context.estimated ? (
+                  <div>网关预估，请求未发往上游</div>
+                ) : (
+                  <>
+                    <div>输入: {formatTokenAmount(row.inputTokens)}</div>
+                    <div>缓存读: {formatTokenAmount(row.cacheReadInputTokens)}</div>
+                    <div>缓存写: {formatTokenAmount(row.cacheCreationInputTokens)}</div>
+                  </>
+                )}
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            <span className='text-muted-foreground'>—</span>
+          )}
         </div>
       )}
       {hidden('cache') ? null : (
@@ -493,6 +526,14 @@ export function VirtualizedLogsTable({
               {isHidden('tokens') ? null : (
                 <HeadCell className='min-w-[70px] flex-[0.7] text-right'>
                   Tokens
+                </HeadCell>
+              )}
+              {isHidden('context') ? null : (
+                <HeadCell
+                  className='min-w-[70px] flex-[0.7] text-right'
+                  title='本次请求的上下文大小：输入 + 缓存读 + 缓存写；≈ 为网关预估（请求未发往上游）'
+                >
+                  上下文
                 </HeadCell>
               )}
               {isHidden('cache') ? null : (
