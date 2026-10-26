@@ -30,13 +30,57 @@ export function estimateTextTokens(text = '') {
   return Math.ceil(ascii / 4) + other
 }
 
+/** Upstream bills an image by resolution, capped near 1600 tokens; base64 length says nothing. */
+export const IMAGE_TOKENS = 1600
+/** A base64 PDF/document: pages unknown here; a few pages of text is the common case. */
+export const DOCUMENT_TOKENS = 2500
+/** Fields that ride along in the JSON but are not prompt tokens upstream. */
+const SKIP_KEYS = new Set(['signature', 'cache_control', 'id', 'tool_use_id'])
+
+function estimateValueTokens(value) {
+  if (value == null) return 0
+  if (typeof value === 'string') return estimateTextTokens(value)
+  if (typeof value !== 'object') return estimateTextTokens(String(value))
+  if (Array.isArray(value)) {
+    let n = 0
+    for (const item of value) n += estimateValueTokens(item)
+    return n
+  }
+  const type = String(value.type || '')
+  if (type === 'image') return IMAGE_TOKENS
+  if (type === 'document') {
+    const src = value.source || {}
+    if (src.type === 'text' || (typeof src.data === 'string' && src.media_type?.startsWith('text/'))) {
+      return estimateTextTokens(src.data || '')
+    }
+    return DOCUMENT_TOKENS
+  }
+  if (type === 'text' || type === 'thinking' || type === 'redacted_thinking') {
+    return estimateTextTokens(value.text ?? value.thinking ?? '')
+  }
+  if (type === 'tool_use')
+    return estimateTextTokens(value.name || '') + estimateTextTokens(JSON.stringify(value.input ?? {}))
+  if (type === 'tool_result') return estimateValueTokens(value.content)
+  let n = 0
+  for (const [key, child] of Object.entries(value)) {
+    if (SKIP_KEYS.has(key)) continue
+    n += estimateValueTokens(child)
+  }
+  return n
+}
+
+/**
+ * Walks the prompt fields block by block: text-like blocks by characters,
+ * images/documents at a fixed upstream-style cost, signatures ignored.
+ * Blind JSON.stringify counted base64 screenshots as text and over-estimated
+ * a 650k-token Claude Code session as 1.7M.
+ */
 export function estimateRequestTokens(body = {}) {
   if (!body || typeof body !== 'object') return 0
   let total = 0
   for (const key of PROMPT_FIELDS) {
     if (body[key] == null) continue
-    const value = body[key]
-    total += typeof value === 'string' ? estimateTextTokens(value) : estimateTextTokens(JSON.stringify(value))
+    total += key === 'tools' ? estimateTextTokens(JSON.stringify(body[key])) : estimateValueTokens(body[key])
   }
   return total
 }

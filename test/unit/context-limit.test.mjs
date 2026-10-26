@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   CONTEXT_LIMIT_STATUS,
+  IMAGE_TOKENS,
   checkContextLimit,
   contextWindowFor,
   estimateRequestTokens,
@@ -59,4 +60,35 @@ test('upstream "prompt is too long" maps to the same 405 error', () => {
     error: { type: 'invalid_request_error', message: 'messages: roles must alternate' },
   })
   assert.notEqual(other.body.error.code, 'context_length_exceeded')
+})
+
+test('base64 images and signatures are not counted as text', () => {
+  const png = 'A'.repeat(800_000) // ~800 KB screenshot
+  const body = {
+    model: 'claude-opus-5-5',
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'short', signature: 'B'.repeat(4000) },
+          { type: 'tool_use', id: 'toolu_1', name: 'screenshot', input: {} },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_1',
+            content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } }],
+          },
+        ],
+      },
+    ],
+  }
+  const n = estimateRequestTokens(body)
+  assert.ok(n < IMAGE_TOKENS + 100, `estimate ${n} should be about one image, not 200k text tokens`)
+  // Ten screenshots in a 1M-window session must not trip the gate.
+  const many = { ...body, messages: Array.from({ length: 10 }, () => body.messages).flat() }
+  assert.equal(checkContextLimit(many, {}), null)
 })
