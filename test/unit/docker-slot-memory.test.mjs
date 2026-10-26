@@ -44,7 +44,7 @@ function tmpVmRecord(root, id, machine = { memory: '512m' }) {
   )
 }
 
-test('raiseDockerSlotMemory persists only after docker update and inspect succeed', () => {
+test('raiseDockerSlotMemory persists only after docker update and inspect succeed', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-mem-raise-'))
   try {
     const id = 'vm-01'
@@ -65,7 +65,7 @@ test('raiseDockerSlotMemory persists only after docker update and inspect succee
       if (argv.includes('exec')) return { ok: true, stdout: String(1024 ** 3), stderr: '' }
       return { ok: false, stderr: 'unexpected' }
     }
-    const raised = raiseDockerSlotMemory(root, vm, '1g', { execImpl })
+    const raised = await raiseDockerSlotMemory(root, vm, '1g', { execImpl })
     assert.equal(raised.ok, true)
     assert.equal(raised.memory, '1g')
     assert.match(calls.join('\n'), /--memory-swap 1g/)
@@ -78,7 +78,7 @@ test('raiseDockerSlotMemory persists only after docker update and inspect succee
   }
 })
 
-test('raiseDockerSlotMemory does not persist when docker update fails', () => {
+test('raiseDockerSlotMemory does not persist when docker update fails', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-mem-fail-'))
   try {
     const id = 'vm-02'
@@ -92,7 +92,7 @@ test('raiseDockerSlotMemory does not persist when docker update fails', () => {
       }
       return { ok: false, stderr: 'unexpected' }
     }
-    const raised = raiseDockerSlotMemory(root, vm, '1g', { execImpl })
+    const raised = await raiseDockerSlotMemory(root, vm, '1g', { execImpl })
     assert.equal(raised.ok, false)
     assert.equal(raised.code, 'docker_update_failed')
     const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', `${id}.json`), 'utf8'))
@@ -102,9 +102,9 @@ test('raiseDockerSlotMemory does not persist when docker update fails', () => {
   }
 })
 
-test('inspectDockerContainerMemory reads memory, swap and running state', () => {
+test('inspectDockerContainerMemory reads memory, swap and running state', async () => {
   const vm = { id: 'vm-03', runtime_type: 'docker' }
-  const out = inspectDockerContainerMemory(vm, (argv) => {
+  const out = await inspectDockerContainerMemory(vm, (argv) => {
     assert.match(argv.join(' '), /inspect.*HostConfig\.Memory/)
     return { ok: true, stdout: `${2 * 1024 ** 3} ${2 * 1024 ** 3} true`, stderr: '' }
   })
@@ -114,7 +114,7 @@ test('inspectDockerContainerMemory reads memory, swap and running state', () => 
   assert.equal(out.running, true)
 })
 
-test('raiseDockerSlotMemory refuses a stopped container before docker update', () => {
+test('raiseDockerSlotMemory refuses a stopped container before docker update', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-mem-stopped-'))
   try {
     tmpVmRecord(root, 'vm-06')
@@ -123,14 +123,14 @@ test('raiseDockerSlotMemory refuses a stopped container before docker update', (
       assert.ok(argv.includes('inspect'))
       return { ok: true, stdout: `${512 * 1024 ** 2} -1 false` }
     }
-    assert.equal(raiseDockerSlotMemory(root, vm, '1g', { execImpl }).code, 'container_not_running')
+    assert.equal((await raiseDockerSlotMemory(root, vm, '1g', { execImpl })).code, 'container_not_running')
     assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-06.json'), 'utf8')).machine.memory, '512m')
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('raiseDockerSlotMemory refuses a mismatched swap limit without persisting', () => {
+test('raiseDockerSlotMemory refuses a mismatched swap limit without persisting', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-mem-swap-'))
   try {
     tmpVmRecord(root, 'vm-04')
@@ -154,7 +154,7 @@ test('raiseDockerSlotMemory refuses a mismatched swap limit without persisting',
       }
       return { ok: false, stderr: 'unexpected' }
     }
-    const raised = raiseDockerSlotMemory(root, vm, '1g', { execImpl })
+    const raised = await raiseDockerSlotMemory(root, vm, '1g', { execImpl })
     assert.equal(raised.code, 'memory_diverged')
     assert.equal(raised.rollback_succeeded, true)
     assert.equal(rollback, true)
@@ -164,7 +164,7 @@ test('raiseDockerSlotMemory refuses a mismatched swap limit without persisting',
   }
 })
 
-test('raiseDockerSlotMemory refuses a mismatched cgroup limit without persisting', () => {
+test('raiseDockerSlotMemory refuses a mismatched cgroup limit without persisting', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-mem-cgroup-'))
   try {
     tmpVmRecord(root, 'vm-05')
@@ -188,7 +188,7 @@ test('raiseDockerSlotMemory refuses a mismatched cgroup limit without persisting
       if (argv.includes('exec')) return { ok: true, stdout: String(512 * 1024 ** 2) }
       return { ok: false, stderr: 'unexpected' }
     }
-    const raised = raiseDockerSlotMemory(root, vm, '1g', { execImpl })
+    const raised = await raiseDockerSlotMemory(root, vm, '1g', { execImpl })
     assert.equal(raised.code, 'cgroup_memory_diverged')
     assert.equal(raised.rollback_succeeded, true)
     assert.equal(rollback, true)
@@ -198,7 +198,7 @@ test('raiseDockerSlotMemory refuses a mismatched cgroup limit without persisting
   }
 })
 
-test('raiseDockerSlotMemory accepts cgroup v1 limit when memory.max is missing', () => {
+test('raiseDockerSlotMemory accepts cgroup v1 limit when memory.max is missing', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-mem-cgroup-v1-'))
   try {
     const id = 'vm-07'
@@ -218,7 +218,7 @@ test('raiseDockerSlotMemory accepts cgroup v1 limit when memory.max is missing',
       if (argv.join(' ').includes('limit_in_bytes')) return { ok: true, stdout: String(1024 ** 3) }
       return { ok: false, stderr: 'unexpected' }
     }
-    const raised = raiseDockerSlotMemory(root, vm, '1g', { execImpl })
+    const raised = await raiseDockerSlotMemory(root, vm, '1g', { execImpl })
     assert.equal(raised.ok, true)
     assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'vms', `${id}.json`), 'utf8')).machine.memory, '1g')
   } finally {
@@ -226,7 +226,7 @@ test('raiseDockerSlotMemory accepts cgroup v1 limit when memory.max is missing',
   }
 })
 
-test('raiseDockerSlotMemory accepts memory.max=max when HostConfig already matches', () => {
+test('raiseDockerSlotMemory accepts memory.max=max when HostConfig already matches', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-mem-cgroup-max-'))
   try {
     const id = 'vm-08'
@@ -245,7 +245,7 @@ test('raiseDockerSlotMemory accepts memory.max=max when HostConfig already match
       if (argv.includes('exec')) return { ok: true, stdout: 'max' }
       return { ok: false, stderr: 'unexpected' }
     }
-    const raised = raiseDockerSlotMemory(root, vm, '1g', { execImpl })
+    const raised = await raiseDockerSlotMemory(root, vm, '1g', { execImpl })
     assert.equal(raised.ok, true)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })

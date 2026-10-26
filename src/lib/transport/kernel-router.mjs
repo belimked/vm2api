@@ -148,9 +148,12 @@ function rustUnavailableResult(ready) {
 function credentialEnsureFailure(result, ensured) {
   const rawError = ensured?.error
   const error = rawError && typeof rawError === 'object' ? rawError : {}
-  const blob = `${error.code || ''} ${error.message || ''} ${typeof rawError === 'string' ? rawError : ''}`
-  const fatal = /invalid_grant|oauth_revoked|token has been revoked|refresh_token_missing/i.test(blob)
+  const blob = `${error.code || ''} ${error.oauth_code || ''} ${error.message || ''} ${typeof rawError === 'string' ? rawError : ''}`
+  const fatal = /invalid_grant|invalid_refresh_token|oauth_revoked|token has been revoked|refresh_token_missing/i.test(
+    blob,
+  )
   const revoked = /token has been revoked|oauth_revoked/i.test(blob)
+  const grantDead = /invalid_grant|invalid_refresh_token/i.test(blob)
   return {
     ...result,
     ok: false,
@@ -164,7 +167,9 @@ function credentialEnsureFailure(result, ensured) {
         code: fatal
           ? revoked
             ? 'oauth_revoked'
-            : error.code || 'invalid_grant'
+            : grantDead
+              ? 'invalid_grant'
+              : error.code || 'invalid_grant'
           : error.code || 'credential_refresh_failed',
         message: fatal
           ? revoked

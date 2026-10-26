@@ -347,6 +347,49 @@ unixTest('failed Go credential ensure is not followed by a blind Rust retry', as
     else process.env.KIN_KERNEL_BIN = previous
   }
 })
+unixTest('worker refresh_failed carrying oauth_code invalid_grant is fatal and parks the slot', async () => {
+  const previous = process.env.KIN_KERNEL_BIN
+  process.env.KIN_KERNEL_BIN = '/bin/true'
+  const fx = await kernelFixture((_req, res) => {
+    res.writeHead(401, { 'content-type': 'application/json' })
+    res.end(
+      JSON.stringify({
+        type: 'error',
+        error: { type: 'worker_error', code: 'needs_refresh', message: 'credential needs refresh' },
+      }),
+    )
+  })
+  try {
+    const result = await dispatchCallInference({
+      exec: fx.exec,
+      body: { model: 'claude-haiku-4-5-20251001', messages: [{ role: 'user', content: 'hi' }] },
+      routing: { inference: { engine: 'rust' } },
+      ensureRust: async () => ({ ok: true }),
+      recycleWrap: () => {},
+      ensureCredential: async () => ({
+        ok: false,
+        status: 400,
+        error: {
+          code: 'refresh_failed',
+          message: 'OAuth refresh failed (invalid_grant): Refresh token not found or invalid',
+          oauth_code: 'invalid_grant',
+          upstream_status: 400,
+          retryable: false,
+        },
+      }),
+    })
+    assert.equal(result.credential_ensure_failed, true)
+    assert.equal(result.status, 401)
+    assert.equal(result.terminalState, 'rejected')
+    assert.equal(result.committed, false)
+    assert.equal(result.body.error.type, 'authentication_error')
+    assert.equal(result.body.error.code, 'invalid_grant')
+  } finally {
+    await fx.close()
+    if (previous == null) delete process.env.KIN_KERNEL_BIN
+    else process.env.KIN_KERNEL_BIN = previous
+  }
+})
 unixTest('unhealthy rust does not fall back to go', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-fb-'))
   const slot = path.join(root, 'vm-01')

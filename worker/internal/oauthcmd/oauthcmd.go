@@ -86,7 +86,7 @@ func Run(args []string, stdin io.Reader, stdout io.Writer) int {
 	if op == "refresh" {
 		result, err := refresher.Ensure(ctx, force)
 		if err != nil {
-			return writeAndReturn(stdout, errorEnvelope(refreshErrorStatus(err), classifyError(err), errorMessage(classifyError(err))), 0)
+			return writeAndReturn(stdout, refreshErrorEnvelope(err), 0)
 		}
 		return writeAndReturn(stdout, responseEnvelope{
 			OK:     true,
@@ -372,6 +372,29 @@ func classifyError(err error) string {
 	default:
 		return "upstream_transport_error"
 	}
+}
+
+// refreshErrorEnvelope keeps code refresh_failed for compatibility but carries the
+// OAuth error (invalid_grant, …) in message, oauth_code and retryable so the
+// control plane can tell a dead grant from a transient failure and park the slot.
+// The message only ever holds the upstream error code/description, never tokens.
+func refreshErrorEnvelope(err error) responseEnvelope {
+	code := classifyError(err)
+	envelope := errorEnvelope(refreshErrorStatus(err), code, errorMessage(code))
+	var refreshErr *kinoauth.RefreshError
+	if code != "refresh_failed" || !errors.As(err, &refreshErr) {
+		return envelope
+	}
+	envelope.Body = map[string]any{
+		"error": map[string]any{
+			"code":            code,
+			"message":         refreshErr.Error(),
+			"oauth_code":      refreshErr.Code,
+			"upstream_status": refreshErr.Status,
+			"retryable":       refreshErr.Retryable,
+		},
+	}
+	return envelope
 }
 
 func refreshErrorStatus(err error) int {

@@ -337,3 +337,55 @@ func decodeOutput(t *testing.T, output *bytes.Buffer, envelope *responseEnvelope
 		t.Fatalf("decode output: %v; output=%s", err, output.String())
 	}
 }
+
+func TestRefreshInvalidGrantSurfacesOAuthCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}`))
+	}))
+	defer server.Close()
+
+	configPath, _ := testConfig(t, server.URL, server.URL, nil)
+	credPath := filepath.Join(filepath.Dir(configPath), "credentials.json")
+	saveCredential(t, credPath, credential.Credential{
+		AccessToken:  "secret-access",
+		RefreshToken: "secret-refresh",
+		ExpiresAt:    time.Now().Add(-time.Minute).UnixMilli(),
+	})
+
+	var output bytes.Buffer
+	if code := Run([]string{"refresh", "--config", configPath}, nil, &output); code != 0 {
+		t.Fatalf("exit code = %d, output = %s", code, output.String())
+	}
+	raw := output.String()
+	if strings.Contains(raw, "secret-access") || strings.Contains(raw, "secret-refresh") {
+		t.Fatalf("refresh output leaked token: %s", raw)
+	}
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Status int  `json:"status"`
+		Body   struct {
+			Error struct {
+				Code           string `json:"code"`
+				Message        string `json:"message"`
+				OAuthCode      string `json:"oauth_code"`
+				UpstreamStatus int    `json:"upstream_status"`
+				Retryable      bool   `json:"retryable"`
+			} `json:"error"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode: %v (%s)", err, raw)
+	}
+	if envelope.OK || envelope.Status != http.StatusBadRequest {
+		t.Fatalf("envelope = %+v", envelope)
+	}
+	e := envelope.Body.Error
+	if e.Code != "refresh_failed" || e.OAuthCode != "invalid_grant" || e.UpstreamStatus != 400 || e.Retryable {
+		t.Fatalf("error = %+v", e)
+	}
+	if !strings.Contains(e.Message, "invalid_grant") || !strings.Contains(e.Message, "Refresh token not found") {
+		t.Fatalf("message = %q", e.Message)
+	}
+}

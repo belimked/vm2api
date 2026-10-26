@@ -507,8 +507,8 @@ export class FailoverRunner {
     }
     const after = readWorkerCredentialFile(exec.homeDir)
     const afterRefresh = String(after?.refresh_token || '')
-    const blob = `${refreshed?.error?.code || ''} ${refreshed?.error?.message || ''} ${refreshed?.refresh_class || ''}`
-    const grantDead = /invalid_grant|token has been revoked|oauth_revoked/i.test(blob)
+    const blob = `${refreshed?.error?.code || ''} ${refreshed?.error?.oauth_code || ''} ${refreshed?.error?.message || ''} ${refreshed?.refresh_class || ''}`
+    const grantDead = /invalid_grant|invalid_refresh_token|token has been revoked|oauth_revoked/i.test(blob)
     if (!refreshed?.ok && grantDead && afterRefresh === beforeRefresh) return permanentOAuthRevoke(policy)
     if (refreshed?.ok || (beforeRefresh && afterRefresh && afterRefresh !== beforeRefresh)) {
       return { ...policy, retrySameAccount: true, action: 'continue', cooldownUntil: null }

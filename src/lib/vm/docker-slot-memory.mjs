@@ -1,8 +1,12 @@
 /**
  * Live Docker memory raise for existing slots: `docker update` first, persist
  * machine.memory / runtime.memory only after the container limit matches.
+ *
+ * Every docker call is async: a node slot's DOCKER_HOST is a socket relayed by
+ * this very process, so a blocking execFileSync would starve the relay and
+ * time out (`spawnSync docker ETIMEDOUT`).
  */
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 
 import { slotHost } from './slot-host.mjs'
 import { containerName } from './vm-runtime.mjs'
@@ -11,22 +15,22 @@ import { memoryMiB, slotMemory, validateVmConfigPatch, VM_MEMORY_OPTIONS } from 
 import { patchVmRecord } from './vm-registry.mjs'
 
 function defaultExec(argv, opts = {}) {
-  try {
-    const out = execFileSync(argv[0], argv.slice(1), {
-      encoding: 'utf8',
-      timeout: opts.timeout ?? 15_000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: opts.env || process.env,
-    })
-    return { ok: true, stdout: String(out || '').trim(), stderr: '' }
-  } catch (error) {
-    return {
-      ok: false,
-      stdout: String(error.stdout || '').trim(),
-      stderr: String(error.stderr || error.message || '').trim(),
-      code: error.status,
-    }
-  }
+  return new Promise((resolve) => {
+    execFile(
+      argv[0],
+      argv.slice(1),
+      { encoding: 'utf8', timeout: opts.timeout ?? 15_000, env: opts.env || process.env },
+      (error, stdout, stderr) => {
+        if (!error) return resolve({ ok: true, stdout: String(stdout || '').trim(), stderr: '' })
+        resolve({
+          ok: false,
+          stdout: String(stdout || '').trim(),
+          stderr: String(stderr || error.message || '').trim(),
+          code: error.code,
+        })
+      },
+    )
+  })
 }
 
 export function formatDockerMemoryBytes(bytes) {
@@ -50,7 +54,7 @@ export function sameMemoryLimit(a, b) {
   )
 }
 
-function dockerExec(vm, argv, execImpl, timeout) {
+async function dockerExec(vm, argv, execImpl, timeout) {
   const env = slotHost(vm).dockerEnv()
   return execImpl(argv, { timeout, ...(env ? { env } : {}) })
 }
@@ -76,13 +80,13 @@ export function parseCgroupMemoryLimit(raw) {
   return { kind: 'unreadable' }
 }
 
-export function readContainerCgroupMemoryLimit(vm, containerId, execImpl) {
-  const v2 = dockerExec(vm, ['docker', 'exec', containerId, 'cat', '/sys/fs/cgroup/memory.max'], execImpl, 10_000)
+export async function readContainerCgroupMemoryLimit(vm, containerId, execImpl) {
+  const v2 = await dockerExec(vm, ['docker', 'exec', containerId, 'cat', '/sys/fs/cgroup/memory.max'], execImpl, 10_000)
   if (v2.ok) {
     const parsed = parseCgroupMemoryLimit(v2.stdout)
     if (parsed.kind !== 'unreadable') return parsed
   }
-  const v1 = dockerExec(
+  const v1 = await dockerExec(
     vm,
     ['docker', 'exec', containerId, 'cat', '/sys/fs/cgroup/memory/memory.limit_in_bytes'],
     execImpl,
@@ -95,17 +99,17 @@ export function readContainerCgroupMemoryLimit(vm, containerId, execImpl) {
   return { kind: 'unreadable' }
 }
 
-function rollbackDockerMemory(vm, before, execImpl) {
+async function rollbackDockerMemory(vm, before, execImpl) {
   const mem = before.memory
   const swap =
     before.swapBytes > 0 && before.swapBytes !== before.bytes ? formatDockerMemoryBytes(before.swapBytes) || mem : mem
   const name = containerName(vm.id)
-  const r = dockerExec(vm, ['docker', 'update', '--memory', mem, '--memory-swap', swap, name], execImpl, 15_000)
+  const r = await dockerExec(vm, ['docker', 'update', '--memory', mem, '--memory-swap', swap, name], execImpl, 15_000)
   return r.ok
 }
 
-function failAfterDockerUpdate(vm, before, execImpl, failure) {
-  const rollbackOk = rollbackDockerMemory(vm, before, execImpl)
+async function failAfterDockerUpdate(vm, before, execImpl, failure) {
+  const rollbackOk = await rollbackDockerMemory(vm, before, execImpl)
   const rollbackNote = rollbackOk
     ? '已用 docker update 回滚至扩容前限额，vm 配置未写入。'
     : '自动回滚 docker update 失败，请手动核对容器 HostConfig 与面板配置是否一致。'
@@ -117,9 +121,9 @@ function failAfterDockerUpdate(vm, before, execImpl, failure) {
   }
 }
 
-export function inspectDockerContainerMemory(vm, execImpl = defaultExec) {
+export async function inspectDockerContainerMemory(vm, execImpl = defaultExec) {
   const name = containerName(vm?.id)
-  const r = dockerExec(
+  const r = await dockerExec(
     vm,
     ['docker', 'inspect', '-f', '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.State.Running}}', name],
     execImpl,
@@ -177,20 +181,30 @@ export function validateDockerMemoryRaise(vm, requestedMemory, routing) {
   return { ok: true, memory: target, previous: configured }
 }
 
-export function raiseDockerSlotMemory(projectRoot, vm, requestedMemory, { routing, execImpl = defaultExec } = {}) {
+export async function raiseDockerSlotMemory(
+  projectRoot,
+  vm,
+  requestedMemory,
+  { routing, execImpl = defaultExec } = {},
+) {
   const validated = validateDockerMemoryRaise(vm, requestedMemory, routing)
   if (!validated.ok) return validated
 
   const mem = validated.memory
   const name = containerName(vm.id)
-  const before = inspectDockerContainerMemory(vm, execImpl)
+  const before = await inspectDockerContainerMemory(vm, execImpl)
   if (!before.ok) return before
   if (!before.running) {
     return { ok: false, code: 'container_not_running', message: '容器未运行，无法验证在线扩容' }
   }
-  const update = dockerExec(vm, ['docker', 'update', '--memory', mem, '--memory-swap', mem, name], execImpl, 15_000)
+  const update = await dockerExec(
+    vm,
+    ['docker', 'update', '--memory', mem, '--memory-swap', mem, name],
+    execImpl,
+    15_000,
+  )
   if (!update.ok) {
-    const inspected = inspectDockerContainerMemory(vm, execImpl)
+    const inspected = await inspectDockerContainerMemory(vm, execImpl)
     return {
       ok: false,
       code: 'docker_update_failed',
@@ -200,7 +214,7 @@ export function raiseDockerSlotMemory(projectRoot, vm, requestedMemory, { routin
     }
   }
 
-  const inspected = inspectDockerContainerMemory(vm, execImpl)
+  const inspected = await inspectDockerContainerMemory(vm, execImpl)
   if (!inspected.ok) {
     return failAfterDockerUpdate(vm, before, execImpl, {
       ok: false,
@@ -219,7 +233,7 @@ export function raiseDockerSlotMemory(projectRoot, vm, requestedMemory, { routin
       container_memory: inspected.memory,
     })
   }
-  const cgroup = readContainerCgroupMemoryLimit(vm, name, execImpl)
+  const cgroup = await readContainerCgroupMemoryLimit(vm, name, execImpl)
   if (cgroup.kind === 'limited' && cgroup.bytes !== requestedBytes) {
     return failAfterDockerUpdate(vm, before, execImpl, {
       ok: false,

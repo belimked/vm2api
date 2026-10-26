@@ -774,9 +774,10 @@ export function clearVmAuthCooldown(vmPath) {
 export function classifyCredentialRefresh(result) {
   if (result?.ok) return result.refreshed ? 'refreshed' : 'already_fresh'
   const code = String(result?.error?.code || result?.error_code || '')
+  const oauthCode = String(result?.error?.oauth_code || '')
   const message = String(result?.error?.message || result?.message || result?.error || '')
   const status = Number(result?.status) || 0
-  const blob = `${code} ${message}`.toLowerCase()
+  const blob = `${code} ${oauthCode} ${message}`.toLowerCase()
   if (
     /invalid_grant|invalid_refresh_token|refresh_token_missing|refresh token not found|token has been revoked|oauth_revoked|oauth_no_refresh/.test(
       blob,
@@ -797,7 +798,7 @@ export function classifyCredentialRefresh(result) {
 export function refreshErrorCodeOf(result) {
   const code = String(result?.error?.code || result?.error_code || '').trim()
   const message = String(result?.error?.message || result?.message || '')
-  const blob = `${code} ${message}`
+  const blob = `${code} ${result?.error?.oauth_code || ''} ${message}`
   if (/invalid_grant/i.test(blob)) return 'invalid_grant'
   if (/invalid_refresh_token/i.test(blob)) return 'invalid_refresh_token'
   if (/refresh_token_missing|refresh token not found/i.test(blob)) return 'refresh_token_missing'
