@@ -35,7 +35,8 @@ export const IMAGE_TOKENS = 1600
 /** A base64 PDF/document: pages unknown here; a few pages of text is the common case. */
 export const DOCUMENT_TOKENS = 2500
 /** Fields that ride along in the JSON but are not prompt tokens upstream. */
-const SKIP_KEYS = new Set(['signature', 'cache_control', 'id', 'tool_use_id'])
+const SKIP_KEYS = new Set(['signature', 'cache_control', 'id', 'tool_use_id', 'encrypted_content', 'encrypted_index'])
+const BASE64_SOURCE = /^(base64|file|url)$/
 
 function estimateValueTokens(value) {
   if (value == null) return 0
@@ -61,6 +62,10 @@ function estimateValueTokens(value) {
   if (type === 'tool_use')
     return estimateTextTokens(value.name || '') + estimateTextTokens(JSON.stringify(value.input ?? {}))
   if (type === 'tool_result') return estimateValueTokens(value.content)
+  // Unknown block carrying a binary source (future media types): never count its payload as text.
+  if (value.source && typeof value.source === 'object' && BASE64_SOURCE.test(String(value.source.type || ''))) {
+    return IMAGE_TOKENS
+  }
   let n = 0
   for (const [key, child] of Object.entries(value)) {
     if (SKIP_KEYS.has(key)) continue

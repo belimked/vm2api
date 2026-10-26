@@ -92,3 +92,28 @@ test('base64 images and signatures are not counted as text', () => {
   const many = { ...body, messages: Array.from({ length: 10 }, () => body.messages).flat() }
   assert.equal(checkContextLimit(many, {}), null)
 })
+
+test('web search results, redacted thinking and unknown binary blocks are not counted as text', () => {
+  const body = {
+    model: 'claude-sonnet-4-5',
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'redacted_thinking', data: 'C'.repeat(300_000) },
+          { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'vm2api' } },
+          {
+            type: 'web_search_tool_result',
+            tool_use_id: 'srvtoolu_1',
+            content: [
+              { type: 'web_search_result', url: 'https://x', title: 't', encrypted_content: 'D'.repeat(400_000) },
+            ],
+          },
+          { type: 'video', source: { type: 'base64', media_type: 'video/mp4', data: 'E'.repeat(900_000) } },
+        ],
+      },
+    ],
+  }
+  const n = estimateRequestTokens(body)
+  assert.ok(n < 2000, `estimate ${n} must not include encrypted/binary payloads`)
+})
