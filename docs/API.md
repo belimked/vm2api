@@ -305,6 +305,7 @@ curl -sS http://127.0.0.1:8787/health
 | `cli_error` / `kernel_error` | 502 | 本地 CLI / 内核失败，不写账号冷却 |
 | `kernel_unavailable` | 503 | CLI 正在恢复或恢复预算耗尽；换到可用 VM |
 | `upstream_timeout` | 504 | 上游或 job 静默超时 |
+| `context_length_exceeded` | 405 | 上下文超出模型窗口：入站预估明显超限（字符估算，超过窗口 1.2 倍才拦）在调度前直接返回；上游 400 `prompt is too long` 也映射为此码。客户端应压缩上下文或新开会话，不要重试 |
 
 上游 400/404、401/403、429、5xx 分别保留 `upstream_invalid_request`、`upstream_auth_error`、`upstream_rate_limit`、`upstream_error`（过载为 `upstream_overloaded` / 529）。一次 native job 只发一次上游请求；CLI 不做隐藏重试、换模型或流式转非流式，重放预算由 Node 统一计数。
 

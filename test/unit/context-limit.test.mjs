@@ -1,0 +1,62 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  CONTEXT_LIMIT_STATUS,
+  checkContextLimit,
+  contextWindowFor,
+  estimateRequestTokens,
+  estimateTextTokens,
+} from '../../src/lib/protocol/context-limit.mjs'
+import { mapUpstreamError } from '../../src/lib/core/errors.mjs'
+
+test('estimateTextTokens counts ascii at 4 chars/token and CJK at 1 char/token', () => {
+  assert.equal(estimateTextTokens('abcdefgh'), 2)
+  assert.equal(estimateTextTokens('你好世界'), 4)
+  assert.equal(estimateTextTokens(''), 0)
+})
+
+test('estimateRequestTokens walks system, messages and tools', () => {
+  const body = {
+    model: 'claude-sonnet-4-5',
+    system: 'a'.repeat(400),
+    messages: [{ role: 'user', content: 'b'.repeat(400) }],
+    tools: [{ name: 't', input_schema: { type: 'object' } }],
+  }
+  const n = estimateRequestTokens(body)
+  assert.ok(n > 200 && n < 260, `estimate ${n}`)
+})
+
+test('contextWindowFor defaults to the model window and honours the 1M beta', () => {
+  assert.equal(contextWindowFor('claude-sonnet-4-5', {}), 200000)
+  assert.equal(contextWindowFor('claude-sonnet-4-5', { 'anthropic-beta': 'context-1m-2025-08-07' }), 1000000)
+  assert.equal(contextWindowFor('claude-sonnet-4-5[1m]', {}), 1000000)
+})
+
+test('checkContextLimit rejects only when clearly over the window', () => {
+  const small = { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'hi' }] }
+  assert.equal(checkContextLimit(small, {}), null)
+  const nearLimit = { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'x'.repeat(4 * 220_000) }] }
+  assert.equal(checkContextLimit(nearLimit, {}), null, '220k on a 200k window stays below the 1.2 margin')
+  const over = { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'x'.repeat(4 * 260_000) }] }
+  const rejected = checkContextLimit(over, {})
+  assert.equal(rejected.status, CONTEXT_LIMIT_STATUS)
+  assert.equal(rejected.body.error.code, 'context_length_exceeded')
+  assert.equal(rejected.body.error.type, 'invalid_request_error')
+  assert.match(rejected.body.error.message, /压缩上下文|新开会话/)
+  assert.equal(rejected.body.error.details.context_window, 200000)
+  assert.ok(rejected.body.error.details.estimated_tokens > 200000)
+  assert.equal(checkContextLimit(over, { 'anthropic-beta': 'context-1m-2025-08-07' }), null)
+})
+
+test('upstream "prompt is too long" maps to the same 405 error', () => {
+  const mapped = mapUpstreamError(400, {
+    error: { type: 'invalid_request_error', message: 'prompt is too long: 213445 tokens > 200000 maximum' },
+  })
+  assert.equal(mapped.status, 405)
+  assert.equal(mapped.body.error.code, 'context_length_exceeded')
+  assert.match(mapped.body.error.details.upstream_message, /213445 tokens/)
+  const other = mapUpstreamError(400, {
+    error: { type: 'invalid_request_error', message: 'messages: roles must alternate' },
+  })
+  assert.notEqual(other.body.error.code, 'context_length_exceeded')
+})

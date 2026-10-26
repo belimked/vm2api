@@ -40,6 +40,7 @@ export const ErrorCode = {
   INVALID_FIELD: 'invalid_field',
   INVALID_MESSAGES: 'invalid_messages',
   INVALID_CONTENT: 'invalid_content',
+  CONTEXT_LENGTH_EXCEEDED: 'context_length_exceeded',
   // model
   MODEL_REQUIRED: 'model_required',
   MODEL_NOT_SUPPORTED: 'model_not_supported',
@@ -249,6 +250,39 @@ export function retryAfterSeconds(value, now = Date.now()) {
   return Math.max(1, Math.ceil(secs))
 }
 
+export const CONTEXT_LIMIT_STATUS = 405
+export const UPSTREAM_CONTEXT_LIMIT_PATTERNS = [
+  /prompt is too long/i,
+  /exceeds? (the )?(model'?s? )?(maximum )?context/i,
+  /context (window|length) (limit )?exceeded/i,
+  /input (length|tokens?) .*exceed/i,
+  /too many (total )?tokens/i,
+  /maximum context length is \d+ tokens/i,
+]
+
+export function isUpstreamContextLimitMessage(message = '') {
+  const s = String(message || '')
+  return UPSTREAM_CONTEXT_LIMIT_PATTERNS.some((re) => re.test(s))
+}
+
+/** Prompt over the model context window: pre-flight estimate or upstream 400 both land here. */
+export function contextLimitError({ estimated = null, window = null, upstreamMessage = null } = {}) {
+  const parts = ['上下文超出模型限制']
+  if (estimated && window) parts.push(`（约 ${estimated} tokens，上限 ${window}）`)
+  parts.push('。请压缩上下文（/compact）或新开会话。')
+  const details = {}
+  if (estimated) details.estimated_tokens = estimated
+  if (window) details.context_window = window
+  if (upstreamMessage) details.upstream_message = String(upstreamMessage).slice(0, 300)
+  return makeError({
+    type: ErrorType.INVALID_REQUEST,
+    code: ErrorCode.CONTEXT_LENGTH_EXCEEDED,
+    message: parts.join(''),
+    status: CONTEXT_LIMIT_STATUS,
+    details,
+  })
+}
+
 export function makeError({
   type = ErrorType.API,
   code = 'unknown_error',
@@ -453,6 +487,13 @@ export function mapUpstreamError(status, body, headers = {}) {
     })
   }
 
+  // Upstream rejected the prompt for size: tell the client to compact or start over.
+  if (
+    inboundCode === ErrorCode.CONTEXT_LENGTH_EXCEEDED ||
+    ((status === 400 || status === 413) && isUpstreamContextLimitMessage(msg))
+  ) {
+    return contextLimitError({ upstreamMessage: msg })
+  }
   const poolKind = poolErrorKind(inboundCode, msg)
   if (poolKind) return poolClientError(poolKind)
   if (isClientCancelledCode(inboundCode, msg)) {

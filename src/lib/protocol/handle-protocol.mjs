@@ -45,6 +45,7 @@ import { detectInboundPlatform } from './platform-detect.mjs'
 import { normalizeCodexRouting } from './codex-route.mjs'
 import { applyCodexInboundModelRewrite } from './codex-model-mapping.mjs'
 import { hasClaudeCode1mSuffix } from './context-1m.mjs'
+import { checkContextLimit } from './context-limit.mjs'
 import {
   DEFAULT_HEALTH_PROBE,
   isHealthRealBypass,
@@ -678,6 +679,13 @@ export function createHandleProtocol(deps) {
       logBag.error_code = errorResult.body?.error?.code || 'model_not_supported'
       logBag.error_message = errorResult.body?.error?.message || null
       return json(res, errorResult.status, errorResult.body)
+    }
+    const contextLimit = checkContextLimit(ctx.body, req.headers)
+    if (contextLimit) {
+      stats.errors++
+      logBag.error_code = contextLimit.body?.error?.code || ErrorCode.CONTEXT_LENGTH_EXCEEDED
+      logBag.error_message = contextLimit.body?.error?.message || null
+      return json(res, contextLimit.status, contextLimit.body)
     }
     const keyScope = keyScopeFromRequest(req)
     const poolDenial = vmPoolDenial(keyScope)
