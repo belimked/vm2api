@@ -26,7 +26,7 @@ import {
   StatusBadge,
   ThinkingEffortDisplay,
 } from './log-cells'
-import { cacheWriteSplit, contextTokens, copyText, hasFastMode } from './log-display'
+import { cacheWriteSplit, copyText, hasFastMode } from './log-display'
 import { ProviderCell } from './provider-chain-popover'
 import { usageLogsBatchQueryOptions } from './queries'
 import { RelativeTime } from './relative-time'
@@ -111,7 +111,6 @@ function LogRow({
   onOpenDetail: OpenDetail
 }) {
   const nonBilling = isNonBillingEndpoint(row.endpoint)
-  const context = contextTokens(row)
   const cache = cacheWriteSplit({
     total: row.cacheCreationInputTokens,
     fiveM: row.cacheCreation5mInputTokens,
@@ -243,34 +242,32 @@ function LogRow({
       )}
       {hidden('context') ? null : (
         <div className='min-w-[70px] flex-[0.7] px-1.5 text-right font-mono text-xs'>
-          {context ? (
-            <Tooltip delayDuration={250}>
-              <TooltipTrigger asChild>
-                <div
-                  className={cn(
-                    'cursor-help tabular-nums',
-                    context.estimated && 'text-muted-foreground'
-                  )}
-                >
-                  {context.estimated ? '≈' : ''}
-                  {formatTokenAmount(context.value)}
-                </div>
-              </TooltipTrigger>
-              <TooltipContent align='end' className='space-y-1 text-xs'>
-                {context.estimated ? (
-                  <div>网关预估，请求未发往上游</div>
-                ) : (
-                  <>
-                    <div>输入: {formatTokenAmount(row.inputTokens)}</div>
-                    <div>缓存读: {formatTokenAmount(row.cacheReadInputTokens)}</div>
-                    <div>缓存写: {formatTokenAmount(row.cacheCreationInputTokens)}</div>
-                  </>
-                )}
-              </TooltipContent>
-            </Tooltip>
-          ) : (
-            <span className='text-muted-foreground'>—</span>
-          )}
+          <Tooltip delayDuration={250}>
+            <TooltipTrigger asChild>
+              <div className='flex cursor-help flex-col items-end leading-tight tabular-nums'>
+                <span>
+                  {row.promptTokens > 0 ? formatTokenAmount(row.promptTokens) : '—'}
+                </span>
+                <span className='text-muted-foreground'>
+                  {row.estimatedInputTokens != null
+                    ? `≈${formatTokenAmount(row.estimatedInputTokens)}`
+                    : '—'}
+                </span>
+              </div>
+            </TooltipTrigger>
+            <TooltipContent align='end' className='space-y-1 text-xs'>
+              <div className='font-medium'>真实（上游计费）</div>
+              <div className='pl-2'>输入: {formatTokenAmount(row.inputTokens)}</div>
+              <div className='pl-2'>缓存读: {formatTokenAmount(row.cacheReadInputTokens)}</div>
+              <div className='pl-2'>缓存写: {formatTokenAmount(row.cacheCreationInputTokens)}</div>
+              <div className='mt-1 font-medium'>预估（网关预检）</div>
+              <div className='pl-2'>
+                {row.estimatedInputTokens != null
+                  ? formatTokenAmount(row.estimatedInputTokens)
+                  : '无（旧日志或非 Messages 路径）'}
+              </div>
+            </TooltipContent>
+          </Tooltip>
         </div>
       )}
       {hidden('cache') ? null : (
@@ -531,7 +528,7 @@ export function VirtualizedLogsTable({
               {isHidden('context') ? null : (
                 <HeadCell
                   className='min-w-[70px] flex-[0.7] text-right'
-                  title='本次请求的上下文大小：输入 + 缓存读 + 缓存写；≈ 为网关预估（请求未发往上游）'
+                  title='上行：真实上下文（输入 + 缓存读 + 缓存写）；下行：网关预检估算值'
                 >
                   上下文
                 </HeadCell>
