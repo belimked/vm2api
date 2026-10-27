@@ -18,7 +18,7 @@ set -uo pipefail
 
 # ── 配置 ────────────────────────────────────────────────────
 UPSTREAM_URL="https://github.com/dofastted/vm2api.git"
-CUSTOM_BRANCH="cus/v1.4.011"
+CUSTOM_BRANCH="cus/v1.4.012"
 MIRROR_BRANCH="main"                     # belimked/main = 上游纯镜像
 BIOME="@biomejs/biome@2.5.11"
 DO_PUSH=0
