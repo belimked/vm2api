@@ -56,3 +56,45 @@ test('fresh database applies geo guard as 900', () => {
     fs.rmSync(dataDir, { recursive: true, force: true })
   }
 })
+
+test('estimated_input applied as 042 is re-keyed to 901 so upstream 042 still applies', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'est-mig-'))
+  const oldDir = path.join(tmp, 'old-migrations')
+  fs.mkdirSync(oldDir)
+  for (const f of fs.readdirSync(MIGRATIONS)) {
+    if (!/^\d+.*\.sql$/.test(f) || f >= '042' || f.startsWith('9')) continue
+    fs.copyFileSync(path.join(MIGRATIONS, f), path.join(oldDir, f))
+  }
+  fs.copyFileSync(path.join(MIGRATIONS, '900_proxy_geo_guard.sql'), path.join(oldDir, '900_proxy_geo_guard.sql'))
+  fs.copyFileSync(
+    path.join(MIGRATIONS, '901_usage_logs_estimated_input.sql'),
+    path.join(oldDir, '042_usage_logs_estimated_input.sql'),
+  )
+  const dataDir = path.join(tmp, 'data')
+  try {
+    createDatabase({ dataDir, migrationsDir: oldDir }).close()
+
+    const db = createDatabase({ dataDir })
+    try {
+      const rows = db
+        .prepare("SELECT version, name FROM schema_migrations WHERE version IN ('042', '901') ORDER BY version")
+        .all()
+      assert.deepEqual(
+        rows.map((r) => [r.version, r.name]),
+        [
+          ['042', '042_usage_logs_image_generation.sql'],
+          ['901', '901_usage_logs_estimated_input.sql'],
+        ],
+      )
+      const cols = db.prepare('PRAGMA table_info(usage_logs)').all().map((c) => c.name)
+      assert.ok(cols.includes('estimated_input_tokens'))
+      assert.ok(cols.some((c) => c.startsWith('image_')))
+    } finally {
+      db.close()
+    }
+
+    createDatabase({ dataDir }).close()
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+})

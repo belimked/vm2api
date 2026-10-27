@@ -38,7 +38,9 @@ import {
 import { sanitizeInboundBody, defaultSeedPolicy, callerAutoCompactWindow } from './seed-policy.mjs'
 import { fingerprintRequest } from './client-fingerprint.mjs'
 import { validateOfficialModel } from './models.mjs'
-import { handleCodexProtocol, handleCodexSearch } from './handle-codex.mjs'
+import { handleCodexImages, handleCodexProtocol, handleCodexSearch } from './handle-codex.mjs'
+import { isMultipartFormData, normalizeImageEditBody } from './image-edit-multipart.mjs'
+import { readRawBody } from '../http/respond.mjs'
 import { disjointOpenaiUsage } from './openai-usage.mjs'
 import { costColumnsFromUsage } from '../admin/pricing.mjs'
 import { detectInboundPlatform } from './platform-detect.mjs'
@@ -83,7 +85,8 @@ import {
 } from '../core/errors.mjs'
 import { resolveWorkspaceMode, isOfficialClaudeClient } from './workspace-mode.mjs'
 import { officialMessagesBody } from './anthropic-messages.mjs'
-import { prepareOutboundEnvelope, prepareCliHopBody, prepareOfficialPassthroughBody } from './outbound-attempt.mjs'
+import { prepareOutboundEnvelope, prepareCliHopBody } from './outbound-attempt.mjs'
+import { profileForPreset } from '../identity/official-profiles.mjs'
 import { loadVmIdentity, OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
 import { touchTelemetrySession } from '../vm/worker-telemetry.mjs'
 import {
@@ -107,6 +110,8 @@ import {
 import {
   applyCrsUnofficialPersona,
   detectProxiedOfficialCcFromRoutingFile,
+  billingIndexesFromMessages,
+  ccEntrypointFromRouting,
   ensureBillingAttribution,
   extractFirstUserText,
   isOfficialClaudeCodeTraffic,
@@ -143,7 +148,7 @@ import {
   fillMissingCacheTtl,
   validateCacheBreakpoints,
 } from './cache-ttl.mjs'
-import { confirmCachePrefix, describeCacheContinuity, formatCacheBreak, trackCachePrefix } from './cache-prefix.mjs'
+import { confirmCachePrefix, describeCacheContinuity, formatCacheBreak, prepareCachePrefix } from './cache-prefix.mjs'
 import { ensureClaudeWebSearch, shouldInjectClaudeWebSearch } from './web-search.mjs'
 import { dispatchStreamInference } from '../transport/kernel-router.mjs'
 import { syncClaudeKernelConfigsFromFile } from '../transport/rust-kernel-supervisor.mjs'
@@ -432,10 +437,12 @@ export function createHandleProtocol(deps) {
     want1m = false,
     preserveCacheBreakpoints = false,
     cliHop = false,
+    repaired = false,
     requestContext = null,
     routing = {},
     noGoFallback = false,
     onEnvelope = null,
+    onOutboundHeaders = null,
   }) {
     const assembler = createClaudeMessageAssembler()
     const workerResult = await dispatchStreamInference({
@@ -451,11 +458,13 @@ export function createHandleProtocol(deps) {
       routing,
       preserveCacheBreakpoints,
       cliHop,
+      repaired,
       requestContext,
       slotWaitMs: candidate.slotWaitMs,
       noGoFallback,
       ensureCredential: (exec) => ensureWorkerCredential(exec),
       onEnvelope,
+      onOutboundHeaders,
       onEvent: async (line) => {
         if (/response_headers/.test(String(line))) return
         applyClaudeSSELineToMessage(restoreToolNamesInSSELine(line, toolNames), assembler)
@@ -483,6 +492,8 @@ export function createHandleProtocol(deps) {
       upstream_status: null,
       outbound_body: null,
       outbound_headers: null,
+      outbound_headers_source: 'unavailable',
+      worker_envelope_headers: null,
       outbound_summary: null,
       cache_continuity: null,
       vm_id: null,
@@ -932,7 +943,7 @@ export function createHandleProtocol(deps) {
     // One-shot test calls (sub2api account test, new-api channel test) keep their
     // sticky identity but never hold a session seat the main conversation needs.
     const seatless = isProbe || isShortProbeRequest(inbound)
-    // Seat = inbound device (R1/R2); the API key never scopes it.
+    // Seat = this client session. Same device, other session = other slot.
     const seatKey = seatless
       ? null
       : resolveSeatIdentity({ inbound, body: ctx.body, headers: req.headers, clientIp: clientIp(req) }).key
@@ -1224,22 +1235,41 @@ export function createHandleProtocol(deps) {
     // Cache bypass is a client hint; only authenticated master-key probes may skip accounting.
     const healthReal = req.apiKeyKind === 'master' && isHealthRealBypass(req.headers)
     // Cache lives per account; a failover to another account starts cold by design.
+    // The image floor follows the caller session across accounts, scoped to its key.
+    // Returns the body to send: the image floor and break anchor may rewrite it.
+    const imageKey = callerSession ? `${req.apiKeyRecord?.id || req.apiKeyKind || ''}:${callerSession}` : null
     const noteCachePrefix = (selected, sessionId, body) => {
-      if (!sessionId) return
+      if (!sessionId) return body
       const key = `${selected.accountId}:${sessionId}`
-      const prefix = trackCachePrefix(key, body)
+      const { body: prepared, ...prefix } = prepareCachePrefix(key, body, Date.now(), { imageKey }) || { body }
       logBag.cache_prefix = prefix
       logBag.cache_prefix_key = key
-      if (!prefix?.break) return
+      if (prefix.image_floor_moved) {
+        console.warn(
+          `[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} image floor messages[${prefix.image_floor}]`,
+        )
+      }
+      if (!prefix.break) return prepared
       const where = formatCacheBreak(prefix)
-      console.warn(`[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} broke at ${where}`)
+      const anchor = prefix.anchor == null ? '' : `; anchored messages[${prefix.anchor}]`
+      const checkpoint = prefix.checkpoint == null ? '' : `; checkpoint messages[${prefix.checkpoint}]`
+      console.warn(
+        `[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} broke at ${where}${anchor}${checkpoint}`,
+      )
+      return prepared
     }
-    // 出站日志记录的是传输层最终 POST 给槽位 worker 的 envelope（billing、betas、cch
-    // 都已补齐），不是 applyAttempt 里的中间对象。每次真正发出都会覆盖，所以日志里
-    // 留下的是本请求最后一次发出的内容；从未发出则保持 null。
+    // Keep the envelope separately; only the CLI send boundary owns final headers.
+    // Clear each attempt so a failed retry cannot retain the previous hop's snapshot.
     const noteOutboundEnvelope = (envelope) => {
       if (logCtx.capture_outbound) logBag.outbound_body = envelope?.body ?? null
-      logBag.outbound_headers = envelope?.headers ? redactHeaders(envelope.headers) : null
+      logBag.worker_envelope_headers = envelope?.headers ? redactHeaders(envelope.headers) : null
+      logBag.outbound_headers = null
+      logBag.outbound_headers_source = 'unavailable'
+    }
+    const noteOutboundHeaders = (headers) => {
+      if (!logCtx.capture_outbound) return
+      logBag.outbound_headers = redactHeaders(headers)
+      logBag.outbound_headers_source = 'cli_final'
     }
     let result
     try {
@@ -1305,16 +1335,8 @@ export function createHandleProtocol(deps) {
           const keptSession = extra.freshSlot ? '' : attemptBound?.sessionId || ''
           const keptAccount = extra.freshSlot ? '' : attemptBound?.accountId || ''
           const keptVm = extra.freshSlot ? '' : attemptBound?.vmId || ''
-          const routingNow = getRouting()
-          const cliHop = resolveOfficialCcInference(selected.vm, routingNow) === 'cli-hop'
-          // Official Claude Code already carries the real system, cache markers
-          // and sampling fields. Content stays on the wire; slot identity and
-          // outbound session still follow attempt/VM rebuild semantics.
-          const officialPassthrough = officialTraffic && cliHop && officialCcPassthroughFromRouting(routingNow)
-          const attemptSessionMode = officialPassthrough ? 'rebuild' : sessionContext.mode
           const attemptSessionId = resolveOutboundSessionId(callerSession, {
             ...sessionContext,
-            mode: attemptSessionMode,
             accountId: selected.accountId,
             boundSessionId: keptSession,
             boundAccountId: keptAccount,
@@ -1327,6 +1349,13 @@ export function createHandleProtocol(deps) {
           if (identity && attemptSessionId) identity.callerSessionId = attemptSessionId
           const credMode = credentialModeFromOauth(selected.vm?.claude || {})
           const modeOverride = slotPersonaModeOverride(selected.vm)
+          let routingNow = getRouting()
+          try {
+            routingNow = JSON.parse(fs.readFileSync(routingConfigPath, 'utf8'))
+          } catch {
+            // A mid-write routing file keeps the in-memory snapshot for this request.
+          }
+          const entrypointNow = ccEntrypointFromRouting(routingNow)
           const repaired = extra.repaired === true
           const preserveThinkingBlocks =
             !repaired &&
@@ -1335,6 +1364,8 @@ export function createHandleProtocol(deps) {
           // cli-node receives the cleaned body after this boundary. Keep every
           // thinking block on the first hop and only let a repaired retry strip it.
           const preserveCliHopThinkingBlocks = !repaired
+          const officialPassthrough = officialTraffic && officialCcPassthroughFromRouting(routingNow)
+          const cliHop = resolveOfficialCcInference(selected.vm, routingNow) === 'cli-hop'
           const resolvedPersona = resolveSlotPersonaPreset(selected.vm, routingNow)
           const preserveCallerEnvironment = !presetFlagEnabled(
             routingNow?.compatibility,
@@ -1344,58 +1375,41 @@ export function createHandleProtocol(deps) {
           let hopBody = body
           if (cliHop) {
             // The front rewrite already produces the official two-block shape.
-            const panelRewrite = false
-            if (officialPassthrough && !requestContext) {
-              hopBody = prepareOfficialPassthroughBody(hopBody, {
-                stream: upstreamStream,
-                identity,
-                inbound,
-                reqHeaders: req.headers,
-                sessionId: attemptSessionId,
-              })
-              logBag.official_passthrough = true
-            } else {
-              hopBody = prepareCliHopBody(repaired ? body : hopBody, {
-                stream: upstreamStream,
-                repaired,
-                cacheTtl: requestedCacheTtl,
-                requestContext,
-                preserveSystem: false,
-                preserveThinkingBlocks: preserveCliHopThinkingBlocks,
-                preserveCallerEnvironment,
-                autoCompactWindow: ctx.autoCompactWindow,
-                routing: routingNow,
-              })
-              if (!requestContext) {
-                hopBody = ensureBillingAttribution(hopBody, {
-                  firstUserText,
-                  sessionId: attemptSessionId,
-                  cliVersion: OFFICIAL_CLI_VERSION,
-                })
-              }
-            }
-            hopBody = await materializeRemoteImageSources(hopBody)
-            if (panelRewrite) {
-              hopBody = applyCrsUnofficialPersona(hopBody, {
-                officialClient: false,
+            const outboundProfile = profileForPreset(resolvedPersona)
+            // Render once from caller input with the selected slot's identity, not the pre-selection environment.
+            if (!requestContext && !officialTraffic) {
+              hopBody = applyCrsUnofficialPersona(structuredClone(personaIn), {
                 forceConfigured: true,
                 routingFile: routingConfigPath,
                 mode: resolvedPersona,
                 sessionId: attemptSessionId,
-                model: hopBody?.model || personaIn?.model,
-                cliVersion: OFFICIAL_CLI_VERSION,
+                model: hopBody?.model,
+                cliVersion: outboundProfile.cliVersion,
                 identity,
-              })
-              hopBody = fillMissingCacheTtl(hopBody, requestedCacheTtl)
-              enforceCacheLimit(hopBody)
-              validateCacheBreakpoints(hopBody)
-              personaHideTokens = personaHideForUnofficial(personaIn, hopBody, {
-                officialClient: false,
-                mode: resolvedPersona,
-                hides: personaHidesUsageFromRoutingFile(routingConfigPath, resolvedPersona),
-                standing: standingUsageFromRoutingFile(routingConfigPath, resolvedPersona),
+                entrypoint: entrypointNow,
               })
             }
+            hopBody = prepareCliHopBody(repaired ? body : hopBody, {
+              stream: upstreamStream,
+              repaired,
+              cacheTtl: requestedCacheTtl,
+              requestContext,
+              preserveSystem: false,
+              preserveThinkingBlocks: preserveCliHopThinkingBlocks,
+              preserveCallerEnvironment,
+              autoCompactWindow: ctx.autoCompactWindow,
+              routing: routingNow,
+            })
+            if (!requestContext) {
+              hopBody = ensureBillingAttribution(hopBody, {
+                firstUserText,
+                sessionId: attemptSessionId,
+                cliVersion: outboundProfile.cliVersion,
+                indexes: billingIndexesFromMessages(hopBody.messages),
+                entrypoint: entrypointNow,
+              })
+            }
+            hopBody = await materializeRemoteImageSources(hopBody)
             if (identity) {
               hopBody = applyCrsIdentityReplace(hopBody, identity, inbound, req.headers, {
                 officialClient: officialTraffic,
@@ -1413,11 +1427,13 @@ export function createHandleProtocol(deps) {
             // not an accounting authority; retain the upstream 5m/1h split.
             cacheTtl = null
 
-            if (!panelRewrite) personaHideTokens = 0
+            personaHideTokens = 0
             logBag.inference_engine = resolveInferenceEngine(selected.vm, routingNow)
             logBag.persona_preset = resolveSlotPersonaPreset(selected.vm, routingNow)
+            logBag.outbound_profile = { cli_version: outboundProfile.cliVersion }
             logBag.official_cc_inference = 'cli-hop'
             logBag.provider = 'local_cli'
+            hopBody = noteCachePrefix(selected, attemptSessionId, hopBody)
             logBag.outbound_summary = summarizeBody(hopBody)
             logBag.cache_continuity = describeCacheContinuity({
               inbound,
@@ -1429,9 +1445,11 @@ export function createHandleProtocol(deps) {
               accountId: selected.accountId,
               requestId: logCtx.request_id,
             })
-            noteCachePrefix(selected, attemptSessionId, hopBody)
             logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(hopBody) || attemptSessionId)
-            return { body: hopBody, meta: { toolNames: {}, sessionId: attemptSessionId, cliHop: true, requestContext } }
+            return {
+              body: hopBody,
+              meta: { toolNames: {}, sessionId: attemptSessionId, cliHop: true, requestContext, repaired },
+            }
           }
 
           cacheTtl = requestedCacheTtl
@@ -1473,7 +1491,7 @@ export function createHandleProtocol(deps) {
             boundVmId: keptVm,
             vmId: selected.vmId,
             epoch: attemptStartedAt,
-            mode: officialPassthrough ? 'rebuild' : sessionMode,
+            mode: sessionMode,
             routing: routingNow,
             clientDiscriminator,
             firstUserText,
@@ -1481,26 +1499,22 @@ export function createHandleProtocol(deps) {
             apiKeyId: req.apiKeyRecord?.id ?? '',
             stream: upstreamStream,
             cacheControlLimit: Number(getRouting()?.compatibility?.cache_control_limit) || 4,
-            toolNameRewrite: officialPassthrough
-              ? false
-              : openaiCompat
-                ? false
-                : getRouting()?.compatibility?.tool_name_rewrite !== false,
+            toolNameRewrite: openaiCompat ? false : getRouting()?.compatibility?.tool_name_rewrite !== false,
             cacheTtl,
             cacheBreakpoints,
             preserveThinkingBlocks,
-            preserveCallerEnvironment: officialPassthrough ? true : preserveCallerEnvironment,
-            officialPassthrough,
+            preserveCallerEnvironment,
             reqHeaders: req.headers,
             homeDir: selected.exec?.homeDir || '',
             credentialMode: credMode,
             authScheme: isApiKeyMode(credMode) ? 'apikey' : 'oauth',
             want1m,
           })
-          logBag.outbound_summary = summarizeBody(prepared.body)
+          const outbound = noteCachePrefix(selected, attemptSessionId, prepared.body)
+          logBag.outbound_summary = summarizeBody(outbound)
           logBag.cache_continuity = describeCacheContinuity({
             inbound,
-            outbound: prepared.body,
+            outbound,
             layer: 'node_object',
             ttl: cacheTtl,
             sessionId: attemptSessionId,
@@ -1508,9 +1522,8 @@ export function createHandleProtocol(deps) {
             accountId: selected.accountId,
             requestId: logCtx.request_id,
           })
-          noteCachePrefix(selected, attemptSessionId, prepared.body)
-          logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(prepared.body) || attemptSessionId)
-          return { body: prepared.body, meta: { toolNames: prepared.toolNames, sessionId: attemptSessionId } }
+          logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(outbound) || attemptSessionId)
+          return { body: outbound, meta: { toolNames: prepared.toolNames, sessionId: attemptSessionId, repaired } }
         },
         callAttempt: async ({ candidate, body, attemptMeta, deliveryMode: attemptDelivery, signal, onCommit }) => {
           if (!clientStream) {
@@ -1526,11 +1539,13 @@ export function createHandleProtocol(deps) {
               cacheTtl,
               preserveCacheBreakpoints,
               cliHop: attemptMeta?.cliHop === true,
+              repaired: attemptMeta?.repaired === true,
               requestContext: attemptMeta?.requestContext || requestContext,
               want1m,
               routing: getRouting(),
               noGoFallback: !!pinVmId,
               onEnvelope: noteOutboundEnvelope,
+              onOutboundHeaders: noteOutboundHeaders,
             })
           }
           let state
@@ -1564,6 +1579,7 @@ export function createHandleProtocol(deps) {
               cacheTtl,
               preserveCacheBreakpoints,
               cliHop: attemptMeta?.cliHop === true,
+              repaired: attemptMeta?.repaired === true,
               requestContext: attemptMeta?.requestContext || requestContext,
               body,
               reqHeaders: req.headers,
@@ -1578,6 +1594,7 @@ export function createHandleProtocol(deps) {
               noGoFallback: !!pinVmId,
               ensureCredential: (exec) => ensureWorkerCredential(exec),
               onEnvelope: noteOutboundEnvelope,
+              onOutboundHeaders: noteOutboundHeaders,
               onCommit: () => {
                 if (protocol === 'anthropic.messages' && !res.headersSent) writeSSEHeaders(res)
                 onCommit()
@@ -1840,9 +1857,121 @@ export function createHandleProtocol(deps) {
     })
   }
 
+  /** Field names and image count only: Images bodies carry base64 uploads. */
+  function summarizeImagesBody(body) {
+    if (!body || typeof body !== 'object') return null
+    return {
+      model: typeof body.model === 'string' ? body.model : null,
+      fields: Object.keys(body).sort(),
+      images: Array.isArray(body.images) ? body.images.length : body.image ? 1 : 0,
+      mask: body.mask != null,
+    }
+  }
+
+  /** POST /v1/images/{generations,edits}: same logging and auth as search; edits also take multipart. */
+  async function handleImages(req, res, pathName, kind) {
+    const protocol = 'openai.images'
+    const logCtx = requestLog.start(req, { protocol, pathName })
+    res._kinRequestId = logCtx.request_id
+    requestLog.tapResponse?.(logCtx, res)
+    const logBag = {
+      protocol,
+      model: null,
+      stream: false,
+      inbound_summary: null,
+      upstream_status: null,
+      vm_id: null,
+      account_id: null,
+      usage: null,
+      error_code: null,
+      error_message: null,
+      via: 'codex-images',
+      attempt_count: null,
+      final_state: null,
+    }
+    res.on('finish', () => {
+      try {
+        const groupId = req.apiKeyRecord?.group_id ?? 1
+        requestLog.finish(logCtx, {
+          status: res.statusCode || 0,
+          api_key_kind: req.apiKeyKind || null,
+          api_key_id: req.apiKeyRecord?.id || null,
+          user_id: req.apiKeyRecord?.user_id ?? null,
+          group_id: groupId,
+          rate_multiplier: deps.groupsRepo.rateMultiplier(groupId),
+          ...logBag,
+        })
+      } catch {}
+    })
+    if (!requireAuth(req, res)) {
+      logBag.error_code = req.authError?.code || ErrorCode.INVALID_API_KEY
+      logBag.error_message = req.authError?.message || 'Invalid credentials'
+      logBag.api_key_presented = presentedApiKeyForLog(req.presentedApiKey)
+      return
+    }
+    let body
+    try {
+      const raw = await readRawBody(req, inboundBodyLimit(getRouting(), cfg.limits.max_body_bytes))
+      const contentType = req.headers?.['content-type']
+      if (kind === 'edits' && isMultipartFormData(contentType)) {
+        const converted = await normalizeImageEditBody(raw, contentType)
+        if (!converted.ok) {
+          stats.errors++
+          logBag.error_code = 'invalid_image_edit'
+          logBag.error_message = converted.message
+          return json(
+            res,
+            400,
+            makeError({
+              type: ErrorType.INVALID_REQUEST,
+              code: 'invalid_image_edit',
+              message: converted.message,
+              status: 400,
+            }).body,
+          )
+        }
+        body = converted.body
+      } else {
+        const text = raw.toString('utf8')
+        body = text ? JSON.parse(text) : {}
+      }
+    } catch (error) {
+      stats.errors++
+      logBag.error_code = error?.body?.error?.code || ErrorCode.INVALID_JSON
+      logBag.error_message = error?.body?.error?.message || String(error?.message || error)
+      if (error?.body?.error) return json(res, error.status || 400, error.body)
+      return json(
+        res,
+        400,
+        makeError({
+          type: ErrorType.INVALID_REQUEST,
+          code: ErrorCode.INVALID_JSON,
+          message: String(error?.message || error),
+          status: 400,
+        }).body,
+      )
+    }
+    logBag.model = typeof body?.model === 'string' ? body.model : null
+    logBag.inbound_summary = summarizeImagesBody(body)
+    return handleCodexImages({
+      req,
+      res,
+      kind,
+      body,
+      logBag,
+      stats,
+      json,
+      routing: getRouting() || {},
+      projectRoot: cfg.paths.project,
+      stickyRouter,
+      ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
+    })
+  }
+
   return {
     handleProtocol,
     handleSearch,
+    handleImages,
     mapProtocolClientError,
     applyProtocolIntercept,
     streamAndAssembleClaudeMessage,

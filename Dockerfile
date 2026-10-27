@@ -1,5 +1,6 @@
-# Control plane. Only source is in git: the console and Go helpers build here, and the
-# prebuilt slot payloads come from the release pinned in deploy/payload.json.
+# Control plane. Only source is in git: the console and kin-api-kernel build here; the
+# slot payloads and Go helpers come from the release pinned in deploy/payload.json.
+# Fork: kin-worker is built from worker/ (OAuth refresh error passthrough) and overrides the pinned one.
 
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web
 ARG NPM_REGISTRY=https://registry.npmmirror.com
@@ -17,13 +18,11 @@ WORKDIR /src
 COPY worker/go.mod worker/go.sum ./worker/
 RUN cd worker && go mod download
 COPY worker/ ./worker/
+RUN cd worker && go build -buildvcs=false -trimpath -o /out/kin-worker ./cmd/kin-worker
 COPY api-kernel/go.mod api-kernel/go.sum ./api-kernel/
 RUN cd api-kernel && go mod download
 COPY api-kernel/ ./api-kernel/
-RUN cd worker && go build -buildvcs=false -trimpath -o /out/kin-worker ./cmd/kin-worker \
-  && go build -buildvcs=false -trimpath -o /out/kin-egress ./cmd/kin-egress \
-  && CGO_ENABLED=0 go build -buildvcs=false -trimpath -o /out/kin-slot-gate ./cmd/kin-slot-gate \
-  && cd ../api-kernel && go build -buildvcs=false -trimpath -o /out/kin-api-kernel ./cmd/kin-api-kernel
+RUN cd api-kernel && go build -buildvcs=false -trimpath -o /out/kin-api-kernel ./cmd/kin-api-kernel
 
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS payload
 WORKDIR /src

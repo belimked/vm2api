@@ -19,8 +19,10 @@ import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { SettingRow } from '@/components/setting-row'
+import { OutboundReference } from './outbound-reference'
 import {
   cchEnabledFromCompat,
+  ccEntrypointFromCompat,
   sessionIdleTtlFromInference,
   thinkingDisplayFromCompat,
 } from './protocol-authority'
@@ -105,7 +107,7 @@ export function ProtocolPane({
             label='官方 Claude Code 家族透传'
             desc={
               compat.official_cc_passthrough === true
-                ? '开：保留入站 system/tools/messages 与 cache 标记；出站 session 仍按槽位重建，device 绑槽位。'
+                ? '开：直连和被识别为中转的官方家族保留入站 system，不套用当前提示词档。'
                 : '关：官方家族也套用协议里的 system 档。打开后才透传。'
             }
           >
@@ -175,6 +177,28 @@ export function ProtocolPane({
           保存后作为新会话和自有缺省标记的
           TTL。已有会话锁定值不变，官方透传仍保留调用方断点及缺失 TTL。
         </p>
+      </PaneSection>
+      <PaneSection
+        icon={Database}
+        title='出站入口'
+        desc='billing 的 cc_entrypoint 和出站 UA 用同一个值。调用方自带的 billing 不改。'
+      >
+        <SettingRow
+          label='cc_entrypoint'
+          desc='保存后写入各 Claude 槽 kernel.json，cli-node 下次请求读取。'
+        >
+          <ChipGroup
+            label='cc_entrypoint'
+            value={ccEntrypointFromCompat(compat)}
+            options={[
+              ['sdk-cli', 'sdk-cli'],
+              ['cli', 'cli'],
+            ]}
+            onChange={(cc_entrypoint) =>
+              onCompatChange({ ...compat, cc_entrypoint })
+            }
+          />
+        </SettingRow>
       </PaneSection>
       <PaneSection
         icon={Brain}
@@ -269,6 +293,7 @@ export function ProtocolPane({
           }
         />
       </PaneSection>
+      <OutboundReference />
     </div>
   )
 }

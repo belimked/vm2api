@@ -195,6 +195,10 @@ export function applyMigrations(db, { migrationsDir } = {}) {
   db.prepare(
     "UPDATE schema_migrations SET version = '900', name = '900_proxy_geo_guard.sql' WHERE version = '030' AND name = '030_proxy_geo_guard.sql'",
   ).run()
+  // Fork-only: estimated_input shipped as 042 before upstream claimed 042 for image generation.
+  db.prepare(
+    "UPDATE schema_migrations SET version = '901', name = '901_usage_logs_estimated_input.sql' WHERE version = '042' AND name = '042_usage_logs_estimated_input.sql'",
+  ).run()
 
   const files = fs.existsSync(dir)
     ? fs

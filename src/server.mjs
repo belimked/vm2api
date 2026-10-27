@@ -43,7 +43,6 @@ import { ProxyGeoChecksRepo } from './lib/db/repos/proxy-geo-checks-repo.mjs'
 import { runVmTestChat } from './lib/admin/vm-test-chat.mjs'
 import { VmTestScheduleRunner } from './lib/admin/vm-test-schedule.mjs'
 import { StickyRouter } from './lib/pool/sticky-router.mjs'
-import { setManualScheduleWins } from './lib/pool/schedule-policy.mjs'
 import { AccountQuota } from './lib/pool/account-quota.mjs'
 import { normalizeTiers } from './lib/pool/quota-tiers.mjs'
 import { ApiKeyStore } from './lib/admin/api-keys.mjs'
@@ -61,11 +60,13 @@ import {
   listVms,
   getVm,
   getActiveVmId,
-  setVmSchedulable,
+  setScheduleHold,
+  clearScheduleHold,
   isCodexVm,
   syncCodexQuotaSchedule,
 } from './lib/vm/vm-registry.mjs'
 import { makeError, ErrorType, ErrorCode } from './lib/core/errors.mjs'
+import { HOLD_GEO, HOLD_PROXY } from './lib/pool/schedule-state.mjs'
 import * as panel from './lib/admin/panel-api.mjs'
 import { ProxyPool } from './lib/vm/proxy-pool.mjs'
 import { ensureProxyEgress, proxyEgressReady } from './lib/vm/egress.mjs'
@@ -84,7 +85,7 @@ import { ClusterError } from './lib/cluster/ssh-link.mjs'
 import { nodeEgressProxyUrl, startNodeEgressSocks } from './lib/cluster/node-egress-socks.mjs'
 import { createSlotShell } from './lib/vm/slot-shell.mjs'
 import { vmLockBusy } from './lib/vm/vm-file.mjs'
-import { refreshSlotGuestBinDir } from './lib/vm/vm-runtime.mjs'
+import { refreshSlotGuestBinDir, syncLocalSlotRestartPolicies } from './lib/vm/vm-runtime.mjs'
 
 import {
   classifyCredentialRefresh,
@@ -101,7 +102,7 @@ import { createRoutingRuntime } from './lib/admin/routing-runtime.mjs'
 import { createImportCommit } from './lib/oauth/import-commit.mjs'
 import { createHandleProtocol } from './lib/protocol/handle-protocol.mjs'
 import { createResponsesWsHandler } from './lib/protocol/responses-ws.mjs'
-import { handleUserCountTokens, handleUserUsage } from './lib/protocol/user-count-tokens.mjs'
+import { handleUserUsage } from './lib/protocol/user-count-tokens.mjs'
 import { createPanelHandler } from './lib/admin/panel-routes.mjs'
 
 const FEATURES = [
@@ -114,7 +115,6 @@ const FEATURES = [
   'tools',
   'client-workspace',
   'api-direct-kernel',
-  'count_tokens',
   'account_usage',
 ]
 const LIMITATIONS = {
@@ -280,7 +280,6 @@ const {
 
 routingConfig = loadRoutingConfig()
 migrateLegacyOpenAIPolicies(routingConfig)
-setManualScheduleWins(routingConfig.pool?.manual_schedule_wins)
 if (routingConfig.official_cc) {
   routingConfig.official_cc = normalizeOfficialCcConfig(routingConfig.official_cc)
 }
@@ -359,29 +358,16 @@ proxyPool = new ProxyPool({
     return { ok: false, error: `node_link_${state}` }
   },
   onDisableVm: (vmId, reason, proxyId) => {
-    setVmSchedulable(cfg.paths.project, vmId, false, `${reason}|proxy=${proxyId}`)
+    setScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: proxyId, message: reason })
   },
   onDisconnectVm: (vmId, reason, proxyId) => {
-    setVmSchedulable(cfg.paths.project, vmId, false, `${reason}|proxy=${proxyId}`)
+    setScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: proxyId, message: reason })
   },
+  // Lifts only the hold this proxy put on the slot (受限); 调度关 / 不可调度 stay.
   onEnableVm: (vmId, _reason, proxyId) => {
-    const vm = getVm(cfg.paths.project, vmId)
-    const why = String(vm?.schedule_disabled_reason || '')
-    if (why.startsWith('geo_changed|') || why.startsWith('geo_unreachable|')) return
-    if (!why.includes(`proxy=${proxyId}`) && !/egress_down|proxy_probe_failed/.test(why)) return
-    // A probe failure may have overwritten the geo pause reason; while the
-    // guard still holds this exit as country-changed, keep the slot paused
-    // (restamp the reason) so geo recovery, not probe recovery, re-enables it.
-    const px = proxyPool.state.proxies.find((x) => x.id === proxyId)
-    if (
-      proxyPool.state.config.geo_guard_enabled &&
-      proxyPool.state.config.geo_guard_action === 'notify_pause' &&
-      px?.geo_guard_status === 'changed'
-    ) {
-      setVmSchedulable(cfg.paths.project, vmId, false, `geo_changed|proxy=${proxyId}`)
-      return
-    }
-    setVmSchedulable(cfg.paths.project, vmId, true)
+    const hold = getVm(cfg.paths.project, vmId)?.schedule_hold
+    if (hold?.reason !== HOLD_PROXY) return
+    clearScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: hold.detail?.tag == null ? null : proxyId })
   },
   egressCheck: (proxy) => proxyEgressReady(proxy, cfg.paths.project),
   repairEgress: (proxy) => ensureProxyEgress(cfg.paths.project, proxy),
@@ -393,33 +379,35 @@ try {
   console.warn('[bootstrap] slot-guest-bin refresh failed:', err?.message || err)
 }
 proxyPool.startScheduler()
-// Geo-guard pauses are safety stops, so they bypass the manual schedule lock;
-// a slot already switched off for another reason is left alone.
-const geoPauseSlots = (bound, reason, proxyId) => {
+// Geo pauses are a system hold that outranks proxy/maintenance holds (applyHold keeps it);
+// slots already 调度关 / 不可调度 are left alone. A country change is never downgraded to unreachable.
+const isGeoHold = (vm, proxyId, kind = null) =>
+  vm?.schedule_hold?.reason === HOLD_GEO &&
+  vm.schedule_hold.detail?.tag === proxyId &&
+  (kind == null || vm.schedule_hold.detail?.kind === kind)
+const geoPauseSlots = (bound, kind, proxyId) => {
   const paused = []
   const skipped = []
   for (const vmId of bound) {
     const vm = getVm(cfg.paths.project, vmId)
     if (!vm) continue
-    const why = String(vm.schedule_disabled_reason || '')
-    if (vm.schedulable === false && !why.endsWith(`|proxy=${proxyId}`)) {
+    if (vm.schedule_off === true || vm.unschedulable) {
       skipped.push(vmId)
       continue
     }
-    if (why !== `geo_changed|proxy=${proxyId}`)
-      setVmSchedulable(cfg.paths.project, vmId, false, `${reason}|proxy=${proxyId}`, { source: 'force' })
+    if (!isGeoHold(vm, proxyId, 'geo_changed'))
+      setScheduleHold(cfg.paths.project, vmId, HOLD_GEO, { tag: proxyId, kind, message: `${kind}|proxy=${proxyId}` })
     paused.push(vmId)
   }
   return [paused.length && `paused:${paused.join(',')}`, skipped.length && `already_off:${skipped.join(',')}`]
     .filter(Boolean)
     .join(' ')
 }
-const geoResumeSlots = (bound, reason, proxyId) => {
+const geoResumeSlots = (bound, kind, proxyId) => {
   const resumed = []
   for (const vmId of bound) {
-    const vm = getVm(cfg.paths.project, vmId)
-    if (vm?.schedule_disabled_reason !== `${reason}|proxy=${proxyId}`) continue
-    setVmSchedulable(cfg.paths.project, vmId, true, null, { source: 'force' })
+    if (!isGeoHold(getVm(cfg.paths.project, vmId), proxyId, kind)) continue
+    clearScheduleHold(cfg.paths.project, vmId, HOLD_GEO, { tag: proxyId })
     resumed.push(vmId)
   }
   return resumed
@@ -672,7 +660,6 @@ backupService.onRestored((db) => {
 
   routingConfig = loadRoutingConfig()
   migrateLegacyOpenAIPolicies(routingConfig)
-  setManualScheduleWins(routingConfig.pool?.manual_schedule_wins)
   if (routingConfig.official_cc) {
     routingConfig.official_cc = normalizeOfficialCcConfig(routingConfig.official_cc)
   }
@@ -929,7 +916,7 @@ const importCommit = createImportCommit({
 
 const { commitImportedOauth, requireSlotProxy, officialCcStatsHandler } = importCommit
 
-const { handleProtocol, handleSearch } = createHandleProtocol({
+const { handleProtocol, handleSearch, handleImages } = createHandleProtocol({
   json,
   writeSSEHeaders,
   readBody,
@@ -1197,7 +1184,6 @@ const server = http.createServer(async (req, res) => {
           chat_completions: '/v1/chat/completions',
           responses: '/v1/responses',
           messages: '/v1/messages',
-          count_tokens: '/v1/messages/count_tokens',
           usage: '/v1/usage',
           models: '/v1/models',
           intercept_rules: '/admin/intercept/rules',
@@ -1231,17 +1217,7 @@ const server = http.createServer(async (req, res) => {
       })
     }
     if (req.method === 'POST' && (p === '/v1/messages/count_tokens' || p === '/messages/count_tokens')) {
-      return await handleUserCountTokens(req, res, {
-        json,
-        readBody,
-        requireAuth,
-        apiKeyStore,
-        cfg,
-        stickyRouter,
-        accountQuota,
-        getPoolScheduler: () => poolScheduler,
-        getRoutingConfig: () => routingConfig,
-      })
+      return json(res, 404, { error: { message: 'not found: ' + p } })
     }
 
     if (req.method === 'POST' && (p === '/v1/chat/completions' || p === '/chat/completions')) {
@@ -1267,6 +1243,12 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && (p === '/v1/alpha/search' || p === '/alpha/search')) {
       return await handleSearch(req, res, p)
+    }
+    if (req.method === 'POST' && (p === '/v1/images/generations' || p === '/images/generations')) {
+      return await handleImages(req, res, p, 'generations')
+    }
+    if (req.method === 'POST' && (p === '/v1/images/edits' || p === '/images/edits')) {
+      return await handleImages(req, res, p, 'edits')
     }
 
     json(res, 404, { error: { message: `not found: ${p}` } })
@@ -1326,7 +1308,6 @@ const pub = {
     chat: publicEndpoint('/v1/chat/completions'),
     responses: publicEndpoint('/v1/responses'),
     messages: publicEndpoint('/v1/messages'),
-    count_tokens: publicEndpoint('/v1/messages/count_tokens'),
     usage: publicEndpoint('/v1/usage'),
     intercept_rules: publicEndpoint('/admin/intercept/rules'),
   },
@@ -1395,6 +1376,9 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))
 
+if (process.env.KIN_CRS_MOCK !== '1') {
+  syncLocalSlotRestartPolicies(listVms(cfg.paths.project))
+}
 await bootApiKernel(cfg)
 
 server.listen(cfg.port, cfg.host, () => {
@@ -1418,7 +1402,7 @@ server.listen(cfg.port, cfg.host, () => {
   } catch (e) {
     console.warn('[kernel-watchdog] start failed', e?.message || e)
   }
-  // Boot fills what Docker's restart policy missed (removed or exited slot containers); off with the watchdog.
+  // Proxy slots do not auto-start with Docker: boot restores egress before starting recorded-running slots.
   if (process.env.KIN_CRS_MOCK !== '1' && normalizeKernelWatchdogConfig(routingConfig.kernel_watchdog).enabled) {
     reviveDownSlots({ vms: listVms(cfg.paths.project), powerOn: bootSlot, watchdog: kernelWatchdog }).catch((e) =>
       console.warn('[slot-revive] boot pass failed', e?.message || e),

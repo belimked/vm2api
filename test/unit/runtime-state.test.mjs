@@ -123,7 +123,7 @@ test('power-on preserves a verified memory raise made while boot readiness is pe
   })
   await ready.promise
   let updated = false
-  const raised = raiseDockerSlotMemory(options.projectRoot, getVm(options.projectRoot, options.id), '4g', {
+  const raised = await raiseDockerSlotMemory(options.projectRoot, getVm(options.projectRoot, options.id), '4g', {
     execImpl: (argv) => {
       if (argv[1] === 'update') updated = true
       const bytes = (updated ? 4 : 2) * 1024 ** 3
