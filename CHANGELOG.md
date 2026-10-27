@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.4.015 — 2026-10-27
+
+- #775：风险审计的硬正则和决策模型只读用户正文。`system`、`instructions`、消息里的 `role=system`、`# Environment` 和已闭合的 `<system-reminder>` 不再送审；未闭合的提醒标签不再把后面的用户句子一起删掉。多轮请求把最后一条用户正文再标成 `[current ask]`，避免 16000 字尾窗只剩历史。拒答缓存的指纹不变，仍含工具回传。决策模型拦住时，`usage_logs.jev_state`（迁移 044）记下当时 POST 的 `state`，请求详情显示为送审正文；这是送审上下文，不是模型指出的命中句。`intercept.keyword` 仍只是题库类别。
+
+已部署机升级：更新 Node 控制面与 `web/dist`，重启一次 Node。启动应用迁移 044。不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。旧日志没有 `jev_state`，补不回来。
+
+## 1.4.014 — 2026-10-27
+
+- #773：重复合法自定义工具名出站前唯一化（保留首个，后续 `kin_tool_<hash>`；`tool_choice`/历史指首个）；唯一性不再受 `tool_name_rewrite` 影响；相同服务端工具去重，冲突/非法本地 400 `invalid_tool_name`。
+
+已部署机升级：仅更新 Node 控制面后重启；cli-node 哈希未变，不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.4.013 — 2026-10-27
+
+- #769：API 内核 SSE 响应逐块 flush，修复小响应缓冲到结束才返回的问题，保留实际流式交付和首 Token 时序。
+- #769：协议 token 口径：Claude 转 Chat / Responses 的输入总数包含缓存；OpenAI 规范化区分 inclusive / disjoint 输入并识别显式缓存写入别名，reasoning 保留为 output 子集，不重复累加。
+- #769：日志真实性：TTFT 按 cli-node / OpenAI 实际生成内容或进度打点；新增 `first_byte_ms`、`generation_ms`（迁移 043），列表、请求概览和性能页统一按实测上游输出窗口计算 tok/s，包含隐藏推理、排除终结后的收尾。旧日志或单包缓冲窗口不可测时不再估算速率。
+- #769：日志实际用量：合并 SSE 与最终 usage 时保留缓存读写明细，不重复扣缓存；Codex 明确报告的缓存写入赋值到日志列，未报告为未知（`null`），不从未命中输入推算；详情总 token 使用输入、输出、缓存读写的完整总量。
+
+#769 已部署机升级：须更新 Node、`web/dist` 与源码构建的 `kin-api-kernel`，重启对应控制面/API 内核进程；启动自动应用迁移 043。无需替换 cli-node / Claude 或 Codex kernel payload，不需 `wrap-cli/sync` 或重建槽。历史错误速率无原始时序不能补算，历史缓存写入 0 也不臆测回填。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
 ## 1.4.012 — 2026-10-27
 
 - #764（Fixes #764）：新装/缺省出站 `cc_entrypoint` 改为 `cli`（原 `sdk-cli`）。`routing.json` 未写或省略该字段时，网关补 billing、出站 UA 与 kernel 投影均解析为 `cli`；仅显式保存 `sdk-cli` 时仍为 `sdk-cli`。**不**迁移已有部署里已写入的 `sdk-cli`。
