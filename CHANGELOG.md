@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.015+cus — 2026-10-27（定制分支 cus/v1.4.015）
+
+- 修复 cli-hop 缓存实际按 5m 写入、面板 `cache_ttl: 1h` 不生效。原因：`official_full` / `official_303` 模板含 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`，`prepareCliHopBody` 判定为已组装模板（`shaped`），跳过 `officialMessageMarker`；调用方 messages 上的 `{type:"ephemeral"}` 不带 `ttl` 原样交给 cli-node，cli-node 只给自有 marker 补 TTL，上游按缺省 5m 计。现象：每会话首轮只有 system harness（约 5261 token）是 1h，之后所有缓存写入全是 5m。
+- 改法：`src/lib/protocol/outbound-attempt.mjs` 新增 `fillMessageCacheTtl`，在 shaped / preparedZero 分支给 messages 上缺 `ttl` 的 ephemeral 断点补会话 TTL；调用方显式 TTL 不动；messages 已有任一 5m 时统一补 5m（避免 5m 后出现 1h 被上游 400）；不增删、不挪断点。单测 `test/unit/cli-hop-body.test.mjs`。提交 a198ca17。
+- 45 服务器（45.8.112.157）实测：同会话 3 轮，缓存写入 `ephemeral_1h` = 13032 / 2190 / 2190，`ephemeral_5m` 全 0，读命中 13032 → 15222 连续；出站 messages 断点 ttl 由 `null` 变为 `1h`。
+
+已部署机升级：只换 Node 控制面镜像 `cus-v1.4.015` 并重启 vm2api。cli-node `f29bbfa4…08fb68`、kin-kernel `8f1347cc…636a68` 不变，不必 `fetch:payload` / `wrap-cli/sync`，不重建槽。
+
 ## 1.4.015 — 2026-10-27
 
 - #775：风险审计的硬正则和决策模型只读用户正文。`system`、`instructions`、消息里的 `role=system`、`# Environment` 和已闭合的 `<system-reminder>` 不再送审；未闭合的提醒标签不再把后面的用户句子一起删掉。多轮请求把最后一条用户正文再标成 `[current ask]`，避免 16000 字尾窗只剩历史。拒答缓存的指纹不变，仍含工具回传。决策模型拦住时，`usage_logs.jev_state`（迁移 044）记下当时 POST 的 `state`，请求详情显示为送审正文；这是送审上下文，不是模型指出的命中句。`intercept.keyword` 仍只是题库类别。
