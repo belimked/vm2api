@@ -225,6 +225,43 @@ function officialMessageMarker(messages, ttl = DEFAULT_CACHE_TTL) {
   return next
 }
 
+/**
+ * Give ttl-less message markers the session TTL. Explicit TTLs stay; if any
+ * message already says 5m, fill with 5m so no 1h follows a 5m breakpoint.
+ */
+export function fillMessageCacheTtl(body, ttl = DEFAULT_CACHE_TTL) {
+  if (!body || !Array.isArray(body.messages)) return body
+  let target = normalizeCacheTtl(ttl)
+  const each = (fn) => {
+    for (const message of body.messages) {
+      if (message?.cache_control) fn(message.cache_control)
+      if (Array.isArray(message?.content)) for (const block of message.content) if (block?.cache_control) fn(block.cache_control)
+    }
+  }
+  each((control) => {
+    if (String(control.ttl || '').trim() && normalizeCacheTtl(control.ttl) === '5m') target = '5m'
+  })
+  const fill = (node) => {
+    const control = node?.cache_control
+    if (!control || typeof control !== 'object') return node
+    if (control.type && control.type !== 'ephemeral') return node
+    if (String(control.ttl || '').trim()) return node
+    return { ...node, cache_control: { ...control, type: 'ephemeral', ttl: target } }
+  }
+  let changed = false
+  const messages = body.messages.map((message) => {
+    if (!message || typeof message !== 'object') return message
+    let next = fill(message)
+    if (Array.isArray(next.content)) {
+      const content = next.content.map(fill)
+      if (content.some((block, i) => block !== next.content[i])) next = { ...next, content }
+    }
+    if (next !== message) changed = true
+    return next
+  })
+  return changed ? { ...body, messages } : body
+}
+
 function stampMessageTail(messages, index, ttl) {
   const message = messages[index]
   if (typeof message.content === 'string') {
@@ -349,6 +386,11 @@ export function prepareCliHopBody(
     if (!lean && !shaped && !preparedZero) {
       body = { ...body, system: officialSystemTemplate(body.system, cacheTtl) }
       body.messages = officialMessageMarker(body.messages, cacheTtl)
+    } else if (!lean) {
+      // Assembled templates keep the caller's message markers. cli-node only
+      // fills TTL on its own markers, so a ttl-less caller marker would reach
+      // Anthropic as the implicit 5m and ignore the panel's cache_ttl.
+      body = fillMessageCacheTtl(body, cacheTtl)
     }
     if (Array.isArray(body.tools)) body = { ...body, tools: stripEagerInputStreaming(body.tools) }
   }

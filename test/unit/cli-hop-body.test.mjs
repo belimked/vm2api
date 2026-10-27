@@ -551,3 +551,34 @@ test('cli-hop leaves Opus model policy for cli-node', () => {
   assert.equal(body.tools.find((tool) => tool.name === 'get_weather').strict, undefined)
   assert.equal(body.tools.find((tool) => tool.name === 'computer').type, 'computer_20251124')
 })
+
+test('assembled template fills ttl-less caller message markers with the session TTL', () => {
+  const shaped = (messages) => ({
+    model: 'claude-opus-5-5',
+    max_tokens: 256,
+    system: [
+      { type: 'text', text: 'harness', cache_control: { type: 'ephemeral', scope: 'global' } },
+      { type: 'text', text: '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__' },
+      { type: 'text', text: 'guidance', cache_control: { type: 'ephemeral' } },
+    ],
+    messages,
+  })
+  const ttlLess = [
+    { role: 'user', content: [{ type: 'text', text: 'a', cache_control: { type: 'ephemeral' } }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'b' }] },
+    { role: 'user', content: [{ type: 'text', text: 'c', cache_control: { type: 'ephemeral' } }] },
+  ]
+  const hour = prepareCliHopBody(shaped(ttlLess), { cacheTtl: '1h' })
+  assert.deepEqual(hour.messages[0].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.deepEqual(hour.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+
+  const five = prepareCliHopBody(shaped(ttlLess), { cacheTtl: '5m' })
+  assert.equal(five.messages[2].content[0].cache_control.ttl, '5m')
+
+  // An explicit caller 5m must not be followed by an injected 1h.
+  const mixed = structuredClone(ttlLess)
+  mixed[0].content[0].cache_control = { type: 'ephemeral', ttl: '5m' }
+  const kept = prepareCliHopBody(shaped(mixed), { cacheTtl: '1h' })
+  assert.equal(kept.messages[0].content[0].cache_control.ttl, '5m')
+  assert.equal(kept.messages[2].content[0].cache_control.ttl, '5m')
+})
