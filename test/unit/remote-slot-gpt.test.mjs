@@ -102,7 +102,9 @@ test('a failed remote GPT boot is returned and does not start the Codex kernel',
 })
 
 test('a node Claude container booting the control-plane kernel path is recreated', () => {
-  const broken = { Config: { Cmd: ['/usr/local/bin/kin-kernel', '--gateway-worker'], Labels: { 'kin.vm.runtime': 'docker' } } }
+  const broken = {
+    Config: { Cmd: ['/usr/local/bin/kin-kernel', '--gateway-worker'], Labels: { 'kin.vm.runtime': 'docker' } },
+  }
   const good = { Config: { Cmd: ['/opt/kin/kin-kernel', '--gateway-worker'], Labels: { 'kin.vm.runtime': 'docker' } } }
   assert.equal(kernelEntryMatches(broken, claude), false)
   assert.equal(kernelEntryMatches(good, claude), true)

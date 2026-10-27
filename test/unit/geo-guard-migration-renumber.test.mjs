@@ -86,7 +86,10 @@ test('estimated_input applied as 042 is re-keyed to 901 so upstream 042 still ap
           ['901', '901_usage_logs_estimated_input.sql'],
         ],
       )
-      const cols = db.prepare('PRAGMA table_info(usage_logs)').all().map((c) => c.name)
+      const cols = db
+        .prepare('PRAGMA table_info(usage_logs)')
+        .all()
+        .map((c) => c.name)
       assert.ok(cols.includes('estimated_input_tokens'))
       assert.ok(cols.some((c) => c.startsWith('image_')))
     } finally {
