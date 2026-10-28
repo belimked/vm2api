@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.4.023+cus — 2026-10-28（定制分支 cus/v1.4.023）
+
+- 丢弃 1.4.015+cus 的 `fillMessageCacheTtl`（a198ca17）：与上游 #797 的缓存合并策略冲突（调用方无 ttl 的消息断点按隐式 5m 保留），保留会导致上游 20 项缓存契约测试失败。改为跟随上游；若线上再次出现多轮缓存只写 5m，再另行修复。
+
+已部署机升级：换 Node 控制面镜像 `cus-v1.4.023` 并重启；启动应用迁移 047。kin-kernel 更新（`8a61aaa3…cc53ec16`，12947192 字节），须 `npm run fetch:payload` 后 `wrap-cli/sync`（`restart:true`）。cli-node 不变。
+
 ## 1.4.023 — 2026-10-28
 
 - #791：识别官方 Claude Code 的 `agent_summary` 进度摘要请求（末尾完整摘要指令，含同消息 tool_result + text 与 token-budget 提醒），每次用临时出站会话和独立 seat，不进父会话串行队列、不绑定父会话 sticky / family；VM 亲和、槽位、并发与额度准入照常，容量耗尽时仍排队。普通同会话请求继续串行。此前摘要被父会话长请求挡住，观测到总 TTFT 185 秒（模型 TTFT 2.2 秒）。
