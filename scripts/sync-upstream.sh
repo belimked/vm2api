@@ -32,6 +32,7 @@ PATCHES=(
   "class ProxyGeoGuard:src/lib/vm/proxy-geo-guard.mjs"      # 出口国家巡检
   "900_proxy_geo_guard:src/lib/db/database.mjs"            # 巡检迁移 030→900 改号
   "NPM_REGISTRY:Dockerfile"                                  # 大陆镜像源
+  "VM2API_CALLER_CACHE_TTL_FILL:src/lib/protocol/outbound-attempt.mjs" # 调用方无 ttl 消息断点补会话 TTL（开关）
 )
 
 RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; BLD=$'\033[1m'; RST=$'\033[0m'

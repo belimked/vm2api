@@ -226,6 +226,50 @@ function officialMessageMarker(messages, ttl = DEFAULT_CACHE_TTL, limit = 2) {
   return next
 }
 
+/**
+ * (cus) Opt-in via VM2API_CALLER_CACHE_TTL_FILL=1. Upstream keeps ttl-less caller
+ * message markers as implicit 5m, so Claude Code clients never get the panel's
+ * cache_ttl. Fill missing message TTLs with the session TTL; explicit TTLs stay,
+ * and any explicit 5m on messages makes the fill 5m (no 1h after a 5m).
+ */
+export function callerCacheTtlFillEnabled(env = process.env) {
+  return /^(1|true|on|yes)$/i.test(String(env.VM2API_CALLER_CACHE_TTL_FILL || '').trim())
+}
+
+export function fillMessageCacheTtl(body, ttl = DEFAULT_CACHE_TTL) {
+  if (!body || !Array.isArray(body.messages)) return body
+  let target = normalizeCacheTtl(ttl)
+  // Same rule as upstream's shaped fallback: a ttl-less (implicit 5m) or 5m
+  // marker in tools/system/body precedes messages, so a 1h fill would 400.
+  if (listCacheMarkers(body).some((marker) => marker.section !== 'messages' && marker.ttl !== '1h')) target = '5m'
+  for (const message of body.messages) {
+    const controls = [message?.cache_control]
+    if (Array.isArray(message?.content)) for (const block of message.content) controls.push(block?.cache_control)
+    for (const control of controls) {
+      if (control && String(control.ttl || '').trim() && normalizeCacheTtl(control.ttl) === '5m') target = '5m'
+    }
+  }
+  const fill = (node) => {
+    const control = node?.cache_control
+    if (!control || typeof control !== 'object') return node
+    if (control.type && control.type !== 'ephemeral') return node
+    if (String(control.ttl || '').trim()) return node
+    return { ...node, cache_control: { ...control, type: 'ephemeral', ttl: target } }
+  }
+  let changed = false
+  const messages = body.messages.map((message) => {
+    if (!message || typeof message !== 'object') return message
+    let next = fill(message)
+    if (Array.isArray(next.content)) {
+      const content = next.content.map(fill)
+      if (content.some((block, i) => block !== next.content[i])) next = { ...next, content }
+    }
+    if (next !== message) changed = true
+    return next
+  })
+  return changed ? { ...body, messages } : body
+}
+
 function stampMessageTail(messages, index, ttl) {
   const message = messages[index]
   if (typeof message.content === 'string') {
@@ -420,6 +464,8 @@ export function prepareCliHopBody(
         body.messages = officialMessageMarker(body.messages, ttl, Math.min(2, available))
       }
     }
+    // (cus) After upstream's marker policy: retime ttl-less caller message markers.
+    if (!lean && callerCacheTtlFillEnabled()) body = fillMessageCacheTtl(body, cacheTtl)
   }
   return body
 }

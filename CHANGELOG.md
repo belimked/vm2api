@@ -4,7 +4,8 @@
 
 ## 1.4.023+cus — 2026-10-28（定制分支 cus/v1.4.023）
 
-- 丢弃 1.4.015+cus 的 `fillMessageCacheTtl`（a198ca17）：与上游 #797 的缓存合并策略冲突（调用方无 ttl 的消息断点按隐式 5m 保留），保留会导致上游 20 项缓存契约测试失败。改为跟随上游；若线上再次出现多轮缓存只写 5m，再另行修复。
+- 恢复 `fillMessageCacheTtl`，改为**开关**（`.env` 设 `VM2API_CALLER_CACHE_TTL_FILL=1` 启用，默认关=上游行为）：45 实测升级后 Claude Code 多轮缓存写入从 1h 全部退回 5m。现在放在上游 #797 断点合并之后执行，只给调用方无 ttl 的消息断点补会话 TTL；消息里已有显式 5m、或 tools/system 有无 ttl/5m 断点时补 5m，不会出现 5m 后接 1h。开关开启时上游 20 项「隐式 5m 保持不变」的契约测试按设计不成立，默认关时全绿。
+- （已被上条取代）丢弃 1.4.015+cus 的 `fillMessageCacheTtl`（a198ca17）：与上游 #797 的缓存合并策略冲突（调用方无 ttl 的消息断点按隐式 5m 保留），保留会导致上游 20 项缓存契约测试失败。改为跟随上游；若线上再次出现多轮缓存只写 5m，再另行修复。
 
 已部署机升级：换 Node 控制面镜像 `cus-v1.4.023` 并重启；启动应用迁移 047。kin-kernel 更新（`8a61aaa3…cc53ec16`，12947192 字节），须 `npm run fetch:payload` 后 `wrap-cli/sync`（`restart:true`）。cli-node 不变。
 
