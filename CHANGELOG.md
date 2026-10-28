@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased
+
+## 1.4.021 — 2026-10-28
+
+- #795：池调度候选阶段一次联合查询复用账号与运行状态快照，健康写回与过期清理移出请求热路径；迁移 046 拆分 `queue_wait_ms` 与 `scheduling_ms`，`wait_ms` 总调度口径不变，历史行 NULL。
+
+已部署机升级：更新 Node 控制面与 `web/dist` 后重启；启动应用迁移 046。cli-node 哈希未变，不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.4.020 — 2026-10-28
+
+- #726（作者 eshao731，Closes #722 / #723 / #724 / #725）：Codex HTTP 省略 `stream` 且无 `Accept: text/event-stream` 时返回 JSON，非流式 Chat/Completions 返回对应格式而不是 Responses 对象；首事件等待用 `KIN_UPSTREAM_TIMEOUT`，之后按流空闲超时检查，不再在内核回头后无限等待；未输出时内核 `503 no_capacity` 在候选范围内换槽；按实际 envelope 检查槽内限额，内核纯文本 413 报 `413 body_too_large` 而非 `worker_invalid_json`。**行为变化**：未设 `failover.max_request_mib` 时入口请求体上限由进程天花板（默认 128 MiB）改为与槽内 kernel 一致的 32 MiB，32–128 MiB 请求现在在入口直接 413。
+- Fixes #768 / #789 / #793：槽终端交互式启动 `claude` 时 cli-node 在 REPL 渲染阶段报 `SandboxManager.isSupportedPlatform is not a function` 退出。构建用的 `@anthropic-ai/sandbox-runtime` 桩只有 `start/stop`，适配层转发的静态方法全为 undefined；补齐后平台报不支持沙箱，`isSandboxingEnabled` 为 false，Bash 不进沙箱。`CLAUDE_CODE_HOST_REFRESH` 下读写宿主 `credentials.json`，logout 不 unlink 宿主文件。源码 `cleanup/local-src` `cb65c855`（含 `8917b95a`）。payload 钉到 `payload-2026.10.28-cli-host-cred`，cli-node `4975763790088a0eba226f20152b3c45261a0654b8bbc038701757b7699ab4e1`（27789668）。
+- 遥测主路径对齐 Claude Code 2.1.303。`env` 始终带 `node_version`（`v26.3.0`）、`is_running_with_bun`（`true`）和构建时间 `2026-10-18T20:20:57Z`，不再用槽位安装时间；版本回退为 `2.1.303`。空的 distro、git、GitHub Actions 字段不再上传，`coworker_type` 不再出现。进程指标补上 `cpuWindowMs`。`tengu_api_success` 带本次请求的模型，`tengu_init` 不带。主路径和 GrowthBook 不再带邮箱。旧 `worker.json` 里残留的硬件和密钥字段仍会在发送前丢掉。
+
+已部署机升级：须 `npm run fetch:payload` 后 `wrap-cli/sync`（`restart:true`），并更新 `kin-worker`，再重启 Node；仅更新 Node 不够。需要 >32 MiB 请求体的部署须在设置里显式调大「请求体上限」。本机槽需重启遥测旁路后才按新字段上传；集群槽在下次槽位启动、重载或出口重建时推送新的 `kin-worker`。只读根文件系统的集群槽需按现有流程换镜像。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.4.019 — 2026-10-28
+
+- Fixes #738 / #763：GPT/Codex 请求（`/v1/responses`、Chat/Completions、`/v1/messages` 转 Codex、`/v1/alpha/search`、`/v1/images/*`）补上托管 API Key 的 acquire/release 与扣费：成功请求按与 `usage_logs` 同一官方价（含生图）× 分组倍率累计 `requests` / tokens / `quota_used` / 5h·1d·7d 窗口与 `last_used_at`；USD 额度、请求数额度、窗口限额、RPM 与 Key 并发对 GPT 流量生效，额度用尽返回 `429 api_key_quota_exhausted`。此前 GPT 路径直接跳过，Key 计数恒为 0。
+
+已部署机升级：仅更新 Node 控制面后重启。历史 GPT 用量不回填到 Key 计数（`usage_logs` 不变）。cli-node 哈希未变，不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.4.018 — 2026-10-27
+
+- #720：风控页新增「JEV 使用记录」（全部 / JEV 视图下，默认折叠）：每次真正发给审核模型的调用记一行，含北京时间今日次数、累计调用/成功、上游返回的输入/输出 tokens 和按官方 TypeSafe 公开价的费用估算；去重缓存命中不算调用，上游没报用量的记为未知而不是 0。只存 Key 指纹（sha256 前 12 位），不存密钥、正文、问题和响应；明细保留 30 天，按天汇总保留 90 天，累计汇总一直保留。接口 `GET /api/panel/jev-usage` 仅管理员可读。新增迁移 045。
+- #666：arm64 控制面 `deploy/Dockerfile.arm64-control` 的 `NODE_IMAGE` digest 升到 Node 22.23.4（`sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d`），覆盖 Node 10–21 安全更新；amd64 Dockerfile 用浮动标签，下次构建自然跟上。
+
+已部署机升级：更新 Node 控制面与 `web/dist` 后重启；启动应用迁移 045。arm64 部署须拉新控制面镜像重建（含 Node 22.23.4）。cli-node 哈希未变，不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.4.017 — 2026-10-27
+
+- #782：CI：main 自 1.3.154 起 `npm run test:unit` 一直红（20 个文件 80 项），后续 Go / web 步骤从未执行。本次逐项二分到引入提交，过时断言改为当前设计，下面几处是真回归，已修：
+- #782：出口（kin-egress）：端口 0 启动时按字面 `:0` 等监听者，永远失败；二进制被替换后旧进程仍被当作可复用、`/proc` 扫描在最后一项不匹配时整体返回空，旧出口不回收导致 `egress_port_busy`（91acb94e 引入）。
+- #782：换号 thinking 归属：cli-hop 从原始请求重渲染时绕过了按账号过滤，别的账号签名的 thinking 原样发出（5a4f2f1d 引入）。
+- #782：人设：`official` 档丢掉调用方顶层 system（既不在 system 也不在 messages）；面板 `persona_guidance_presets` 不生效；旧 rewrite 路径总带槽位 ` - Locale:`；不支持 mid-conversation system 的模型（如 haiku-4-5）在 API 后端出站带 `role=system` Environment，会被上游 400。均为 e358143c 引入。
+- #782：面板：0注入档的 usage 遮罩显示与网关一致（网关按档默认遮罩）。
+- #782：已知未改：0注入档按 d917dd2a 设计不保留调用方顶层 system；人设重复渲染不幂等（生产只渲染一次）。
+
+已部署机升级：更新 Node 控制面与 `web/dist` 后重启。无迁移，不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.4.016 — 2026-10-27
+
+- #778：zero 档已带 billing `prompt_version`、调用方未提供 cache 标记时，恢复消息 `cache_control` 断点兜底（单轮 1 个、多轮最多 2 个，复用 `officialMessageMarker` 与解析后 TTL；不追加 system 模板；已有 system/tools/消息断点则保留不补点；lean/shaped/preserveSystem/requestContext 路径不启用）。
+
+已部署机升级：仅更新 Node 控制面后重启；cli-node 哈希未变，不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
 ## 1.4.015+cus — 2026-10-27（定制分支 cus/v1.4.015）
 
 - 修复 cli-hop 缓存实际按 5m 写入、面板 `cache_ttl: 1h` 不生效。原因：`official_full` / `official_303` 模板含 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`，`prepareCliHopBody` 判定为已组装模板（`shaped`），跳过 `officialMessageMarker`；调用方 messages 上的 `{type:"ephemeral"}` 不带 `ttl` 原样交给 cli-node，cli-node 只给自有 marker 补 TTL，上游按缺省 5m 计。现象：每会话首轮只有 system harness（约 5261 token）是 1h，之后所有缓存写入全是 5m。
