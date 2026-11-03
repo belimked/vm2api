@@ -528,9 +528,15 @@ function writeSchedule(projectRoot, id, mutate) {
   return summarizeVm(vm)
 }
 
-/** 调度关 / 调度开 by the operator. Turning on also clears 不可调度. */
+/**
+ * 调度关 / 调度开 by the operator. Turning on also clears 不可调度 and a geo-guard
+ * pause: the operator has looked at the exit and takes it back (cus).
+ */
 export function setScheduleOff(projectRoot, id, off, { reason = null, preserveStatus = true } = {}) {
-  return writeSchedule(projectRoot, id, (vm) => applyScheduleOff(vm, off, { reason, preserveStatus }))
+  return writeSchedule(projectRoot, id, (vm) => {
+    if (!off && vm.schedule_hold?.reason === HOLD_GEO) delete vm.schedule_hold
+    return applyScheduleOff(vm, off, { reason, preserveStatus })
+  })
 }
 
 /** A deterministic failure: the slot stays out until an operator action clears it. */
@@ -717,6 +723,12 @@ export function bindVmProxy(projectRoot, id, proxyInfo) {
   // It is not an operator toggle — it follows whether an exit is bound.
   vm.proxy_cli_enabled = hasBoundExit(vm.proxy)
   vm.updated_at = new Date().toISOString()
+  // A geo pause belongs to the exit that raised it; moving off that exit ends it,
+  // otherwise its recovery (keyed on the old proxy) can never reach this slot (cus).
+  migrateScheduleRecord(vm)
+  if (vm.schedule_hold?.reason === HOLD_GEO && vm.schedule_hold.detail?.tag !== (vm.proxy?.id ?? null)) {
+    applyClearHold(vm, HOLD_GEO)
+  }
   atomicWriteJson(file, vm)
   return summarizeVm(vm)
 }

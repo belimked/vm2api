@@ -524,6 +524,14 @@ function restrictionTone(vm: Vm | undefined): StatusTone | null {
         cls: 'caution',
       }
     }
+    // 出口巡检暂停（cus）：槽已离池，文案写明「暂停调度」与原因。
+    if (reason === 'geo_guard') {
+      return {
+        key: 'geo',
+        text: restrictionLabel(vm, '暂停调度：出口巡检异常'),
+        cls: 'bad',
+      }
+    }
     if (/^circuit_/.test(reason)) {
       return {
         key: 'circuit',

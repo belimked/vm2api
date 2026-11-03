@@ -284,3 +284,12 @@ test('legacy geo pauses migrate onto the geo guard hold', () => {
   assert.equal(stateOfReason('geo_guard').state, 'restricted')
   assert.equal(applyHold(vm, 'proxy_cooldown', { tag: 'px-1' }).schedule_hold.reason, 'geo_guard')
 })
+
+test('cus: geo pauses read as 暂停调度 with their cause', () => {
+  const hold = (kind) =>
+    resolveSlotState({ vm: { schedule_hold: { reason: 'geo_guard', detail: { tag: 'p', kind } } } })
+  assert.equal(hold('geo_unreachable').restriction_text, '暂停调度：出口不可达')
+  assert.equal(hold('geo_changed').restriction_text, '暂停调度：出口国家变化')
+  assert.equal(hold(undefined).restriction_text, '暂停调度：出口巡检异常')
+  assert.equal(hold('geo_unreachable').schedule_state, 'restricted')
+})

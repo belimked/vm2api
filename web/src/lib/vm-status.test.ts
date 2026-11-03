@@ -778,3 +778,21 @@ describe('four-state schedule model (backend resolveSlotState)', () => {
     })
   })
 })
+
+describe('cus: geo guard pause', () => {
+  it('reads as 暂停调度 with the backend cause', () => {
+    const vm = liveVm({
+      schedule_state: 'restricted',
+      restriction_reason: 'geo_guard',
+      restriction_text: '暂停调度：出口不可达',
+      restriction_scope: 'slot',
+    })
+    expect(poolStatus(vm)).toMatchObject({
+      key: 'geo',
+      text: '暂停调度：出口不可达',
+      cls: 'bad',
+    })
+    expect(restrictionCopy(vm)).toBe('暂停调度：出口不可达')
+    expect(fleetGroup(vm)).toBe('restricted')
+  })
+})

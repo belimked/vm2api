@@ -407,9 +407,13 @@ const geoPauseSlots = (bound, kind, proxyId) => {
     .filter(Boolean)
     .join(' ')
 }
+// Resume every slot whose pause names this proxy, not only the ones bound right now:
+// a slot rebound away and back while the exit was down still carries the hold (cus).
 const geoResumeSlots = (bound, kind, proxyId) => {
   const resumed = []
-  for (const vmId of bound) {
+  const ids = new Set(bound)
+  for (const vm of listVms(cfg.paths.project)) if (isGeoHold(vm, proxyId, kind)) ids.add(vm.id)
+  for (const vmId of ids) {
     if (!isGeoHold(getVm(cfg.paths.project, vmId), proxyId, kind)) continue
     clearScheduleHold(cfg.paths.project, vmId, HOLD_GEO, { tag: proxyId })
     resumed.push(vmId)

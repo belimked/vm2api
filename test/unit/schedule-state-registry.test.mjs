@@ -14,6 +14,7 @@ import {
   setScheduleHold,
   setScheduleOff,
   setVmSchedulable,
+  bindVmProxy,
   waitForSlotDrain,
 } from '../../src/lib/vm/vm-registry.mjs'
 import { restoreScheduleAfterLiveCredential } from '../../src/lib/oauth/oauth-credentials.mjs'
@@ -159,4 +160,28 @@ test('geo guard hold outranks proxy and maintenance holds until geo recovery lif
     [legacy.schedule_hold.reason, legacy.schedule_hold.detail.tag, legacy.schedule_hold.detail.kind],
     ['geo_guard', 'p9', 'geo_unreachable'],
   )
+})
+
+test('cus: operator 调度开 lifts a geo pause; other holds stay', (t) => {
+  const root = project([{ id: 'vm-01', status: 'running', schedulable: true }])
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  setScheduleHold(root, 'vm-01', 'geo_guard', { tag: 'p1', kind: 'geo_unreachable' })
+  assert.equal(getVm(root, 'vm-01').schedulable, false)
+  const on = setScheduleOff(root, 'vm-01', false)
+  assert.equal(on.schedulable, true)
+  assert.equal(getVm(root, 'vm-01').schedule_hold, undefined)
+  setScheduleHold(root, 'vm-01', 'maintenance', { tag: 'kernel_update' })
+  assert.equal(setScheduleOff(root, 'vm-01', false).schedulable, false, 'maintenance is not the operator switch')
+})
+
+test('cus: rebinding off the exit that raised a geo pause ends it', (t) => {
+  const socks = (id) => ({ id, host: '127.0.0.1', port: 1080, scheme: 'socks5' })
+  const root = project([{ id: 'vm-01', status: 'running', schedulable: true, proxy: socks('p1') }])
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  setScheduleHold(root, 'vm-01', 'geo_guard', { tag: 'p1', kind: 'geo_unreachable' })
+  bindVmProxy(root, 'vm-01', socks('p1'))
+  assert.equal(getVm(root, 'vm-01').schedule_hold?.reason, 'geo_guard', 'same exit keeps the pause')
+  bindVmProxy(root, 'vm-01', socks('p2'))
+  assert.equal(getVm(root, 'vm-01').schedule_hold, undefined)
+  assert.equal(getVm(root, 'vm-01').schedulable, true)
 })

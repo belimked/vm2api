@@ -27,15 +27,17 @@ export function vmSchedulableProps(vm: Vm) {
   return {
     vmId: vm.id,
     // 受限（含维护 / 代理暂停）仍是「开」：开关只表达操作员意图和不可调度。
+    // 出口巡检暂停例外（cus）：显示为关，点开即解除暂停。
     schedulable:
       scheduleState === 'restricted'
-        ? true
+        ? vm.restriction_reason !== 'geo_guard'
         : scheduleState
           ? scheduleState === 'on'
           : vm.schedulable !== false,
     scheduleState,
     restrictionUntil: restrictionUntilOf(vm),
     restrictionReason: vm.restriction_reason,
+    restrictionText: vm.restriction_text || null,
     unschedulableText: vm.unschedulable_text || vm.unschedulable_reason || null,
   }
 }
@@ -45,6 +47,8 @@ export function SchedulableSwitch({
   schedulable,
   scheduleState,
   restrictionUntil,
+  restrictionReason,
+  restrictionText,
   unschedulableText,
   className,
 }: {
@@ -53,6 +57,7 @@ export function SchedulableSwitch({
   scheduleState?: ScheduleState
   restrictionUntil?: number | null
   restrictionReason?: string | null
+  restrictionText?: string | null
   unschedulableText?: string | null
   className?: string
 }) {
@@ -83,16 +88,19 @@ export function SchedulableSwitch({
   })
 
   const untilText = formatRestrictionUntil(restrictionUntil)
+  const geoPaused = restricted && restrictionReason === 'geo_guard'
   const tooltip =
-    scheduleState === 'unschedulable' && !checked
-      ? `不可调度：${unschedulableText || '错误'}。处理后点击重新开启调度`
-      : restricted && checked
-        ? untilText
-          ? `调度开，当前受限至 ${untilText}`
-          : '调度开，当前受限'
-        : checked
-          ? '点击关闭调度'
-          : '点击开启调度'
+    geoPaused && !checked
+      ? `${restrictionText || '暂停调度：出口巡检异常'}。确认出口正常后点击重新开启调度`
+      : scheduleState === 'unschedulable' && !checked
+        ? `不可调度：${unschedulableText || '错误'}。处理后点击重新开启调度`
+        : restricted && checked
+          ? untilText
+            ? `调度开，当前受限至 ${untilText}`
+            : '调度开，当前受限'
+          : checked
+            ? '点击关闭调度'
+            : '点击开启调度'
 
   return (
     <Tooltip>

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- cus：出口巡检暂停（`geo_guard`）显示与解除修正。面板文案按原因区分「暂停调度：出口不可达」/「暂停调度：出口国家变化」（此前一律显示「出口国家异常」，且开关仍显示为开）；被巡检暂停的槽开关显示为关，操作员点「调度开」即解除该暂停（维护、代理异常等系统暂停不受影响）。巡检恢复时，除当前绑定的槽外，凡暂停标记指向该代理的槽一并恢复；槽改绑到其他代理时清除指向旧代理的巡检暂停。起因：5.253 槽 `01` 在代理不可达期间被换绑又绑回，代理 10:14 恢复时只恢复了 `starlink`，`01` 一直卡在暂停且面板无法解除。
+
 ## 1.4.023+cus — 2026-10-28（定制分支 cus/v1.4.023）
 
 - 恢复 `fillMessageCacheTtl`，改为**开关**（`.env` 设 `VM2API_CALLER_CACHE_TTL_FILL=1` 启用，默认关=上游行为）：45 实测升级后 Claude Code 多轮缓存写入从 1h 全部退回 5m。现在放在上游 #797 断点合并之后执行，只给调用方无 ttl 的消息断点补会话 TTL；消息里已有显式 5m、或 tools/system 有无 ttl/5m 断点时补 5m，不会出现 5m 后接 1h。开关开启时上游 20 项「隐式 5m 保持不变」的契约测试按设计不成立，默认关时全绿。
@@ -9,6 +11,7 @@
 
 - 改动范围：本轮业务代码只动 `src/lib/protocol/outbound-attempt.mjs`，且相对上游 1.4.023 **只新增、不删改上游任何一行**：新增 `callerCacheTtlFillEnabled()`、`fillMessageCacheTtl()`，并在 `prepareCliHopBody` 末尾（上游断点处理之后）加一行调用。只作用于 cli-hop 非 lean 路径（不碰 official_303 lean、requestContext、HTTP hop、API 直连、Codex）；只给消息里无 ttl 的断点补 `ttl` 字段，不增删/挪动断点、不改正文、不动 tools/system 及已有显式 ttl。其余改动：compose 镜像 tag、`sync-upstream.sh`（分支名 + 补丁检查项 `VM2API_CALLER_CACHE_TTL_FILL`）、本条日志、新增测试 `test/unit/cus-caller-cache-ttl-fill.test.mjs`；`docs/PROTOCOL.md`、`test/unit/cli-hop-body.test.mjs` 恢复为上游原样。与上游其余 79 个差异文件均为此前 cus 版本既有补丁，原样带入。提交 6d0cd951、f1df1fda。
 - 45 服务器（45.8.112.157，/opt/vm2api）：`.env` 设 `VM2API_IMAGE_TAG=cus-v1.4.023`（备份 `.env.bak-cus-v1.4.021`）与 `VM2API_CALLER_CACHE_TTL_FILL=1`（备份 `.env.bak-before-ttl-fill`）；迁移 047 已应用；kin-kernel 在宿主 `bin/`、`share/wrap-cli/`、镜像、槽 `kin-jpkdd` 四处均为 `8a61aaa3…`。开关打开后首批请求缓存写入 `ephemeral_1h` 97225 / 98179，`ephemeral_5m` 为 0，无 TTL 顺序 400（此前 1.4.023 不开开关时全为 5m）。回滚：删掉开关或设 0 后 `docker compose up -d vm2api`。
+- 5.253 生产（5.253.17.110，/opt/vm2api）2026-10-29 00:08 JST 由 `cus-v1.3.216` 直接升到 `cus-v1.4.023`：先在线 `VACUUM INTO data/backups/kin-pre-1.4.023.db`，备份 `.env.bak.cus-v1.3.216` 与 `/root/vm2api-backup/`；两行 `VM2API_IMAGE_TAG` 改为 `cus-v1.4.023`，加 `VM2API_CALLER_CACHE_TTL_FILL=1`，`routing.json` 设 `failover.max_request_mib=128`（保持 1.4.020 之前的 128 MiB）。启动约 9 秒健康；迁移 042–047 应用，#703 预演 6 槽 0 变化，#744 把本地槽改为 `restart=no`；启动时自动 `wrap-cli slot sync` 6/6，kin-kernel `8a61aaa3…`、cli-node `49757637…`、kin-worker `9fa8d7b2…` 在宿主、镜像与 6 个槽一致；随后逐个 reload 5 个运行中的槽。实测 12 条请求全 200，vm-02 多轮缓存写入全为 `ephemeral_1h`、`ephemeral_5m` 为 0。遗留：3 个节点槽遥测 `waiting_official_identity`。回滚：换回 `.env.bak.cus-v1.3.216` 与 `kin-pre-1.4.023.db`（删 wal/shm）后 `up -d`，槽内 kernel 不随之回退。
 
 已部署机升级：换 Node 控制面镜像 `cus-v1.4.023` 并重启；启动应用迁移 047。kin-kernel 更新（`8a61aaa3…cc53ec16`，12947192 字节），须 `npm run fetch:payload` 后 `wrap-cli/sync`（`restart:true`）。cli-node 不变。需要 1h 多轮缓存时在 `.env` 加 `VM2API_CALLER_CACHE_TTL_FILL=1`。
 

@@ -40,8 +40,20 @@ export const HOLD_GEO = 'geo_guard'
 const HOLD_REASONS = Object.freeze({
   [HOLD_MAINTENANCE]: '维护中',
   [HOLD_PROXY]: '代理异常',
-  [HOLD_GEO]: '出口国家异常',
+  [HOLD_GEO]: '暂停调度：出口巡检异常',
 })
+
+/** Geo pauses name their cause: an unreachable exit is not a country change. */
+const GEO_HOLD_TEXT = Object.freeze({
+  geo_unreachable: '暂停调度：出口不可达',
+  geo_changed: '暂停调度：出口国家变化',
+})
+
+export function holdTextOf(hold) {
+  if (!hold?.reason) return null
+  if (hold.reason === HOLD_GEO) return GEO_HOLD_TEXT[hold.detail?.kind] || HOLD_REASONS[HOLD_GEO]
+  return HOLD_REASONS[hold.reason] || null
+}
 
 /**
  * 受限 · slot, most specific first. `match` is a prefix / exact test on the
@@ -366,7 +378,11 @@ export function resolveSlotState({
     restriction_scope: scope,
     restriction_soft: soft,
   })
-  if (vm.schedule_hold?.reason) return restricted(vm.schedule_hold.reason, null)
+  if (vm.schedule_hold?.reason) {
+    const out = restricted(vm.schedule_hold.reason, null)
+    out.restriction_text = holdTextOf(vm.schedule_hold) || out.restriction_text
+    return out
+  }
   const until = Number(restrictionUntil) || Number(availability?.until) || 0
   const live = until > now
   if (!live && availability?.key === 'rest') {
