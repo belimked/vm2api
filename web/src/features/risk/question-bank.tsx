@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 
-const MAX_QUESTIONS = 24
+const MAX_QUESTIONS = 40
 
 function nextId(label: string, rows: PolicyQuestion[]) {
   const base = label
