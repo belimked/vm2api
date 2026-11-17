@@ -118,16 +118,100 @@ test('remove deletes a proxy and updateConfig rejects bad bind_limit', () => {
   pool.stopScheduler()
 })
 
-async function listenSocks() {
-  const server = net.createServer((socket) => {
-    socket.on('data', () => {
-      socket.write(Buffer.from([0x05, 0x00]))
-    })
+// A 127.0.0.1 row is a local forwarder: the probe sends CONNECT after the
+// greeting and needs a bound-address reply, not just 0x05 0x00. Greeting and
+// CONNECT can arrive in one chunk, so parse by length instead of per write.
+function answerSocks(socket) {
+  let buf = Buffer.alloc(0)
+  let phase = 'greeting'
+  socket.on('error', () => {})
+  socket.on('data', (chunk) => {
+    buf = Buffer.concat([buf, chunk])
+    while (true) {
+      if (phase === 'greeting') {
+        if (buf.length < 2) return
+        const need = 2 + buf[1]
+        if (buf.length < need) return
+        buf = buf.subarray(need)
+        socket.write(Buffer.from([0x05, 0x00]))
+        phase = 'request'
+        continue
+      }
+      if (phase === 'request') {
+        if (buf.length < 10) return
+        const port = (buf[8] << 8) | buf[9]
+        buf = buf.subarray(10)
+        socket.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]))
+        if (port === 53) {
+          phase = 'tunnel'
+          continue
+        }
+        phase = 'closed'
+        socket.end()
+        return
+      }
+      if (phase === 'tunnel') {
+        if (buf.length < 2) return
+        const need = 2 + buf.readUInt16BE(0)
+        if (buf.length < need) return
+        const query = buf.subarray(2, need)
+        buf = buf.subarray(need)
+        const response = Buffer.from(query)
+        response[2] |= 0x80
+        const frame = Buffer.alloc(2 + response.length)
+        frame.writeUInt16BE(response.length, 0)
+        response.copy(frame, 2)
+        socket.write(frame)
+        continue
+      }
+      return
+    }
   })
+}
+
+async function listenSocks() {
+  const server = net.createServer((socket) => answerSocks(socket))
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   const addr = server.address()
   return { server, host: addr.address, port: addr.port }
 }
+
+test('unbound proxy probes do not check or repair unused egress networks', async (t) => {
+  const socks = await listenSocks()
+  const dir = tmpDir()
+  let checks = 0
+  let repairs = 0
+  const pool = new ProxyPool({
+    dataDir: dir,
+    egressCheck: () => {
+      checks += 1
+      return { ok: false, reason: 'not_running' }
+    },
+    repairEgress: () => {
+      repairs += 1
+      throw new Error('all predefined address pools have been fully subnetted')
+    },
+  })
+  pool.stopScheduler()
+  t.after(() => {
+    pool.stopScheduler()
+    socks.server.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+  pool.importLines(`${socks.host}:${socks.port}`)
+  const id = pool.snapshot().proxies[0].id
+
+  for (let i = 0; i < 2; i++) {
+    const batch = await pool.probeAll()
+    assert.equal(batch.results[0].ok, true)
+    const { probe } = await pool.probeById(id)
+    assert.equal(probe.ok, true)
+    assert.equal(probe.scope, 'socks')
+  }
+  assert.equal(checks, 0)
+  assert.equal(repairs, 0)
+  assert.equal(pool.snapshot().proxies[0].last_error, null)
+})
 
 test('probeOne marks egress_down after SOCKS greeting if helper is dead', async () => {
   const socks = await listenSocks()
@@ -138,6 +222,7 @@ test('probeOne marks egress_down after SOCKS greeting if helper is dead', async 
   pool.stopScheduler()
   try {
     pool.importLines(`${socks.host}:${socks.port}`)
+    pool.bind(pool.snapshot().proxies[0].id, 'vm-01')
     const result = await pool.probeOne(pool.state.proxies[0])
     assert.equal(result.ok, false)
     assert.equal(result.error, 'not_running')
@@ -160,8 +245,16 @@ test('probeOne repairs egress then passes', async () => {
   pool.stopScheduler()
   try {
     pool.importLines(`${socks.host}:${socks.port}`)
+    pool.bind(pool.snapshot().proxies[0].id, 'vm-01')
     const result = await pool.probeOne(pool.state.proxies[0])
     assert.equal(result.ok, true)
+    assert.equal(healthy, true)
+
+    // Legacy records may only carry the single-slot field.
+    pool.state.proxies[0].bound_vm_ids = []
+    healthy = false
+    const legacy = await pool.probeOne(pool.state.proxies[0])
+    assert.equal(legacy.ok, true)
     assert.equal(healthy, true)
   } finally {
     pool.stopScheduler()
@@ -183,6 +276,7 @@ test('startScheduler immediately repairs enabled egress', async () => {
   })
   try {
     pool.importLines(`${socks.host}:${socks.port}`)
+    pool.bind(pool.snapshot().proxies[0].id, 'vm-01')
     pool.startScheduler()
     const deadline = Date.now() + 1000
     while (!healthy && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10))
@@ -204,6 +298,7 @@ test('egress_down does not mark a live SOCKS proxy dead', async () => {
   try {
     pool.importLines(`${socks.host}:${socks.port}`)
     const id = pool.snapshot().proxies[0].id
+    pool.bind(id, 'vm-01')
     await pool.probeById(id)
     await pool.probeById(id)
     const p = pool.snapshot().proxies[0]
@@ -278,16 +373,58 @@ test('HTTP banner is not_socks5', async () => {
 })
 
 test('split SOCKS5 method reply still counts as healthy', async () => {
-  let client
   let releaseSecond
   const firstHandled = new Promise((resolve) => {
     releaseSecond = resolve
   })
   const server = net.createServer((socket) => {
-    client = socket
+    let buf = Buffer.alloc(0)
+    let phase = 'greeting'
+    socket.on('error', () => {})
     socket.write(Buffer.from([0x05]))
     firstHandled.then(() => {
       if (!socket.destroyed) socket.write(Buffer.from([0x00]))
+    })
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk])
+      while (true) {
+        if (phase === 'greeting') {
+          if (buf.length < 2) return
+          const need = 2 + buf[1]
+          if (buf.length < need) return
+          buf = buf.subarray(need)
+          phase = 'request'
+          continue
+        }
+        if (phase === 'request') {
+          if (buf.length < 10) return
+          const port = (buf[8] << 8) | buf[9]
+          buf = buf.subarray(10)
+          socket.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]))
+          if (port === 53) {
+            phase = 'tunnel'
+            continue
+          }
+          phase = 'closed'
+          socket.end()
+          return
+        }
+        if (phase === 'tunnel') {
+          if (buf.length < 2) return
+          const need = 2 + buf.readUInt16BE(0)
+          if (buf.length < need) return
+          const query = buf.subarray(2, need)
+          buf = buf.subarray(need)
+          const response = Buffer.from(query)
+          response[2] |= 0x80
+          const frame = Buffer.alloc(2 + response.length)
+          frame.writeUInt16BE(response.length, 0)
+          response.copy(frame, 2)
+          socket.write(frame)
+          continue
+        }
+        return
+      }
     })
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -313,8 +450,9 @@ test('split SOCKS5 method reply still counts as healthy', async () => {
   try {
     pool.importLines(`${addr.address}:${addr.port}`)
     const result = await pool._probeSocks(pool.state.proxies[0])
-    assert.equal(client.bytesWritten, 2)
-    assert.deepEqual(chunks, [1, 1])
+    // 0x05 and 0x00 arrive as two 1-byte reads and must be merged before the
+    // method is decided.
+    assert.deepEqual(chunks.slice(0, 2), [1, 1])
     assert.equal(result.ok, true)
     assert.equal(result.error, null)
   } finally {
@@ -323,7 +461,6 @@ test('split SOCKS5 method reply still counts as healthy', async () => {
     server.close()
   }
 })
-
 test('probeAll resurrects a probe-killed proxy', async () => {
   const socks = await listenSocks()
   const pool = new ProxyPool({ dataDir: tmpDir() })

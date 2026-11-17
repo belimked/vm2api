@@ -19,6 +19,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { redactSecrets } from '../core/security.mjs'
 import { resolveStoreDb } from '../db/database.mjs'
+import { enqueueWrite, writeBehindArmed } from '../db/write-behind.mjs'
 import { UsageLogsRepo } from '../db/repos/usage-logs-repo.mjs'
 import { classifyRequestError, resolveMutedErrorClasses } from './error-class.mjs'
 import { costColumnsFromUsage, normalizeUsage } from './pricing.mjs'
@@ -548,6 +549,14 @@ export class RequestLogStore {
       model: extra.model || null,
       stream: !!extra.stream,
       status: extra.status ?? null,
+      upstream_status: extra.audit_upstream_400
+        ? 400
+        : Number(extra.upstream_status) === 400
+          ? null
+          : (extra.upstream_status ?? null),
+      upstream_400_message: extra.audit_upstream_400_message
+        ? String(extra.audit_upstream_400_message).slice(0, 300)
+        : null,
       duration_ms,
       api_key_kind: extra.api_key_kind || null,
       api_key_id: extra.api_key_id || null,
@@ -578,6 +587,7 @@ export class RequestLogStore {
       attempt_count: extra.attempt_count ?? null,
       final_state: extra.final_state || null,
       final_account_id: extra.final_account_id || extra.account_id || null,
+      usage_account_id: extra.usage_account_id || null,
       session_id: sessionIdForLog(extra.session_id),
       outbound_session_id: sessionIdForLog(extra.outbound_session_id),
       reasoning_effort: REASONING_EFFORTS.has(extra.reasoning_effort) ? extra.reasoning_effort : null,
@@ -596,7 +606,7 @@ export class RequestLogStore {
       image_output_tokens: imageTokenCount(extra.image_usage?.output_tokens),
       // sub2api ownership + billing columns
       user_id: extra.user_id ?? null,
-      vm_owner_user_id: this.repo.vmOwnerOf(extra.vm_id),
+      vm_owner_user_id: null,
       group_id: extra.group_id ?? 1,
       rate_multiplier: Number.isFinite(Number(extra.rate_multiplier)) ? Number(extra.rate_multiplier) : 1,
       ...costColumnsForLog(billedUsage, extra.upstream_model || extra.model || extra.requested_model, extra),
@@ -609,14 +619,13 @@ export class RequestLogStore {
     const classified = classifyRequestError(summary)
     if (classified?.error_class) summary.error_class = classified.error_class
 
-    try {
-      this.repo.insertSummaryIfAbsent(summary)
-    } catch {}
-    if (this.jsonlMirror) this._appendJsonl(summary)
-    this._mem.push(summary)
-    if (this._mem.length > this._memMax) this._mem = this._mem.slice(-this._memMax)
-
-    if (ctx.mode === 'debug') {
+    const persist = () => {
+      summary.vm_owner_user_id = this.repo.vmOwnerOf(extra.vm_id)
+      try {
+        this.repo.insertSummaryIfAbsent(summary)
+      } catch {}
+      if (this.jsonlMirror) this._appendJsonl(summary)
+      if (ctx.mode !== 'debug') return
       const debugRec = {
         ...summary,
         headers: ctx.headers,
@@ -629,7 +638,6 @@ export class RequestLogStore {
             : null,
         hop_meta: extra.hop_meta || null,
         via: extra.via || extra.hop_meta?.via || null,
-        upstream_status: extra.upstream_status ?? null,
         outbound_summary: extra.outbound_summary || null,
         cache_prefix: extra.cache_prefix || null,
         cache_continuity: extra.cache_continuity || null,
@@ -645,12 +653,18 @@ export class RequestLogStore {
           ctx.capture_outbound && !extra.classifier && extra.outbound_body != null
             ? clampBody(extra.outbound_body, this.maxDebugBodyChars)
             : null,
+        outbound_body_source: ctx.capture_outbound ? extra.outbound_body_source || null : null,
+        outbound_body_truncated: ctx.capture_outbound ? extra.outbound_body_truncated === true : false,
         response: ctx.response ? debugResponse(ctx.response) : null,
       }
       try {
         this.repo.insertDebug(summary.request_id || summary.id, summary.ts, debugRec)
       } catch {}
     }
+    this._mem.push(summary)
+    if (this._mem.length > this._memMax) this._mem = this._mem.slice(-this._memMax)
+    if (writeBehindArmed()) enqueueWrite(persist)
+    else persist()
     return summary
   }
 
@@ -715,6 +729,14 @@ export class RequestLogStore {
 
   billingStats(opts = {}) {
     return this.repo.billingStats(opts)
+  }
+
+  healthBuckets(opts = {}) {
+    return this.repo.healthBuckets(opts)
+  }
+
+  topErrors(opts) {
+    return this.repo.topErrors(opts)
   }
 
   ownerBilling(opts = {}) {

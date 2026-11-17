@@ -11,6 +11,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadConfig, reloadActiveVm, routingConfigFile } from './lib/core/config.mjs'
+import { geminiBillingUnavailable, isGeminiPublicPath } from './lib/gemini/routes.mjs'
 import {
   extractApiKey,
   timingSafeEqualStr,
@@ -27,11 +28,14 @@ import {
   normalizeCredentialRefreshConfig,
 } from './lib/oauth/credential-refresh-monitor.mjs'
 import { createKernelWatchdog, normalizeKernelWatchdogConfig } from './lib/transport/kernel-watchdog.mjs'
+import { createSlotCapacityReconciler } from './lib/vm/slot-capacity-reconciler.mjs'
+import { configureSlotCapacity } from './lib/vm/slot-capacity.mjs'
 import { ensureSlotSubscriptionType } from './lib/oauth/oauth-credentials.mjs'
+import { ensureRemoteOfficialCredentialLink } from './lib/cluster/remote-slot-files.mjs'
 import { createCliNodeGuard } from './lib/vm/cli-node-guard.mjs'
-import { ensureTelemetrySidecar } from './lib/vm/slot-process-status.mjs'
 
 import { createSlotBridgeHealer, powerOnSlot, reviveDownSlots } from './lib/vm/slot-recovery.mjs'
+import { resumePendingKernelInstalls } from './lib/vm/kernel-install.mjs'
 import { createUsageProbeMonitor, normalizeUsageProbeConfig } from './lib/oauth/usage-probe-monitor.mjs'
 import { createCatalogMonitor } from './lib/admin/catalog-monitor.mjs'
 import { normalizeOfficialCcConfig } from './lib/oauth/official-cc-bootstrap.mjs'
@@ -40,6 +44,7 @@ import { normalizeHealthProbeConfig, createHealthProbeMonitor, HEALTH_REAL_HEADE
 import { normalizeNotifyConfig, createNotifyMonitor, dispatchNotify } from './lib/admin/notify.mjs'
 import { ProxyGeoGuard } from './lib/vm/proxy-geo-guard.mjs'
 import { ProxyGeoChecksRepo } from './lib/db/repos/proxy-geo-checks-repo.mjs'
+import { snapshotVmConnectivity } from './lib/admin/vm-connectivity.mjs'
 import { runVmTestChat } from './lib/admin/vm-test-chat.mjs'
 import { VmTestScheduleRunner } from './lib/admin/vm-test-schedule.mjs'
 import { StickyRouter } from './lib/pool/sticky-router.mjs'
@@ -47,11 +52,12 @@ import { AccountQuota } from './lib/pool/account-quota.mjs'
 import { normalizeTiers } from './lib/pool/quota-tiers.mjs'
 import { ApiKeyStore } from './lib/admin/api-keys.mjs'
 import { keyScopeFromRequest } from './lib/admin/key-scope.mjs'
+import { filterModelCatalogForKey } from './lib/admin/key-models.mjs'
 import { GroupsRepo } from './lib/db/repos/groups-repo.mjs'
 import { SettingsRepo } from './lib/db/repos/settings-repo.mjs'
 import { ApiEndpointStore } from './lib/admin/api-endpoints.mjs'
 import { ApiScheduler } from './lib/pool/api-scheduler.mjs'
-import { resolveInferenceBackend } from './lib/pool/api-protocol.mjs'
+import { apiScheduleScope, resolveInferenceBackend } from './lib/pool/api-protocol.mjs'
 import { bootApiKernel, apiKernelPaths, apiKernelSnapshot } from './lib/transport/api-kernel-client.mjs'
 import { PanelUserStore } from './lib/admin/panel-users.mjs'
 import { RequestLogStore } from './lib/admin/request-log.mjs'
@@ -65,6 +71,11 @@ import {
   isCodexVm,
   syncCodexQuotaSchedule,
 } from './lib/vm/vm-registry.mjs'
+import { createCragSubscription } from './lib/vm/crag-subscription.mjs'
+import { createCragRuntimeInventory } from './lib/vm/crag-runtime-inventory.mjs'
+import { configureCragRuntimeAdmission } from './lib/vm/slot-runtime-admission.mjs'
+import { syncRemoteSlotRestartPolicy } from './lib/cluster/remote-slot.mjs'
+import { installedCragV2Root } from './lib/vm/wrap-cli-runtime.mjs'
 import { makeError, ErrorType, ErrorCode } from './lib/core/errors.mjs'
 import { HOLD_GEO, HOLD_PROXY } from './lib/pool/schedule-state.mjs'
 import * as panel from './lib/admin/panel-api.mjs'
@@ -73,7 +84,8 @@ import { ensureProxyEgress, proxyEgressReady } from './lib/vm/egress.mjs'
 import { syncIpv6ProxyEgress } from './lib/vm/proxy-policy-runtime.mjs'
 import { GATEWAY_CAPABILITIES } from './lib/vm/execution-context.mjs'
 import { isTelemetryPath, telemetryInterceptResponse } from './lib/identity/telemetry-rewrite.mjs'
-import { openDatabase, closeDatabase } from './lib/db/database.mjs'
+import { openDatabase, closeDatabase, getDb } from './lib/db/database.mjs'
+import { armWriteBehind } from './lib/db/write-behind.mjs'
 import { JevUsageRepo } from './lib/db/repos/jev-usage-repo.mjs'
 import { installJevUsageRecorder } from './lib/protocol/jev-usage.mjs'
 import { runLegacyImport } from './lib/db/legacy-import.mjs'
@@ -81,13 +93,21 @@ import { initVmDbSync, stopVmWatch } from './lib/vm/vm-db-sync.mjs'
 import { BackupService } from './lib/admin/backup-service.mjs'
 import { ClusterNodesRepo } from './lib/db/repos/cluster-nodes-repo.mjs'
 import { ClusterManager } from './lib/cluster/cluster-manager.mjs'
+import { createHostMemoryPressure, installHostMemoryPressure } from './lib/cluster/host-memory-pressure.mjs'
 import { createClusterRoutes } from './lib/cluster/cluster-routes.mjs'
-import { bindPlacement, nodeImageBuildRunning } from './lib/cluster/placement.mjs'
+import { bindPlacement, isNativeNodeVm, nodeImageBuildRunning, warmNodeSlotImages } from './lib/cluster/placement.mjs'
 import { ClusterError } from './lib/cluster/ssh-link.mjs'
 import { nodeEgressProxyUrl, startNodeEgressSocks } from './lib/cluster/node-egress-socks.mjs'
 import { createSlotShell } from './lib/vm/slot-shell.mjs'
 import { vmLockBusy } from './lib/vm/vm-file.mjs'
-import { refreshSlotGuestBinDir, syncLocalSlotRestartPolicies } from './lib/vm/vm-runtime.mjs'
+import { isKvmRuntime } from './lib/vm/runtime-kind.mjs'
+import { resolveKernelDataplane } from './lib/vm/slot-engine.mjs'
+import {
+  assertCragSubscriptionTarget,
+  isCragSubscriptionSlotEnabled,
+  refreshSlotGuestBinDir,
+  syncLocalSlotRestartPolicies,
+} from './lib/vm/vm-runtime.mjs'
 
 import {
   classifyCredentialRefresh,
@@ -100,12 +120,15 @@ import { stopAllRustKernels } from './lib/transport/rust-kernel-supervisor.mjs'
 import { createRespond, parseRequestUrl } from './lib/http/respond.mjs'
 import { corsHeadersForRequest } from './lib/http/cors.mjs'
 import { isConsoleEntry, tryServeWebDist } from './lib/http/web-dist.mjs'
+import { createGracefulShutdown } from './lib/http/graceful-shutdown.mjs'
 import { createRoutingRuntime } from './lib/admin/routing-runtime.mjs'
 import { createImportCommit } from './lib/oauth/import-commit.mjs'
 import { createHandleProtocol } from './lib/protocol/handle-protocol.mjs'
 import { createResponsesWsHandler } from './lib/protocol/responses-ws.mjs'
 import { handleUserUsage } from './lib/protocol/user-count-tokens.mjs'
+import { createKeySelfHandler, KEY_SELF_PATHS } from './lib/protocol/key-self.mjs'
 import { createPanelHandler } from './lib/admin/panel-routes.mjs'
+import { createCragShopHandler, isCragShopPath, sessionBuyerOwner } from './lib/admin/crag-shop.mjs'
 
 const FEATURES = [
   'passthrough',
@@ -145,7 +168,8 @@ const allowRate = createRateLimiter({
 
 // --- Persistent store (SQLite, sub2api-inspired) ---
 const dataDir = cfg.paths.data || path.join(cfg.paths.root, 'data')
-openDatabase({ dataDir })
+openDatabase({ dataDir, pooled: true })
+armWriteBehind(getDb())
 const jevUsageRepo = new JevUsageRepo()
 installJevUsageRecorder((event) => jevUsageRepo.record(event))
 try {
@@ -483,7 +507,7 @@ try {
 
 initPoolRuntime()
 try {
-  applyRoutingTierConcurrency(routingConfig.tiers)
+  applyRoutingTierConcurrency(routingConfig.tiers, { preserveExisting: true })
 } catch (e) {
   console.warn('[quota] apply tier concurrency failed', e?.message || e)
 }
@@ -566,6 +590,7 @@ const vmTestSchedule = new VmTestScheduleRunner({
 })
 credentialRefreshMonitor = createCredentialRefreshMonitor({
   config: normalizeCredentialRefreshConfig(routingConfig.credential_refresh),
+  ensureLink: (vm) => ensureRemoteOfficialCredentialLink(vm),
   listTargets: () =>
     listVms(cfg.paths.project).map((vm) => {
       let lastProbe = vm.last_probe || null
@@ -592,16 +617,26 @@ kernelWatchdog = createKernelWatchdog({
   listTargets: () => listVms(cfg.paths.project),
   getRouting: () => routingConfig,
   homeDirFor: (vm) => path.join(cfg.paths.project, 'vms', vm.id, 'cli-home'),
-  ensureTelemetry: (vm) => ensureTelemetrySidecar({ projectRoot: cfg.paths.project, vm }),
   revive: (vm) => bootSlot(vm.id),
   healBridges: createSlotBridgeHealer({ projectRoot: cfg.paths.project }),
-  onFault: (vm, reason) => {
-    const title = `槽内核故障 ${vm.id}`
-    dispatchNotify(routingConfig.notify, {
-      title,
-      text: `【KIN】${title}\n\n${reason}\n已停止调度该槽；内核恢复健康后自动恢复调度。`,
-      subject: `KIN · ${title}`,
-    }).catch((error) => console.warn('[kernel-watchdog] notify failed', error?.message || error))
+})
+
+configureSlotCapacity(routingConfig.slot_capacity)
+const slotCapacityReconciler = createSlotCapacityReconciler({
+  projectRoot: cfg.paths.project,
+  listTargets: () => listVms(cfg.paths.project),
+  getRouting: () => routingConfig,
+  // Every cluster node gets a host budget from its 30s health probe (MemTotal / MemAvailable).
+  nodeMemory: (id) => {
+    try {
+      const health = clusterManager.get(id)?.health
+      const total = Number(health?.host?.mem_total)
+      const used = Number(health?.host?.mem_used)
+      if (!(total > 0) || !Number.isFinite(used)) return null
+      return { totalBytes: total, availableBytes: Math.max(0, total - used), at: Date.parse(health.checked_at) || 0 }
+    } catch {
+      return null
+    }
   },
 })
 
@@ -635,6 +670,7 @@ catalogMonitor = createCatalogMonitor({
   log: (event) => console.log(JSON.stringify(event)),
 })
 notifyMonitor = createNotifyMonitor({
+  vmSnapshot: () => snapshotVmConnectivity(listVms(cfg.paths.project)),
   config: routingConfig.notify,
   baseUrl: cfg.base_url,
   snapshot: () =>
@@ -690,6 +726,7 @@ backupService.onRestored((db) => {
   healthMonitor?.setConfig(routingConfig.health_probe)
   credentialRefreshMonitor?.setConfig(normalizeCredentialRefreshConfig(routingConfig.credential_refresh))
   kernelWatchdog?.setConfig(normalizeKernelWatchdogConfig(routingConfig.kernel_watchdog))
+  configureSlotCapacity(routingConfig.slot_capacity)
   usageProbeMonitor?.setConfig(routingConfig.usage_probe)
   notifyMonitor?.setConfig(routingConfig.notify)
 
@@ -791,10 +828,12 @@ function rejectAuth(req, res, error) {
   return false
 }
 
-function requireAuth(req, res) {
+/** `keyGate: false` (key self-service) skips the managed key's quota / RPM / concurrency gate and the gateway bucket. */
+function requireAuth(req, res, { keyGate = true, buyer = false, optionalBuyer = false } = {}) {
   req.presentedApiKey = extractApiKey(req)
   const token = extractPanelToken(req) || req.presentedApiKey
   if (!token) {
+    if (buyer && optionalBuyer) return false
     return rejectAuth(
       req,
       res,
@@ -826,7 +865,16 @@ function requireAuth(req, res) {
     const rec = panelUsers.getByUsername(session.user)
     req.panelUserId = rec?.id || null
     req.panelVmCreateQuota = rec?.vm_create_quota ?? 0
+    if (buyer) req.panelBuyerOwner = sessionBuyerOwner(session, rec, getPanelAdmin())
     return true
+  }
+  if (buyer) {
+    if (optionalBuyer) return false
+    json(res, 403, {
+      ok: false,
+      error: { code: 'shop_login_required', message: 'Sign in to the panel to access CRAG shop' },
+    })
+    return false
   }
   // Master env API key — unlimited admin
   if (timingSafeEqualStr(token, cfg.api_key)) {
@@ -862,7 +910,7 @@ function requireAuth(req, res) {
       }),
     )
   }
-  const gate = apiKeyStore.canAccept(managed.record)
+  const gate = keyGate ? apiKeyStore.canAccept(managed.record) : { ok: true }
   if (!gate.ok) {
     const type =
       gate.status === 429
@@ -882,7 +930,7 @@ function requireAuth(req, res) {
       }),
     )
   }
-  if (!allowRate(token)) {
+  if (keyGate && !allowRate(token)) {
     return rejectAuth(
       req,
       res,
@@ -899,8 +947,9 @@ function requireAuth(req, res) {
   return true
 }
 
-function fetchWorkerModels(opts) {
-  return gatewayModelCatalog(opts)
+function fetchWorkerModels(opts = {}) {
+  const mappingKeys = Object.keys(routingConfig?.codex?.model_mappings || {})
+  return gatewayModelCatalog({ ...opts, mappingKeys })
 }
 
 const importCommit = createImportCommit({
@@ -924,7 +973,15 @@ const importCommit = createImportCommit({
 
 const { commitImportedOauth, requireSlotProxy, officialCcStatsHandler } = importCommit
 
+const handleKeySelf = createKeySelfHandler({
+  json,
+  requireAuth,
+  apiKeyStore,
+  getUsageLogs: () => requestLog.repo,
+})
+
 const { handleProtocol, handleSearch, handleImages } = createHandleProtocol({
+  admitCragInference: (input) => cragSubscription.admitInference(input),
   json,
   writeSSEHeaders,
   readBody,
@@ -1007,6 +1064,18 @@ const clusterManager = new ClusterManager({
     if (state === 'ready' || state === 'error' || state === 'backoff') {
       proxyPool.probeLocalNode(nodeId).catch(() => {})
     }
+    // Slot image tags change with every control-plane upgrade: rebuild what is missing now,
+    // not when the first slot lands there.
+    if (state === 'ready') warmNodeSlotImages(nodeId)
+    if (state === 'ready') {
+      void (async () => {
+        for (const vm of listVms(cfg.paths.project)) {
+          if (vm.node_id !== nodeId || resolveKernelDataplane(vm, routingConfig) !== 'crag') continue
+          const result = await syncRemoteSlotRestartPolicy(vm, routingConfig)
+          if (!result.ok) console.warn('[crag-restart-policy]', vm.id, result.code || 'sync_failed')
+        }
+      })().catch(() => console.warn('[crag-restart-policy] node reconciliation failed', nodeId))
+    }
   },
 })
 localEgressCluster = clusterManager
@@ -1014,6 +1083,15 @@ bindPlacement({ manager: clusterManager, projectRoot: cfg.paths.project })
 await startNodeEgressSocks({ clientFor: (nodeId) => clusterManager.client(nodeId) })
 clusterManager.start()
 clusterManager.restoreSlotRelays()
+// Live memory pressure per machine: new conversations avoid hosts low on MemAvailable (overcommit guard).
+const hostMemoryPressure = installHostMemoryPressure(
+  createHostMemoryPressure({
+    getConfig: () => routingConfig.host_memory_pressure,
+    listNodes: () => clusterManager.list().map((node) => node.id),
+    readNode: (id) => clusterManager.nodeHostMemory(id),
+  }),
+)
+hostMemoryPressure.start()
 syncNodeLocalEgress()
 if (proxyPool.snapshot().config.ipv6_enabled !== true) {
   const exits = await syncIpv6ProxyEgress(cfg.paths.project, proxyPool)
@@ -1022,11 +1100,16 @@ if (proxyPool.snapshot().config.ipv6_enabled !== true) {
   }
 }
 const clusterRoutes = createClusterRoutes({ manager: clusterManager, json, readBody, ok: panel.ok })
-const slotShell = createSlotShell({ projectRoot: cfg.paths.project, importOauth: commitImportedOauth })
+const slotShell = createSlotShell({
+  projectRoot: cfg.paths.project,
+  importOauth: commitImportedOauth,
+})
 for (const vm of listVms(cfg.paths.project)) {
   if (isCodexVm(vm)) continue
   try {
-    ensureSlotSubscriptionType(path.join(cfg.paths.project, 'vms', vm.id, 'cli-home'), vm.account_tier)
+    ensureSlotSubscriptionType(path.join(cfg.paths.project, 'vms', vm.id, 'cli-home'), vm.account_tier, {
+      source: vm.account_tier_source,
+    })
   } catch (error) {
     console.warn('[credential-subscription]', vm.id, error?.message || error)
   }
@@ -1036,7 +1119,64 @@ cliNodeGuard = createCliNodeGuard({
   liveTokens: () => slotShell.liveShellTokens?.() || [],
 })
 
+const listCragTargets = () =>
+  listVms(cfg.paths.project)
+    .map(({ id }) => getVm(cfg.paths.project, id))
+    .filter(Boolean)
+
+const isCragSlot = (vm) => !isNativeNodeVm(vm) && !isCodexVm(vm) && resolveKernelDataplane(vm, routingConfig) === 'crag'
+
+const cragSubscription = createCragSubscription({
+  projectRoot: cfg.paths.project,
+  listTargets: listCragTargets,
+  runtimeInventory: createCragRuntimeInventory({
+    projectRoot: cfg.paths.project,
+    listTargets: listCragTargets,
+    getRouting: () => routingConfig,
+  }),
+  getTarget: (id) => getVm(cfg.paths.project, id),
+  isLocalCragSlot: (vm) =>
+    !isNativeNodeVm(vm) &&
+    !isCodexVm(vm) &&
+    (vm.node_id || isKvmRuntime(vm) || Boolean(installedCragV2Root(cfg.paths.project, vm))),
+  isSubscriptionSlot: isCragSlot,
+  assertReady: (vm, opts) => assertCragSubscriptionTarget(cfg.paths.project, vm, routingConfig, opts),
+  isSlotEnabled: (vm, opts) => isCragSubscriptionSlotEnabled(cfg.paths.project, vm, routingConfig, opts),
+})
+configureCragRuntimeAdmission(cfg.paths.project, cragSubscription.withRuntimeAdmission)
+
+function isCragShopAdmin(owner) {
+  if (owner?.startsWith('panel:')) {
+    const record = panelUsers.getById(owner.slice('panel:'.length))
+    return !!record?.enabled && record.role === 'admin'
+  }
+  const configured = getPanelAdmin()
+  return (
+    !!configured.password &&
+    owner === `configured-admin:${configured.username}` &&
+    !panelUsers.getByUsername(configured.username)
+  )
+}
+
+const cragShopActivationEnabled =
+  process.env.KIN_CRS_MOCK !== '1' && process.env.VM2API_CRAG_SHOP_AUTO_ACTIVATION !== '0'
+const handleCragShop = createCragShopHandler({
+  getDb,
+  dataDir: cfg.paths.data,
+  publicBaseUrl: cfg.base_url,
+  json,
+  readRawBody,
+  subscription: cragSubscription,
+  isCurrentAdmin: (req) => isCragShopAdmin(req.panelBuyerOwner),
+  isActivationAdmin: isCragShopAdmin,
+  allowDeviceRequest: () => allowRate('crag-shop:device'),
+  activationEnabled: cragShopActivationEnabled,
+})
+
 const handlePanel = createPanelHandler({
+  getDb,
+  cragSubscription,
+  handleCragShop,
   json,
   writeSSEHeaders,
   readBody,
@@ -1108,19 +1248,89 @@ const handlePanel = createPanelHandler({
   slotShell,
 })
 
+const gracefulShutdown = createGracefulShutdown({
+  beforeDrain: async () => {
+    installJevUsageRecorder(null)
+    try {
+      vmTestSchedule.stop()
+    } catch {}
+    try {
+      backupService.stopScheduler()
+    } catch {}
+    try {
+      proxyGeoGuard.stop()
+      proxyPool.stopScheduler()
+    } catch {}
+    try {
+      healthMonitor?.stop?.()
+    } catch {}
+    try {
+      credentialRefreshMonitor?.stop?.()
+    } catch {}
+    try {
+      kernelWatchdog?.stop?.()
+      slotCapacityReconciler.stop()
+    } catch {}
+    try {
+      hostMemoryPressure?.stop?.()
+    } catch {}
+    try {
+      cliNodeGuard?.stop?.()
+    } catch {}
+    try {
+      usageProbeMonitor?.stop?.()
+    } catch {}
+    try {
+      catalogMonitor?.stop?.()
+    } catch {}
+    try {
+      notifyMonitor?.stop?.()
+    } catch {}
+  },
+  afterDrain: async () => {
+    try {
+      stopVmWatch()
+    } catch {}
+    try {
+      stopAllRustKernels()
+    } catch {}
+    try {
+      await clusterManager.stop()
+    } catch {}
+    try {
+      closeDatabase()
+    } catch {}
+  },
+})
+
 const server = http.createServer(async (req, res) => {
   try {
     res.req = req
+    const url = parseRequestUrl(req)
+    if (url && isCragShopPath(url.pathname)) res.setHeader('Cache-Control', 'no-store')
     if (req.method === 'OPTIONS') {
       res.writeHead(204, corsHeadersForRequest(req))
       return res.end()
     }
 
-    const url = parseRequestUrl(req)
     if (!url) {
       return json(res, 400, { error: { message: 'Invalid URL', type: 'invalid_request' } })
     }
     const p = url.pathname
+    if (gracefulShutdown.isShuttingDown()) {
+      res.setHeader('Connection', 'close')
+      if (p === '/health' || p === '/healthz') {
+        return json(res, 503, { status: 'shutting_down' })
+      }
+      return json(res, 503, {
+        error: {
+          type: 'overloaded_error',
+          code: 'server_shutting_down',
+          message: 'Gateway is shutting down; retry shortly',
+        },
+      })
+    }
+    gracefulShutdown.trackRequest(req, res)
 
     if (isTelemetryPath(p)) {
       return json(res, 200, telemetryInterceptResponse(p))
@@ -1193,6 +1403,8 @@ const server = http.createServer(async (req, res) => {
           responses: '/v1/responses',
           messages: '/v1/messages',
           usage: '/v1/usage',
+          me_quota: '/v1/me/quota',
+          me_usage: '/v1/me/usage',
           models: '/v1/models',
           intercept_rules: '/admin/intercept/rules',
         },
@@ -1200,13 +1412,14 @@ const server = http.createServer(async (req, res) => {
       })
     }
 
-    if (req.method === 'GET' && p === '/v1/models') {
+    if (req.method === 'GET' && (p === '/v1/models' || p === '/models')) {
       if (!requireAuth(req, res)) return
+      const groupType = keyScopeFromRequest(req).group_type
       if (resolveInferenceBackend(req) === 'api') {
-        return json(res, 200, apiScheduler.catalog())
+        return json(res, 200, filterModelCatalogForKey(apiScheduler.catalog(apiScheduleScope(req, groupType)), req))
       }
-      const result = await fetchWorkerModels({ groupType: keyScopeFromRequest(req).group_type })
-      return json(res, 200, result)
+      const result = await fetchWorkerModels({ groupType })
+      return json(res, 200, filterModelCatalogForKey(result, req))
     }
     if (req.method === 'POST' && p === '/admin/models/refresh') {
       if (!requireAuth(req, res)) return
@@ -1224,8 +1437,16 @@ const server = http.createServer(async (req, res) => {
         getPoolScheduler: () => poolScheduler,
       })
     }
+    if (req.method === 'GET' && KEY_SELF_PATHS.has(p)) {
+      return await handleKeySelf(req, res, url)
+    }
     if (req.method === 'POST' && (p === '/v1/messages/count_tokens' || p === '/messages/count_tokens')) {
       return json(res, 404, { error: { message: 'not found: ' + p } })
+    }
+
+    if (isGeminiPublicPath(p)) {
+      if (!requireAuth(req, res)) return
+      return geminiBillingUnavailable(json, res)
     }
 
     if (req.method === 'POST' && (p === '/v1/chat/completions' || p === '/chat/completions')) {
@@ -1272,12 +1493,16 @@ const server = http.createServer(async (req, res) => {
     }
   }
 })
-
 server.on('upgrade', (req, socket, head) => {
+  if (gracefulShutdown.isShuttingDown()) {
+    socket.destroy()
+    return
+  }
   if (responsesWs.handleUpgrade(req, socket, head)) return
   if (clusterRoutes.handleUpgrade(req, socket, head)) return
   if (!slotShell.handleUpgrade(req, socket, head)) socket.destroy()
 })
+gracefulShutdown.setServer(server)
 
 server.on('clientError', (err, socket) => {
   try {
@@ -1317,6 +1542,8 @@ const pub = {
     responses: publicEndpoint('/v1/responses'),
     messages: publicEndpoint('/v1/messages'),
     usage: publicEndpoint('/v1/usage'),
+    me_quota: publicEndpoint('/v1/me/quota'),
+    me_usage: publicEndpoint('/v1/me/usage'),
     intercept_rules: publicEndpoint('/admin/intercept/rules'),
   },
 }
@@ -1326,71 +1553,67 @@ fs.writeFileSync(path.join(cfg.paths.root, 'config', 'gateway-v2.public.json'), 
 process.on('uncaughtException', (e) => console.error('[uncaught]', e))
 process.on('unhandledRejection', (e) => console.error('[unhandled]', e))
 
-// Graceful shutdown: stop schedulers/watchers, close the DB (WAL checkpoint).
-let _shuttingDown = false
-function shutdown(signal) {
-  if (_shuttingDown) return
-  _shuttingDown = true
-  installJevUsageRecorder(null)
-  console.log(`[shutdown] ${signal} — closing`)
-  try {
-    vmTestSchedule.stop()
-  } catch {}
-  try {
-    backupService.stopScheduler()
-  } catch {}
-  try {
-    proxyGeoGuard.stop()
-    proxyPool.stopScheduler()
-  } catch {}
-  try {
-    healthMonitor?.stop?.()
-  } catch {}
-  try {
-    credentialRefreshMonitor?.stop?.()
-  } catch {}
-  try {
-    kernelWatchdog?.stop?.()
-  } catch {}
-  try {
-    cliNodeGuard?.stop?.()
-  } catch {}
-  try {
-    usageProbeMonitor?.stop?.()
-  } catch {}
-  try {
-    catalogMonitor?.stop?.()
-  } catch {}
-
-  try {
-    notifyMonitor?.stop?.()
-  } catch {}
-  try {
-    stopVmWatch()
-  } catch {}
-  try {
-    stopAllRustKernels()
-  } catch {}
-  try {
-    clusterManager.stop()
-  } catch {}
-  try {
-    server.close(() => {})
-  } catch {}
-  try {
-    closeDatabase()
-  } catch {}
-  process.exit(0)
-}
-process.on('SIGTERM', () => shutdown('SIGTERM'))
-process.on('SIGINT', () => shutdown('SIGINT'))
+// Graceful shutdown on termination signals (Issue #376).
+process.on('SIGTERM', () => gracefulShutdown.shutdown('SIGTERM'))
+process.on('SIGINT', () => gracefulShutdown.shutdown('SIGINT'))
 
 if (process.env.KIN_CRS_MOCK !== '1') {
-  syncLocalSlotRestartPolicies(listVms(cfg.paths.project))
+  syncLocalSlotRestartPolicies(listVms(cfg.paths.project), { routing: routingConfig })
 }
 await bootApiKernel(cfg)
+server.keepAliveTimeout = 120_000
+server.headersTimeout = 125_000
+server.timeout = 0
 
 server.listen(cfg.port, cfg.host, () => {
+  if (process.env.KIN_CRS_MOCK !== '1') {
+    void cragSubscription.recover().catch(() => {
+      console.warn('[crag-subscription] startup recovery failed; use the administrator panel to retry')
+    })
+    const refresh = () =>
+      void cragSubscription.refreshExpiredEntitlement().catch(() => {
+        console.warn('[crag-subscription] expired quota refresh deferred')
+      })
+    const timer = setInterval(refresh, 1_000).unref()
+    server.once('close', () => clearInterval(timer))
+    refresh()
+  }
+  if (cragShopActivationEnabled) {
+    const poll = () =>
+      void handleCragShop.pollActivation().catch(() => {
+        console.warn('[crag-shop] activation polling deferred')
+      })
+    const timer = setInterval(poll, 2_000).unref()
+    server.once('close', () => clearInterval(timer))
+    poll()
+  }
+  // Installation intent is durable; reconnecting nodes must not depend on a lost HTTP callback.
+  if (process.env.KIN_CRS_MOCK !== '1') {
+    let resuming = false
+    const resume = async () => {
+      if (resuming) return
+      resuming = true
+      try {
+        const report = await resumePendingKernelInstalls({
+          projectRoot: cfg.paths.project,
+          routing: routingConfig,
+          watchdog: kernelWatchdog,
+          poolScheduler,
+        })
+        for (const item of report.items) {
+          if (!item.ok) console.warn(`[kernel-install] ${item.id} recovery failed (${item.code})`)
+        }
+      } catch (error) {
+        console.warn(`[kernel-install] recovery pass failed (${error?.code || 'unknown'})`)
+      } finally {
+        resuming = false
+      }
+    }
+    void resume()
+    const timer = setInterval(resume, 15_000)
+    timer.unref()
+    server.once('close', () => clearInterval(timer))
+  }
   try {
     vmTestSchedule.start()
   } catch (e) {
@@ -1407,7 +1630,15 @@ server.listen(cfg.port, cfg.host, () => {
     console.warn('[credential-refresh] start failed', e?.message || e)
   }
   try {
-    kernelWatchdog?.start?.({ immediate: true })
+    // Size slots before the watchdog compares kernel slot counts: otherwise a slot
+    // still recorded at its old small limits is reloaded down, then up again.
+    slotCapacityReconciler
+      .tick()
+      .catch(() => {})
+      .finally(() => {
+        slotCapacityReconciler.start()
+        kernelWatchdog?.start?.({ immediate: true })
+      })
   } catch (e) {
     console.warn('[kernel-watchdog] start failed', e?.message || e)
   }

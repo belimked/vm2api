@@ -1,4 +1,8 @@
-import type { VmActiveHours, VmQuotaOverride } from '@/types/panel-vm'
+import type {
+  CragLicenseResponse,
+  VmActiveHours,
+  VmQuotaOverride,
+} from '@/types/panel-vm'
 import {
   apiBase,
   expirePanelSession,
@@ -141,9 +145,24 @@ export async function api<T = unknown>(
   return unwrapEnvelope(json, res.status) as T
 }
 
+export async function cragDeviceApi<T>(path: string, opts: RequestInit = {}) {
+  const res = await fetch(`/api/panel/crag-shop/device${path}`, {
+    ...opts,
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const json: unknown = await res.json().catch(() => ({}))
+  if (!res.ok)
+    throw apiErrorFrom(json, res.status, res.statusText || '请求失败')
+  return unwrapEnvelope(json, res.status) as T
+}
+
 export type VmPatch = {
   inference_engine?: 'go' | 'rust' | ''
   persona_preset?: string
+  dataplane?: 'wrap' | 'cc' | 'crag' | ''
+  crag_kernel_version?: 'legacy' | 'v2' | ''
   /** null = 去掉本槽覆盖，跟随分档 / 全局。 */
   max_concurrency?: number | null
   max_rpm?: number | null
@@ -166,6 +185,50 @@ export function patchVm<T = unknown>(id: string, body: VmPatch) {
     method: 'PATCH',
     body: JSON.stringify(body),
   })
+}
+
+export type VmKernelSwitchTarget = {
+  dataplane: 'crag' | 'wrap'
+  crag_kernel_version?: 'v2' | ''
+}
+
+export type VmKernelSwitchJob = VmKernelSwitchTarget & {
+  id: string
+  vm_id: string
+  status: 'running' | 'succeeded' | 'failed'
+  started_at: string
+  finished_at: string | null
+  error: { code: string; message: string } | null
+}
+
+export function startVmKernelSwitch(id: string, body: VmKernelSwitchTarget) {
+  return api<VmKernelSwitchJob>(
+    `/api/panel/vms/${encodeURIComponent(id)}/kernel-switch`,
+    { method: 'POST', body: JSON.stringify(body) }
+  )
+}
+
+export function getVmKernelSwitch(id: string, signal?: AbortSignal) {
+  return api<VmKernelSwitchJob | null>(
+    `/api/panel/vms/${encodeURIComponent(id)}/kernel-switch`,
+    { signal }
+  )
+}
+
+export function getVmCragLicense(id: string) {
+  return api<CragLicenseResponse>(
+    `/api/panel/vms/${encodeURIComponent(id)}/crag-license`
+  )
+}
+
+export function activateVmCragLicense(id: string, registrationCode: string) {
+  return api<CragLicenseResponse>(
+    `/api/panel/vms/${encodeURIComponent(id)}/crag-license`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ registration_code: registrationCode }),
+    }
+  )
 }
 
 export async function loginRequest(input: {

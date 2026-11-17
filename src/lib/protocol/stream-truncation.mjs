@@ -8,7 +8,7 @@
  * A thinking block cut mid-way cannot be closed (it needs a signature).
  */
 
-import { mapUpstreamError, rewritePoolErrorForClient } from '../core/errors.mjs'
+import { ErrorCode, mapUpstreamError, rewritePoolErrorForClient } from '../core/errors.mjs'
 import { semanticStatusForStreamError } from './stream-error-status.mjs'
 
 const CLOSABLE_BLOCKS = new Set(['text', 'tool_use'])
@@ -142,7 +142,11 @@ export function createAnthropicStreamTracker() {
 
 /** A timeout would just stall again if the client retries. An upstream error event already reached the client. */
 export function isRecoverableTruncation(result) {
+  // A negotiated provider handoff must supply its own terminal proof.
+  // Closing a failed handoff as max_tokens would manufacture a success.
+  if (result?.nativeHandoff === true) return false
   const error = result?.body?.error
+  if (error?.code === ErrorCode.CLUSTER_DELIVERY_UNCONFIRMED) return false
   if (!error) return true
   return !/timeout/i.test(`${error.code || ''} ${error.type || ''} ${error.message || ''}`)
 }

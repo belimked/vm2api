@@ -7,6 +7,7 @@ import {
   retryAfterSeconds,
   isWrapConnectionError,
   isUsagePolicyErrorMessage,
+  isUnanswerablePromptMessage,
   makeRefusalGuardError,
   isAssistantMessageBody,
   isCompleteAssistantMessage,
@@ -26,6 +27,15 @@ test('an empty pool is a 503 "no available account", never a load message', () =
   assert.equal(mapped.body.error.code, 'pool_unavailable')
   assert.equal(mapped.body.error.message, CLIENT_POOL_UNAVAILABLE_MESSAGE)
   assert.equal(mapped.body.error.details, undefined)
+})
+
+test('CRAG host quota rejections stay distinct permission errors', () => {
+  for (const code of ['license_crag_host_over_quota', 'license_crag_host_usage_unverified']) {
+    const error = { type: 'permission_error', code, message: 'CRAG host capacity check failed' }
+    const result = rewritePoolErrorForClient(mapUpstreamError(403, { error }))
+    assert.equal(result.status, 403)
+    assert.deepEqual(result.body.error, error)
+  }
 })
 
 test('real capacity exhaustion and queue timeout are a 529 overloaded_error with retry-after', () => {
@@ -294,6 +304,25 @@ test('Claude Code AUP API Error is a non-retryable 400 policy rejection, not a l
   }
 })
 
+test('third-party extra-usage 400 and 503 are non-retryable refusals, not invalid requests', () => {
+  const msg =
+    'HTTP 400: Third-party apps now draw from your extra usage, not your plan limits. Claim it at claude.ai/settings/usage.'
+  assert.equal(isUsagePolicyErrorMessage(msg), false)
+  assert.equal(isUnanswerablePromptMessage(msg), true)
+  assert.equal(isUnanswerablePromptMessage('Extra usage required for this model'), false)
+  for (const status of [400, 503]) {
+    const mapped = mapUpstreamError(status, {
+      type: 'error',
+      error: { type: 'invalid_request_error', code: 'upstream_invalid_request', message: msg },
+    })
+    assert.equal(mapped.status, 400)
+    assert.equal(mapped.body.error.code, 'refusal_guard')
+    assert.equal(mapped.body.error.type, 'policy_blocked')
+    assert.equal(mapped.body.error.details.retryable, false)
+    assert.notEqual(mapped.body.error.code, 'upstream_invalid_request')
+  }
+})
+
 test('real authentication failures keep their HTTP status and are not policy refusals', () => {
   const policyText =
     'Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup).'
@@ -342,6 +371,18 @@ test('upstream 429 / 529 hand their Retry-After to the client; 529 always has on
   const overloaded = mapUpstreamError(529, { type: 'error', error: { type: 'overloaded_error', message: 'busy' } })
   assert.equal(overloaded.status, 529)
   assert.equal(overloaded.retryAfterSec, 1)
+})
+
+test('tool continuation conflicts and expiry retain their native client status', () => {
+  for (const [status, message] of [
+    [409, 'tool_result replayed'],
+    [410, 'tool continuation expired'],
+  ]) {
+    const mapped = mapUpstreamError(status, { error: { type: 'invalid_request_error', message } })
+    assert.equal(mapped.status, status)
+    assert.equal(mapped.body.error.type, 'invalid_request_error')
+    assert.equal(mapped.body.error.details.upstream_status, status)
+  }
 })
 
 test('retryAfterSeconds reads delta seconds and HTTP dates', () => {

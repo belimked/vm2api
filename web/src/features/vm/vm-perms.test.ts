@@ -15,12 +15,14 @@ describe('vmPermsFor follows panel-acl roles', () => {
       power: true,
       test: true,
       testModels: true,
+      usageQuery: true,
       credential: true,
+      proxy: true,
       remove: true,
     })
   })
 
-  it('tenant cannot read dashboard, delete slots, or manage the slot, but can power, test and import', () => {
+  it('tenant can power and test a slot, but cannot reauth, manage proxies, or delete it', () => {
     const p = vmPermsFor('user')
     expect(p.known).toBe(true)
     expect(p.admin).toBe(false)
@@ -29,7 +31,9 @@ describe('vmPermsFor follows panel-acl roles', () => {
     expect(p.test).toBe(true)
     // The backend only serves GET /api/panel/test-models to admins.
     expect(p.testModels).toBe(false)
-    expect(p.credential).toBe(true)
+    expect(p.usageQuery).toBe(true)
+    expect(p.credential).toBe(false)
+    expect(p.proxy).toBe(false)
     expect(p.remove).toBe(false)
   })
 
@@ -41,7 +45,9 @@ describe('vmPermsFor follows panel-acl roles', () => {
       dashboard: true,
       power: false,
       test: false,
+      usageQuery: false,
       credential: false,
+      proxy: true,
       remove: false,
     })
   })
@@ -68,7 +74,6 @@ describe('vmDetailTabs', () => {
     expect(vmDetailTabs(vmPermsFor('user'))).toEqual([
       'overview',
       'account',
-      'proxy',
       'test',
     ])
     expect(vmDetailTabs(vmPermsFor('super'))).toEqual([
@@ -83,7 +88,7 @@ describe('vmDetailTabs', () => {
     expect(visibleTab('ops', tabs)).toBe('overview')
     expect(visibleTab('seed', tabs)).toBe('overview')
     expect(visibleTab('test', tabs)).toBe('test')
-    expect(visibleTab('proxy', tabs)).toBe('proxy')
+    expect(visibleTab('proxy', tabs)).toBe('overview')
   })
 })
 

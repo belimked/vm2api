@@ -31,6 +31,10 @@ const UNSCHEDULABLE_REASONS = Object.freeze({
   runtime_start_failed: '启动失败',
   circuit_escalated: '熔断升级',
   legacy_unknown: '待确认',
+  vm_stopped: '已关机',
+  vm_dead: '进程已退出',
+  vm_error: '槽位错误',
+  vm_disabled: '已禁用',
 })
 
 /** System holds: written and cleared by the system itself (受限 · slot). */
@@ -89,6 +93,7 @@ const RESTRICTED_NEW_SESSION = [
   { match: /^gate_(5h|7d)_draining$/, text: '临近闸线', soft: true },
   { match: /^seats_full$/, text: '席位满', soft: false },
   { match: /^sessions_full$/, text: '对话窗口满', soft: false },
+  // Machine memory (host-memory-pressure.mjs): tight still takes new conversations when no machine has room.
 ]
 
 /**
@@ -97,13 +102,13 @@ const RESTRICTED_NEW_SESSION = [
  * request waits, and local transport errors.
  */
 const STATELESS = [
-  /^(distill_blocked|policy_blocked|refusal_guard|hard_regex.*|jev.*|decision_model.*)$/,
+  /^(distill_blocked|policy_blocked|crag_policy_blocked|crag_opaque_429|refusal_guard|hard_regex.*|jev.*|decision_model.*)$/,
   /^(content_filter_refusal|content_policy_refusal|usage_policy_refusal|invalid_request|entitlement_required|http_\d+)$/,
   /_repairable$/,
   /^(concurrency_limit|concurrency_disabled|rpm_limit|slot_busy|quota_band_inflight|refresh_pending)$/,
   /^(model_cooldown|fable_cooldown|fable_concurrency|fable_timeout|fable_plan_denied|fable_rate_limited|fable_requires_max|model_not_allowed|platform_mismatch|codex_vm)$/,
-  /^(quota_guard_request_too_large|no_eligible_accounts|pool_overload_cooldown|pool_rate_limited|vm_unschedulable)$/,
-  /^(wrap_connection_error|worker_transport_failure|worker_timeout|upstream_network_error|stream_interrupted|empty_response|incomplete_assistant|downstream_committed_or_incomplete|provider_timeout|client_cancelled|oauth_unconfirmed)$/,
+  /^(quota_guard_request_too_large|no_eligible_accounts|pool_overload_cooldown|pool_rate_limited|rate_limited_request|vm_unschedulable)$/,
+  /^(wrap_connection_error|worker_transport_failure|worker_timeout|worker_process_exit|upstream_network_error|stream_interrupted|empty_response|incomplete_assistant|downstream_committed_or_incomplete|provider_timeout|client_cancelled|oauth_unconfirmed)$/,
   // Seat placement labels (why this VM was picked), not a slot condition.
   /^sticky$/,
 ]
@@ -135,6 +140,18 @@ export function isUnschedulableReason(reason) {
   return stateOfReason(reason)?.state === 'unschedulable'
 }
 
+/** Statuses isVmScheduleReady refuses. `paused` is a soft mark and stays out. */
+const HARD_DOWN_REASON = Object.freeze({
+  stopped: 'vm_stopped',
+  dead: 'vm_dead',
+  error: 'vm_error',
+  disabled: 'vm_disabled',
+})
+
+function hardDownReason(status) {
+  return HARD_DOWN_REASON[String(status || '').toLowerCase()] || null
+}
+
 /**
  * Operator actions allowed to clear 不可调度. Background refresh / probe are not.
  * `credential_present` is the one system exception: a slot parked only for
@@ -149,6 +166,10 @@ export const CLEAR_BY = Object.freeze([
   'proxy_rebind',
   'recover_ok',
   'credential_present',
+  // A stale runtime_start_failed lock while the kernel probes healthy is a
+  // leftover from a start attempt that timed out on a flaky node link — the
+  // container never died. Health is a fact, not a verdict, same as above.
+  'runtime_recovered',
 ])
 
 // ---------------------------------------------------------------------------
@@ -364,11 +385,14 @@ export function resolveSlotState({
     if (legacy?.state === 'unschedulable') return unschedulable(vm.schedule_disabled_reason)
     if (!legacy || legacy.state !== 'restricted') return { ...base, schedule_state: 'off' }
   }
-  // Live credential verdicts (no ticket, dead grant) read as 不可调度 too.
   if (availability?.key === 'none' || availability?.key === 'bad') {
     const reason = availability.reason || (availability.key === 'none' ? 'no_credential' : 'credential_refresh_failed')
     return unschedulable(isUnschedulableReason(reason) ? reason : 'credential_refresh_failed')
   }
+  // A down slot is not in the pool. 受限 also paints the switch as 调度开, so
+  // this has to win over quota, cooldown, and the final on.
+  const down = hardDownReason(vm.status)
+  if (down) return unschedulable(down)
   const restricted = (reason, until, scope = 'slot', soft = false) => ({
     ...base,
     schedule_state: 'restricted',

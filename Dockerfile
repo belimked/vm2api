@@ -20,9 +20,12 @@ RUN cd worker && go mod download
 COPY worker/ ./worker/
 RUN cd worker && go build -buildvcs=false -trimpath -o /out/kin-worker ./cmd/kin-worker
 COPY api-kernel/go.mod api-kernel/go.sum ./api-kernel/
-RUN cd api-kernel && go mod download
+COPY redact/go.mod redact/go.sum ./redact/
+RUN cd api-kernel && go mod download && cd ../redact && go mod download
 COPY api-kernel/ ./api-kernel/
-RUN cd api-kernel && go build -buildvcs=false -trimpath -o /out/kin-api-kernel ./cmd/kin-api-kernel
+COPY redact/ ./redact/
+RUN cd api-kernel && go build -buildvcs=false -trimpath -o /out/kin-api-kernel ./cmd/kin-api-kernel \
+  && cd ../redact && go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/kin-redact ./cmd/kin-redact
 
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS payload
 WORKDIR /src
@@ -45,6 +48,7 @@ RUN npm ci --omit=dev --registry=$NPM_REGISTRY
 COPY src ./src
 COPY scripts ./scripts
 COPY VERSION CHANGELOG.md ./
+COPY deploy/payload.json ./deploy/payload.json
 COPY docker/kin-os ./docker/kin-os
 COPY docker/kin-kvm ./docker/kin-kvm
 COPY --from=web /src/web/dist ./web/dist
@@ -69,6 +73,7 @@ ENV NODE_ENV=production \
     KIN_CODEX_KERNEL_BIN=/opt/vm2api/bin/kin-codex-kernel \
     KIN_OAUTH_AUTH_BIN=/opt/vm2api/bin/kin-oauth-auth \
     KIN_COMPUTER_BIN=/opt/vm2api/bin/kin-computer \
-    KIN_API_KERNEL_BIN=/opt/vm2api/bin/kin-api-kernel
+    KIN_API_KERNEL_BIN=/opt/vm2api/bin/kin-api-kernel \
+    KIN_REDACT_BIN=/opt/vm2api/bin/kin-redact
 EXPOSE 8787
 ENTRYPOINT ["/usr/local/bin/vm2api-entrypoint"]

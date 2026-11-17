@@ -77,9 +77,17 @@ export type SpecialSetting = {
 /** 缓存写入 TTL 口径，由 5m / 1h 写入量派生。`mixed` = 两者都写了。 */
 export type CacheTtlApplied = '5m' | '1h' | 'mixed' | null
 
-/** 归一后的思考强度。原始字段见后端 `reasoningEffortOf()`。 */
+/** 发往槽位的思考强度。调用方值优先，否则模型缺省。见 `loggedReasoningEffort()`。 */
 export type ReasoningEffort =
-  'none' | 'minimal' | 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  | 'none'
+  | 'minimal'
+  | 'auto'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'ultra'
 
 /** 滚动日志的一行。`null` = 本行该字段为空（vm2api 不产出的 hub 字段已整体删去）。 */
 export type UsageLogRow = {
@@ -105,6 +113,8 @@ export type UsageLogRow = {
   promptTokens: number
   /** 网关预检估算的 prompt 大小；被 405 等拦下的请求只有这个值。null = 旧行或非 Messages 路径。 */
   estimatedInputTokens: number | null
+  upstreamStatus?: number | null
+  upstream400Message?: string | null
   /** 最终服务的账号展示名（`final_account_id` 优先）。 */
   providerName: string | null
   accountId: string | null
@@ -332,7 +342,17 @@ export type UsageLogsOverview = {
   todayCost: number
   todayActualCost: number
   todayErrors: number
+  todayTokens: number
+  todayInputTokens: number
+  todayOutputTokens: number
+  todayCacheReadTokens: number
+  todayCacheCreationTokens: number
+  todayCacheCreation5mTokens: number
+  todayCacheCreation1hTokens: number
+  /** cache_read / (input + cache_read + cache_write)，0-1。 */
+  todayCacheHitRate: number
   todayAvgDurationMs: number | null
+  todayAvgTtftMs: number | null
   /** 昨日同一时刻之前的累计，用于「较昨日同期」。 */
   yesterdayRequests: number
   yesterdayCost: number

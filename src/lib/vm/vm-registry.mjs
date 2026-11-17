@@ -13,6 +13,7 @@ import {
   clearVmQuotaRestriction,
   markVmRestriction,
   expiresAtToMs,
+  ensureSlotSubscriptionType,
 } from '../oauth/oauth-credentials.mjs'
 import {
   HOLD_GEO,
@@ -36,6 +37,7 @@ import { normalizeOwnerId, vmOriginOf, vmOwnerId, VM_ORIGIN } from '../admin/res
 import { isCodexVm, normalizeVmKind } from './vm-kind.mjs'
 import { canClaudeResetCredits } from '../oauth/credential-mode.mjs'
 import { validTimezone } from '../core/timezone.mjs'
+import { flattenOauthIdentity, normalizeSubscriptionType } from '../oauth/oauth-identity.mjs'
 import {
   extraFromCodexHeaders,
   extraToCodexSnapshot,
@@ -88,9 +90,20 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     status: vm.status || 'unknown',
     kernel: vm.kernel || null,
     runtime_type: runtimeKind(vm),
+    migration_pending: ['running', 'needs_attention'].includes(vm.slot_migration?.status),
     machine: vm.machine || null,
     inference_engine: vm.inference_engine || null,
     persona_preset: vm.persona_preset || null,
+    dataplane: vm.dataplane || null,
+    crag_kernel_version: vm.crag_kernel_version || null,
+    kernel_installation: vm.kernel_installation
+      ? {
+          kernel: vm.kernel_installation.kernel,
+          version: vm.kernel_installation.version ?? null,
+          ...(vm.kernel_installation.payload_tag ? { payload_tag: vm.kernel_installation.payload_tag } : {}),
+          installed_at: vm.kernel_installation.installed_at,
+        }
+      : null,
     seed_policy: vm.seed_policy || null,
     region: vm.region || vm.zone || null,
     node_id: vm.node_id || null,
@@ -100,21 +113,30 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     codex_kernel: kind.kind === 'codex',
     email: kind.kind === 'codex' ? codex?.email || null : vm.claude?.email || null,
     account_uuid: kind.kind === 'codex' ? null : vm.claude?.account_uuid || null,
-    org_uuid: kind.kind === 'codex' ? vm.codex?.chatgpt_account_id || null : vm.claude?.org_uuid || null,
+    org_uuid: kind.kind === 'codex' ? codex?.chatgpt_account_id || null : vm.claude?.org_uuid || null,
     has_token: kind.kind === 'codex' ? !!codex?.has_token : hasAccessPresence(vm.claude),
     expires_at: kind.kind === 'codex' ? codex?.expires_at || null : vm.claude?.expires_at || null,
     refreshed_at:
       kind.kind === 'codex' ? vm.codex?.usage?.snapshot?.updated_at || null : vm.claude?.refreshed_at || null,
     oauth_source: kind.kind === 'codex' ? 'codex-credentials' : vm.claude?.source || null,
+    oauth_registration:
+      kind.kind !== 'codex' &&
+      (vm.claude?.oauth_registration === 'console' ||
+        (!vm.claude?.oauth_registration && ['claude-setup-token', 'oauth-setup-token'].includes(vm.claude?.source)))
+        ? 'console'
+        : 'oauth',
     credential_mode: kind.kind === 'codex' ? 'oauth' : vm.claude?.mode || 'oauth',
     can_claude_reset: canClaudeResetCredits(vm, {
       hasToken: kind.kind === 'codex' ? !!codex?.has_token : hasAccessPresence(vm.claude),
     }),
     auth_scheme: kind.kind === 'codex' ? null : vm.claude?.auth_scheme || null,
+    account_tier_source: kind.kind === 'codex' ? null : vm.claude?.account_tier_source || null,
     has_refresh: kind.kind === 'codex' ? !!codex?.has_refresh : hasRefreshPresence(vm.claude),
     refresh_error: kind.kind === 'codex' ? null : vm.claude?.refresh_error || null,
     account_tier:
       kind.kind === 'codex' ? 'codex' : vm.claude?.account_tier || (hasAccessPresence(vm.claude) ? 'pro' : null),
+    subscription_type: kind.kind === 'codex' ? null : normalizeSubscriptionType(vm.claude?.subscription_type),
+    rate_limit_tier: kind.kind === 'codex' ? null : vm.claude?.rate_limit_tier || null,
     has_session_key: false,
     max_concurrency: kind.kind === 'codex' ? openAIPolicy.max_concurrency : (vm.policy?.maxConcurrency ?? 2),
     max_concurrency_override:
@@ -200,6 +222,23 @@ export function getActiveVmId(projectRoot) {
   }
 }
 
+export function persistVmSubscription(projectRoot, vmId, profile, { accountUuid = null, orgUuid = null } = {}) {
+  const identity = flattenOauthIdentity(profile)
+  if (!identity.subscription_type) return null
+  const file = path.join(projectRoot, 'vms', `${vmId}.json`)
+  if (!fs.existsSync(file)) return null
+  const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
+  vm.claude = vm.claude || {}
+  // A profile request may finish after an operator replaces the slot's account.
+  if (accountUuid && vm.claude.account_uuid !== accountUuid) return null
+  if (orgUuid && vm.claude.org_uuid !== orgUuid) return null
+  vm.claude.subscription_type = identity.subscription_type
+  vm.claude.rate_limit_tier = identity.rate_limit_tier
+  vm.updated_at = new Date().toISOString()
+  atomicWriteJson(file, vm, { mode: 0o600 })
+  return vm
+}
+
 export function persistAccountTier(projectRoot, vmId, tier, { source = null } = {}) {
   const key = String(tier || '').toLowerCase()
   if (key !== 'pro' && key !== 'max') return null
@@ -208,6 +247,9 @@ export function persistAccountTier(projectRoot, vmId, tier, { source = null } = 
   const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
   vm.claude = vm.claude || {}
   if (vm.claude.account_tier_source === 'profile' && source !== 'profile' && source !== 'usage') return vm
+  if (source === 'profile' || source === 'usage') {
+    ensureSlotSubscriptionType(path.join(projectRoot, 'vms', vmId, 'cli-home'), key, { source })
+  }
   if (vm.claude.account_tier === key && (vm.claude.account_tier_source || null) === source) return vm
   vm.claude.account_tier = key
   vm.claude.account_tier_source = source
@@ -433,6 +475,10 @@ function applySlotEnginePatch(vm, patch = {}) {
     if (patch.dataplane) vm.dataplane = patch.dataplane
     else delete vm.dataplane
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'crag_kernel_version')) {
+    if (patch.crag_kernel_version) vm.crag_kernel_version = patch.crag_kernel_version
+    else delete vm.crag_kernel_version
+  }
 }
 
 export function persistSlotEnginePolicy(projectRoot, vmId, patch = {}) {
@@ -468,8 +514,10 @@ export function setActiveVm(projectRoot, id) {
 export function clearActiveVm(projectRoot) {
   const file = path.join(projectRoot, 'vms', 'active.json')
   try {
-    fs.rmSync(file, { force: true })
-  } catch {}
+    fs.unlinkSync(file)
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
   invalidateReadCache(file)
 }
 
@@ -762,6 +810,22 @@ export function patchVmRecord(projectRoot, id, patch) {
   vm.updated_at = new Date().toISOString()
   atomicWriteJson(file, vm, { mode: 0o600 })
   return vm
+}
+
+/** Panel label only. The slot id stays the creation number. */
+export const VM_DISPLAY_NAME_MAX = 80
+
+export function parseVmDisplayName(value) {
+  if (typeof value !== 'string') return { ok: false, error: '名称必须是文本' }
+  const name = value.trim()
+  if (!name) return { ok: false, error: '名称不能为空' }
+  if (/[\u0000-\u001F\u007F\u2028\u2029]/.test(name)) {
+    return { ok: false, error: '名称不能包含控制字符' }
+  }
+  if ([...name].length > VM_DISPLAY_NAME_MAX) {
+    return { ok: false, error: `名称最长 ${VM_DISPLAY_NAME_MAX} 个字符` }
+  }
+  return { ok: true, value: name }
 }
 
 /**

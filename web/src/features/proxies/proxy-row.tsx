@@ -29,6 +29,7 @@ import {
 import { StatusMark } from '@/components/status-mark'
 import { ProxyBindPicker } from './proxy-bind-picker'
 import { type ProxyHover, useProxyHovered } from './proxy-hover'
+import { proxySchemeText } from './proxy-scheme'
 import { SeatCells } from './proxy-seats'
 import {
   LOCAL_PROXY_HINT,
@@ -508,6 +509,7 @@ function ProxyDetail({
             </span>
           ) : null}
           <span className='text-muted-foreground'>
+            {local ? '' : ` · ${proxySchemeText(proxy.scheme)}`}
             {proxy.has_auth ? ' · 有账密' : ' · 无账密'}
             {proxy.address_family === 6 ? ' · IPv6' : ''}
           </span>

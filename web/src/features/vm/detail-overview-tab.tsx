@@ -19,7 +19,6 @@ import { TabsContent } from '@/components/ui/tabs'
 import { VmCostByModel } from '@/features/vm/detail-cost-by-model'
 import { VmStatusBoard } from '@/features/vm/detail-status-board'
 import type { VmTodayCounts } from '@/features/vm/detail-today'
-import { VmEngineEditor } from '@/features/vm/engine-editor'
 import { VmPersonaEditor } from '@/features/vm/persona-editor'
 
 type VmOverviewTabProps = {
@@ -30,7 +29,6 @@ type VmOverviewTabProps = {
   dash: { data: Dashboard | undefined }
   u5: number
   u7: number
-  tierKey: string
   now: number
   cost: VmCostSummary
   split: WeeklySplitSummary | null
@@ -106,12 +104,7 @@ export function VmOverviewTab(props: VmOverviewTabProps) {
       <VmStatusBoard vm={vm} kernel={kernel} billing={billing} {...board} />
       {isCodexVm(vm) ? <OpenaiWindowStats billing={billing} /> : null}
       <VmCostByModel rows={costByModel} />
-      {isCodexVm(vm) ? null : (
-        <div className='grid gap-3 lg:grid-cols-2'>
-          <VmEngineEditor id={vm.id} vm={vm} kernel={kernel} />
-          <VmPersonaEditor id={vm.id} vm={vm} />
-        </div>
-      )}
+      {isCodexVm(vm) ? null : <VmPersonaEditor id={vm.id} vm={vm} />}
     </TabsContent>
   )
 }

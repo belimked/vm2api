@@ -1,3 +1,4 @@
+import { repairAutoModeReminders } from './auto-mode-reminder.mjs'
 import { defaultMaxTokensForModel } from './model-policy.mjs'
 
 /**
@@ -7,6 +8,7 @@ import { defaultMaxTokensForModel } from './model-policy.mjs'
  * keys, pass through unknown official fields such as output_config.
  */
 const DROP_TOP = new Set([
+  'caller_cwd',
   'settings',
   'claude_settings',
   'env',
@@ -191,30 +193,25 @@ export function canonicalizeClaudeMessagesShape(body, { preserveContentShape = f
   return out
 }
 
-export function sanitizeAnthropicBody(body, { strictPassthrough = false, preserveContentShape = false } = {}) {
+export function sanitizeAnthropicBody(body, { preserveContentShape = false, onSystemBlock } = {}) {
   if (!body || typeof body !== 'object') return body
-  if (strictPassthrough) {
-    const out = { ...body }
-    normalizeStop(out)
-    return out
-  }
 
   const out = copyOfficialAnthropicFields(body)
   applyStructuredOutput(out, body)
 
   if (!preserveContentShape && Array.isArray(out.system)) {
-    const blocks = out.system
-      .map((b) => {
-        if (typeof b === 'string') return { type: 'text', text: b }
-        if (b && typeof b.text === 'string') {
-          const block = { type: 'text', text: b.text }
+    out.system = out.system
+      .map((b, index) => {
+        let block = b && typeof b === 'object' ? b : null
+        if (typeof b === 'string') block = { type: 'text', text: b }
+        else if (typeof b?.text === 'string') {
+          block = { type: 'text', text: b.text }
           if (b.cache_control) block.cache_control = b.cache_control
-          return block
         }
-        return b && typeof b === 'object' ? b : null
+        onSystemBlock?.(block, index)
+        return block
       })
       .filter(Boolean)
-    out.system = blocks
   }
 
   normalizeAnthropicMessages(out)
@@ -223,9 +220,13 @@ export function sanitizeAnthropicBody(body, { strictPassthrough = false, preserv
   if (Array.isArray(out.tools) && out.tools.length === 0) delete out.tools
   // Do not overwrite caller max_tokens (thinking budget). Only fill if missing.
   if (!out.max_tokens) out.max_tokens = defaultMaxTokensForModel(out.model)
-  if (out.tool_choice && !out.tools) delete out.tool_choice
   normalizeStop(out)
-  return canonicalizeClaudeMessagesShape(out, { preserveContentShape })
+  const normalized = canonicalizeClaudeMessagesShape(out, { preserveContentShape })
+  // A nonempty source string becomes the first block; lifted history only appends.
+  if (!preserveContentShape && onSystemBlock && typeof body.system === 'string') {
+    onSystemBlock(normalized.system?.[0], 0)
+  }
+  return normalized
 }
 
 /**
@@ -249,6 +250,7 @@ export function sanitizeAnthropicBody(body, { strictPassthrough = false, preserv
  */
 export function normalizeAnthropicMessages(body, { keepMidConversationSystem = true } = {}) {
   if (!body || !Array.isArray(body.messages)) return body
+  repairAutoModeReminders(body)
 
   const keepMessageEffort = modelSupportsPerMessageEffort(body.model)
   const systemParts = []
@@ -297,6 +299,7 @@ export function normalizeAnthropicMessages(body, { keepMidConversationSystem = t
   }
 
   body.messages = merged
+  repairAutoModeReminders(body)
   if (systemParts.length) body.system = appendSystemParts(body.system, systemParts)
   if (!keepMessageEffort && (trailingEmptyEffort || liftedContentEffort)) {
     applyLiftedEffort(body, trailingEmptyEffort || liftedContentEffort)
@@ -383,7 +386,7 @@ function modelSupportsPerMessageEffort(modelId = '') {
     .trim()
     .toLowerCase()
     .replace(/\[1m\]$/i, '')
-  return /^claude-(?:(?:fable|mythos)-5[-.]1|opus-5(?:[-.]5)?|(?:sonnet|haiku)-5[-.]5)(?:-|$)/.test(id)
+  return /^claude-(?:(?:fable|mythos)-5[-.](?:1|2)|opus-5(?:[-.]5)?|(?:sonnet|haiku)-5[-.]5)(?:-|$)/.test(id)
 }
 
 function applyLiftedEffort(body, effort) {

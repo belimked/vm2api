@@ -86,6 +86,22 @@ export type RefusalDeviceBlock = {
   source_request_id: string | null
   fingerprint: string | null
   reason: string | null
+  subject_kind: 'device' | 'session'
+  identity_value: string
+  session_id: string | null
+  violations: number
+  expires_at: string | null
+}
+
+export type RiskAuditPolicy = {
+  ban_steps: number[]
+  blocked_tools: { name: string; message: string }[]
+  upstream_policy_phrases: string[]
+  downgrade_pool: string
+  downgrade_endpoint: string
+  downgrade_model: string
+  route_margin: number
+  model_margin: number
 }
 
 export type RefusalGuardConfig = {
@@ -94,6 +110,7 @@ export type RefusalGuardConfig = {
   /** 80、85、90 或 95。 */
   similarity: number
   device_block_enabled: boolean
+  risk_audit: RiskAuditPolicy
   count: number
   items: RefusalGuardItem[]
   device_count: number
@@ -144,6 +161,20 @@ export type JevScopeInventory = {
   accounts: JevScopeAccount[]
 }
 
+export type JevEndpointKey = {
+  number: number
+  masked_key: string
+  key_fingerprint: string
+  retired: boolean
+  status?: string
+  last_http_status?: number | null
+}
+
+export type JevEndpoint = {
+  base_url: string
+  keys: JevEndpointKey[]
+}
+
 /** `GET/PUT /api/panel/jev-intercept`。决策模型与硬正则。密钥只回 api_key_set。 */
 export type JevInterceptConfig = {
   enabled: boolean
@@ -181,6 +212,7 @@ export type JevInterceptConfig = {
   timeout_ms: number
   api_key_set: boolean
   api_key_count: number
+  endpoints?: JevEndpoint[]
   safety_instruction: string
   question_ids: string[]
   question_bank?: PolicyQuestion[]
@@ -209,6 +241,7 @@ export type NotifyEvents = {
   invalid: boolean
   account_down: boolean
   account_up: boolean
+  vm_down: boolean
 }
 
 export type NotifyTelegramConfig = {

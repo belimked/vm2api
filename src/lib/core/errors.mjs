@@ -55,6 +55,7 @@ export const ErrorCode = {
   API_KEY_QUOTA_EXHAUSTED: 'api_key_quota_exhausted',
   API_KEY_RATE_LIMIT: 'api_key_rate_limit',
   API_KEY_CONCURRENCY_LIMIT: 'api_key_concurrency_limit',
+  API_KEY_MODEL_NOT_ALLOWED: 'api_key_model_not_allowed',
   KEY_GROUP_MISMATCH: 'key_group_mismatch',
   VM_POOL_UNAVAILABLE: 'vm_pool_unavailable',
   API_BACKEND_FORBIDDEN: 'api_backend_forbidden',
@@ -71,8 +72,14 @@ export const ErrorCode = {
   UPSTREAM_EMPTY_STREAM: 'upstream_empty_stream',
   CLI_ERROR: 'cli_error',
   KERNEL_UNAVAILABLE: 'kernel_unavailable',
+  CLUSTER_SLOT_RECONNECTING: 'cluster_slot_reconnecting',
+  CLUSTER_DELIVERY_UNCONFIRMED: 'cluster_delivery_unconfirmed',
   KERNEL_ERROR: 'kernel_error',
   FABLE_REQUIRES_MAX: 'fable_requires_max',
+  NATIVE_HANDOFF_MISSING: 'native_handoff_missing',
+  NATIVE_HANDOFF_INVALID: 'native_handoff_invalid',
+  NATIVE_HANDOFF_CONFLICT: 'native_handoff_conflict',
+  NATIVE_HANDOFF_INCOMPLETE: 'native_handoff_incomplete',
 
   INCOMPLETE_RESPONSE: 'incomplete_response',
   CLIENT_CANCELLED: 'client_cancelled',
@@ -110,6 +117,12 @@ export const KERNEL_FAILURE_STATUS = Object.freeze({
   [ErrorCode.CLI_ERROR]: 502,
   [ErrorCode.KERNEL_ERROR]: 502,
   [ErrorCode.KERNEL_UNAVAILABLE]: 503,
+  [ErrorCode.CLUSTER_SLOT_RECONNECTING]: 503,
+  [ErrorCode.CLUSTER_DELIVERY_UNCONFIRMED]: 502,
+  [ErrorCode.NATIVE_HANDOFF_MISSING]: 502,
+  [ErrorCode.NATIVE_HANDOFF_INVALID]: 502,
+  [ErrorCode.NATIVE_HANDOFF_CONFLICT]: 502,
+  [ErrorCode.NATIVE_HANDOFF_INCOMPLETE]: 502,
 })
 
 export const CLIENT_POOL_BUSY_MESSAGE = '号池负载过高，稍后再试'
@@ -140,6 +153,8 @@ const POOL_CAPACITY_MESSAGE = /no eligible|no ready api|account pool|号池没�
 const WRAP_CONNECTION_MESSAGE = /provider error:.*connection error/i
 const USAGE_POLICY_MESSAGE =
   /usage policy|legal\/aup|unable to respond to this request|violate our usage|content_filter_refusal/i
+// Billing refusal, not a content violation and not "extra usage required".
+const UNANSWERABLE_PROMPT_MESSAGE = /third[-\s]?party apps now draw from|no third[-\s]?party apps(?:\s+are)?\s+allowed/i
 
 export function isWrapConnectionError(message = '') {
   return WRAP_CONNECTION_MESSAGE.test(String(message || ''))
@@ -147,6 +162,12 @@ export function isWrapConnectionError(message = '') {
 
 export function isUsagePolicyErrorMessage(message = '') {
   return USAGE_POLICY_MESSAGE.test(String(message || ''))
+}
+
+/** Usage Policy text, or a 400/503 the upstream will not answer for this prompt. */
+export function isUnanswerablePromptMessage(message = '') {
+  const text = String(message || '')
+  return USAGE_POLICY_MESSAGE.test(text) || UNANSWERABLE_PROMPT_MESSAGE.test(text)
 }
 
 export const REFUSAL_GUARD_MESSAGE =
@@ -383,6 +404,20 @@ export function assistantStopReason(result = {}) {
 export function isCompleteAssistantMessage(result = {}) {
   const body = result?.body && typeof result.body === 'object' ? result.body : result
   if (!isAssistantMessageBody(body)) return false
+  if (result?.nativeHandoff) {
+    const facts = result.providerResult
+    const complete = facts?.schema_version === 2 ? facts.provider_complete === true : facts?.usage_complete === true
+    return (
+      result.ok === true &&
+      complete &&
+      !facts.error &&
+      !facts.delivery_error &&
+      facts.response_valid !== false &&
+      (facts.schema_version !== 2 || facts.stop_reason !== 'tool_use' || facts.handoff_complete === true) &&
+      facts.message_id === body.id &&
+      facts.stop_reason === assistantStopReason(result)
+    )
+  }
   if (result?.sawMessageStop) return true
   if (!assistantStopReason({ body, stopReason: result?.stopReason })) return false
   return assistantVisibleOutput(body)
@@ -396,6 +431,7 @@ export function isIncompleteAssistantMessage(result = {}) {
 
 export function finalizeAssembledAssistantHop(result = {}) {
   if (isClientCancelledResult(result)) return result
+  if (result?.nativeHandoff) return result
   if (isCompleteAssistantMessage(result)) return result?.ok ? result : { ...result, ok: true }
   if (isIncompleteAssistantMessage(result) || result?.ok) {
     return {
@@ -410,6 +446,10 @@ export function finalizeAssembledAssistantHop(result = {}) {
 
 export function mergeAssembledAssistantHop(result = {}, assembled = null) {
   if (!assembled || result?.body?.error || result?.body?.type === 'error') return result
+  // Native transport already assembled and validated its public content. In
+  // particular, an outer assembler must not resurrect suppressed refusal tools
+  // or replace final trailer usage with an earlier SSE observation.
+  if (result?.nativeHandoff) return result
   const assembledResult = { body: assembled, stopReason: assembled.stop_reason }
   if (!isCompleteAssistantMessage(assembledResult) && isCompleteAssistantMessage(result)) return result
   return {
@@ -457,6 +497,7 @@ export function mapUpstreamError(status, body, headers = {}) {
       'classifier_runtime_unsupported',
       'classifier_invalid_cache',
       'invalid_request_context',
+      'invalid_kernel_request',
     ].includes(inboundCode)
   ) {
     return makeError({ type: ErrorType.INVALID_REQUEST, code: inboundCode, message: body.error.message, status: 400 })
@@ -467,6 +508,18 @@ export function mapUpstreamError(status, body, headers = {}) {
     (upType ? body?.message : null) ||
     body?.raw ||
     null
+  if (
+    /^license_(required|expired|not_yet_valid|invalid|binding_mismatch|unconfigured|crag_host_over_quota|crag_host_usage_unverified)$/.test(
+      inboundCode,
+    )
+  ) {
+    return makeError({
+      type: ErrorType.PERMISSION,
+      code: inboundCode,
+      message: String(msg || 'CRAG registration is required.'),
+      status: 403,
+    })
+  }
   if (inboundCode === ErrorCode.FABLE_REQUIRES_MAX) {
     return makeError({
       type: ErrorType.RATE_LIMIT,
@@ -480,7 +533,7 @@ export function mapUpstreamError(status, body, headers = {}) {
       type: ErrorType.RATE_LIMIT,
       code: ErrorCode.QUOTA_GUARD_REQUEST_TOO_LARGE,
       message: String(
-        msg || '临近额度闸线，本请求预估未命中缓存过大，未发往上游。请缩短上下文、等待窗口重置，或稍后再试。',
+        msg || '临近额度闸线，本请求预估未命中缓存过大，未发往上游。请缩短上下文、等待窗口重置，或改用其他模型。',
       ),
       status: 429,
       details: body?.error?.details,
@@ -564,7 +617,7 @@ export function mapUpstreamError(status, body, headers = {}) {
       request_id,
     })
   }
-  if (isUsagePolicyErrorMessage(msg)) {
+  if (isUnanswerablePromptMessage(msg)) {
     return makeRefusalGuardError({
       requestId: request_id,
       details: {
@@ -646,7 +699,12 @@ export function mapUpstreamError(status, body, headers = {}) {
       type: ErrorType.INVALID_REQUEST,
       code: ErrorCode.UPSTREAM_INVALID,
       message: String(msg),
-      status: inboundCode === ErrorCode.UPSTREAM_INVALID && status >= 400 && status < 500 ? status : 400,
+      status:
+        (inboundCode === ErrorCode.UPSTREAM_INVALID || upType === 'invalid_request_error') &&
+        status >= 400 &&
+        status < 500
+          ? status
+          : 400,
       param: body?.error?.param || undefined,
       details: {
         upstream_type: upType,

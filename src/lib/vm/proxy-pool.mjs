@@ -12,6 +12,7 @@
 import { EventEmitter } from 'node:events'
 import net from 'node:net'
 import crypto from 'node:crypto'
+import tls from 'node:tls'
 import { resolveStoreDb } from '../db/database.mjs'
 import { ProxiesRepo } from '../db/repos/proxies-repo.mjs'
 import { canBindProxyToVm, normalizeOwnerId, proxyOwnerId, vmOwnerId } from '../admin/resource-owner.mjs'
@@ -54,6 +55,62 @@ const DEFAULT_CONFIG = {
   dns_primary: DNS_PRIMARY_AUTO,
   dns_disable_svcb_https: false,
   ipv6_enabled: false,
+}
+
+/**
+ * A row on the loopback or a private address is a local forwarder (sing-box /
+ * clash / 3proxy on this host). Its listener only proves the forwarder is up:
+ * the node behind it is only as alive as an application reply through it.
+ * Require a real TLS handshake first, then retry with framed DNS over TCP for
+ * exits that block TLS or 1.1.1.1. SOCKS CONNECT alone is not enough because
+ * sing-box's mixed inbound uses a lazy upstream connection.
+ */
+const FORWARDER_CONNECT_TARGETS = Object.freeze([
+  Object.freeze({ host: '1.1.1.1', port: 443, kind: 'tls', servername: 'one.one.one.one' }),
+  Object.freeze({ host: '8.8.8.8', port: 53, kind: 'dns' }),
+])
+
+const HTTP_PROBE_TARGET = Object.freeze({ host: '1.1.1.1', port: 443 })
+
+function forwarderDnsQuery() {
+  const id = crypto.randomInt(0, 0x10000)
+  const labels = ['example', 'com']
+  const name = Buffer.concat([
+    ...labels.map((label) => Buffer.from([label.length, ...Buffer.from(label)])),
+    Buffer.from([0]),
+  ])
+  const query = Buffer.alloc(12 + name.length + 4)
+  query.writeUInt16BE(id, 0)
+  query.writeUInt16BE(0x0100, 2)
+  query.writeUInt16BE(1, 4)
+  name.copy(query, 12)
+  query.writeUInt16BE(1, 12 + name.length)
+  query.writeUInt16BE(1, 14 + name.length)
+  return query
+}
+
+export function isLocalForwarderHost(value) {
+  const host = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+  if (!host) return false
+  if (host === 'localhost' || host === '::1' || host === '::' || host === '0.0.0.0') return true
+  const v4 = host.startsWith('::ffff:') ? host.slice(7) : host
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(v4)
+  if (m) {
+    const a = Number(m[1])
+    const b = Number(m[2])
+    if (a === 0 || a === 127 || a === 10) return true
+    if (a === 172 && b >= 16 && b <= 31) return true
+    if (a === 192 && b === 168) return true
+    if (a === 169 && b === 254) return true
+    return false
+  }
+  // Unique-local fc00::/7 and link-local fe80::/10
+  if (/^f[cd][0-9a-f]{0,2}:/.test(host)) return true
+  if (/^fe[89ab][0-9a-f]?:/.test(host)) return true
+  return false
 }
 
 export function clampBindLimit(value, fallback = MAX_VMS_PER_PROXY) {
@@ -200,13 +257,26 @@ function localEgressRecord(nodeId = null) {
   }
 }
 
-function socks5Record({ host, port, username = null, password = null, raw = '' }) {
+/** Upstream proxy protocols a pool row can speak; anything else is rejected, not coerced. */
+export function proxyScheme(value) {
+  const s = String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/:\/*$/, '')
+  if (!s || s === 'socks5' || s === 'socks5h' || s === 'socks') return 'socks5'
+  if (s === 'http') return 'http'
+  return null
+}
+
+function socks5Record({ host, port, username = null, password = null, raw = '', scheme = 'socks5' }) {
+  scheme = proxyScheme(scheme)
+  if (!scheme) return null
   host = normalizeSocksHost(host)
   if (!looksLikeHost(host) || !isSocksPort(port)) return null
   const user = username == null || username === '' ? null : String(username)
   const pass = user == null ? null : password == null ? '' : String(password)
   return {
-    scheme: 'socks5',
+    scheme,
     host: String(host).trim(),
     port: Number(port),
     username: user,
@@ -223,18 +293,22 @@ export function parseSocks5Fields(fields = {}) {
     username: fields.username ?? fields.user,
     password: fields.password ?? fields.pass,
     raw: fields.raw,
+    scheme: fields.scheme ?? fields.protocol ?? fields.type,
   })
 }
 
 /** Parse line forms:
  *  socks5://user:pass@host:port
  *  socks5h://user:pass@host:port
+ *  http://user:pass@host:port   (HTTP CONNECT proxy)
  *  user:pass@host:port
  *  host:port
  *  host:port:user:pass
  *  user:pass:host:port
+ *
+ * `defaultScheme` only applies to forms without an explicit `scheme://` prefix.
  */
-export function parseSocks5Line(line) {
+export function parseSocks5Line(line, defaultScheme = 'socks5') {
   let raw = String(line || '').trim()
   if (!raw || raw.startsWith('#')) return null
   raw = raw.replace(/^['"]|['"]$/g, '').trim()
@@ -249,6 +323,22 @@ export function parseSocks5Line(line) {
         raw,
       })
     }
+    if (/^http:\/\//i.test(raw)) {
+      const u = new URL(raw)
+      // Only an authority: a path/query here means a pasted page URL, not a proxy.
+      if ((u.pathname && u.pathname !== '/') || u.search || u.hash) return null
+      return socks5Record({
+        scheme: 'http',
+        host: u.hostname,
+        // WHATWG URL drops :80 for http, so an empty port is the scheme default.
+        port: u.port || 80,
+        username: u.username ? decodeURIComponent(u.username) : null,
+        password: u.password ? decodeURIComponent(u.password) : null,
+        raw,
+      })
+    }
+    // https:// would mean TLS to the proxy itself, which no egress path speaks.
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return null
     const at = raw.lastIndexOf('@')
     if (at > 0) {
       const cred = raw.slice(0, at)
@@ -258,6 +348,7 @@ export function parseSocks5Line(line) {
         const [, host, port] = match
         const colon = cred.indexOf(':')
         return socks5Record({
+          scheme: defaultScheme,
           host,
           port,
           username: colon >= 0 ? cred.slice(0, colon) : cred,
@@ -270,19 +361,34 @@ export function parseSocks5Line(line) {
     if (raw.includes('[') || raw.includes(']')) {
       const match = raw.match(/^\[([^\]]+)\]:(\d+)(?::([^:]*)(?::(.*))?)?$/)
       if (!match || !net.isIPv6(match[1])) return null
-      return socks5Record({ host: match[1], port: match[2], username: match[3], password: match[4], raw })
+      return socks5Record({
+        scheme: defaultScheme,
+        host: match[1],
+        port: match[2],
+        username: match[3],
+        password: match[4],
+        raw,
+      })
     }
     // A colon-delimited IPv6 endpoint has no unambiguous port boundary.
     if (net.isIPv6(raw) || net.isIPv6(raw.slice(0, raw.lastIndexOf(':')))) return null
     const parts = raw.split(':')
     if (parts.length === 2) {
-      return socks5Record({ host: parts[0], port: parts[1], raw })
+      return socks5Record({ scheme: defaultScheme, host: parts[0], port: parts[1], raw })
     }
     if (parts.length === 3 && looksLikeHost(parts[0]) && isSocksPort(parts[1])) {
-      return socks5Record({ host: parts[0], port: parts[1], username: parts[2], password: '', raw })
+      return socks5Record({
+        scheme: defaultScheme,
+        host: parts[0],
+        port: parts[1],
+        username: parts[2],
+        password: '',
+        raw,
+      })
     }
     if (parts.length >= 4 && looksLikeHost(parts[0]) && isSocksPort(parts[1])) {
       return socks5Record({
+        scheme: defaultScheme,
         host: parts[0],
         port: parts[1],
         username: parts[2],
@@ -292,6 +398,7 @@ export function parseSocks5Line(line) {
     }
     if (parts.length >= 4 && isSocksPort(parts[parts.length - 1]) && looksLikeHost(parts[parts.length - 2])) {
       return socks5Record({
+        scheme: defaultScheme,
         host: parts[parts.length - 2],
         port: parts[parts.length - 1],
         username: parts[0],
@@ -490,7 +597,7 @@ export class ProxyPool extends EventEmitter {
       last_probe_at: p.last_probe_at || null,
       last_error: p.last_error || null,
       created_at: p.created_at,
-      kind: isLocalEgressProxy(p) ? 'local' : 'socks5',
+      kind: isLocalEgressProxy(p) ? 'local' : p.scheme || 'socks5',
       node_id: isLocalEgressProxy(p) ? localEgressNodeId(p.id) : undefined,
       scheme: isLocalEgressProxy(p) ? 'local' : p.scheme || 'socks5',
       domain_forward: !!p.domain_forward,
@@ -623,7 +730,7 @@ export class ProxyPool extends EventEmitter {
   }
 
   _findSocksRow(parsed) {
-    const key = (p) => JSON.stringify([p.host, p.port, p.username || '', p.password || ''])
+    const key = (p) => JSON.stringify([p.scheme || 'socks5', p.host, p.port, p.username || '', p.password || ''])
     const wanted = key(parsed)
     return this.state.proxies.find((p) => key(p) === wanted) || null
   }
@@ -657,18 +764,29 @@ export class ProxyPool extends EventEmitter {
   }
 
   importLines(text, extra = {}) {
+    // Protocol for rows that do not name one themselves (bare host:port, fields
+    // without scheme). Callers validate it; an unknown value falls back to SOCKS5.
+    const defaultScheme = proxyScheme(extra.defaultScheme) || 'socks5'
     const parsed = []
     for (const line of String(text || '').split(/\r?\n/)) {
       if (!String(line || '').trim()) continue
-      parsed.push(parseSocks5Line(line) || { __invalid: String(line).trim() })
+      parsed.push(parseSocks5Line(line, defaultScheme) || { __invalid: String(line).trim() })
     }
     const fields = extra.fields || extra.proxies || extra.entries || []
     for (const item of Array.isArray(fields) ? fields : [fields]) {
       if (!item || typeof item !== 'object') continue
-      parsed.push(parseSocks5Fields(item) || { __invalid: `${item.host || ''}:${item.port || ''}` })
+      parsed.push(
+        parseSocks5Fields({ ...item, scheme: item.scheme ?? item.protocol ?? item.type ?? defaultScheme }) || {
+          __invalid: `${item.host || ''}:${item.port || ''}`,
+        },
+      )
     }
     if (extra.host || extra.port) {
-      parsed.push(parseSocks5Fields(extra) || { __invalid: `${extra.host || ''}:${extra.port || ''}` })
+      parsed.push(
+        parseSocks5Fields({ ...extra, scheme: extra.scheme ?? defaultScheme }) || {
+          __invalid: `${extra.host || ''}:${extra.port || ''}`,
+        },
+      )
     }
     return this.importParsed(parsed, extra)
   }
@@ -678,7 +796,7 @@ export class ProxyPool extends EventEmitter {
     const skipped = []
     // Credentials can select distinct proxies at the same endpoint. Encode a
     // tuple so colons inside credentials cannot collide with field separators.
-    const proxyKey = (p) => JSON.stringify([p.host, p.port, p.username || '', p.password || ''])
+    const proxyKey = (p) => JSON.stringify([p.scheme || 'socks5', p.host, p.port, p.username || '', p.password || ''])
     const existing = new Set(this.state.proxies.map(proxyKey))
     for (const parsed of records) {
       if (!parsed || parsed.__invalid || !parsed.host || !parsed.port) {
@@ -687,7 +805,8 @@ export class ProxyPool extends EventEmitter {
           skipped.push({
             line: label,
             reason: 'parse_failed',
-            message: 'Invalid SOCKS5 endpoint; IPv6 requires [host]:port or socks5h://[host]:port',
+            message:
+              'Invalid proxy endpoint; use socks5://, http:// or host:port (IPv6 requires [host]:port or socks5h://[host]:port)',
           })
         continue
       }
@@ -699,7 +818,7 @@ export class ProxyPool extends EventEmitter {
       existing.add(key)
       const proxy = {
         id: uid('px'),
-        scheme: 'socks5',
+        scheme: parsed.scheme || 'socks5',
         host: parsed.host,
         port: parsed.port,
         username: parsed.username,
@@ -872,13 +991,14 @@ export class ProxyPool extends EventEmitter {
    * and port. Absent key = leave alone; empty string = clear.
    *
    * The merged record goes through socks5Record() so this shares the exact
-   * validation and normalization the import path uses.
+   * validation and normalization the import path uses. `scheme` (socks5 / http)
+   * counts as a connection field: switching it changes how bound slots dial out.
    */
   update(proxyId, patch = {}) {
     const p = this.state.proxies.find((x) => x.id === proxyId)
     if (!p) return { ok: false, error: 'proxy_not_found' }
     const has = (k) => Object.prototype.hasOwnProperty.call(patch, k)
-    const connection = ['host', 'port', 'username', 'password'].some(has)
+    const connection = ['scheme', 'host', 'port', 'username', 'password'].some(has)
     if (!connection && !has('label') && !has('domain_forward')) {
       return { ok: false, error: 'no_editable_fields' }
     }
@@ -901,6 +1021,12 @@ export class ProxyPool extends EventEmitter {
       this.save()
       return { ok: true, proxy: this.publicProxy(p), connection_changed: false, domain_forward_changed: domainChanged }
     }
+    let scheme = p.scheme || 'socks5'
+    if (has('scheme')) {
+      if (isLocalEgressProxy(p)) return { ok: false, error: 'scheme_unsupported' }
+      scheme = proxyScheme(patch.scheme)
+      if (!scheme) return { ok: false, error: 'invalid_scheme' }
+    }
     const username = has('username') ? patch.username : p.username
     // SOCKS5 has no password-only auth: socks5Record() drops the password
     // whenever the username is empty. Setting one without the other would
@@ -909,6 +1035,7 @@ export class ProxyPool extends EventEmitter {
       return { ok: false, error: 'password_without_username' }
     }
     const next = socks5Record({
+      scheme,
       host: has('host') ? patch.host : p.host,
       port: has('port') ? patch.port : p.port,
       username,
@@ -918,6 +1045,7 @@ export class ProxyPool extends EventEmitter {
       password: has('password') ? patch.password : username ? p.password : null,
     })
     if (!next) return { ok: false, error: 'invalid_proxy' }
+    p.scheme = next.scheme
     p.host = next.host
     p.port = next.port
     p.username = next.username
@@ -1103,6 +1231,8 @@ export class ProxyPool extends EventEmitter {
     const socks = await this._probeSocks(proxy)
     if (socks.scope === 'policy') return socks
     if (!socks.ok) return { ...socks, scope: 'socks' }
+    // Unused proxies need no egress network; probing must not consume Docker subnets.
+    if (!boundVmIdsOf(proxy).length) return { ...socks, scope: 'socks' }
     if (typeof this.egressCheck !== 'function') return { ...socks, scope: 'socks' }
     let eg = this.egressCheck(proxy)
     if (!eg?.ok && typeof this.repairEgress === 'function') {
@@ -1129,62 +1259,278 @@ export class ProxyPool extends EventEmitter {
     const host = normalizeSocksHost(proxy.host)
     if (!host) return { ok: false, error: 'invalid_proxy_host', latency_ms: null }
     const timeout = this.state.config.probe_timeout_ms || 8000
-    const started = Date.now()
+    if (proxy.scheme === 'http') return this._httpProbe(proxy, host, timeout)
+    // Remote SOCKS endpoints *are* the proxy, so the greeting is the whole
+    // check. A local forwarder only owns its listener: the node behind it is
+    // only as alive as an application reply through it, and only then does the
+    // measured round trip describe the tunnel instead of loopback.
+    const targets = isLocalForwarderHost(host) ? FORWARDER_CONNECT_TARGETS : [null]
+    // Split the operator's total probe budget across targets so a blocked
+    // first destination cannot consume the whole timeout before the fallback.
+    const attemptTimeout = targets.length > 1 ? Math.max(1, Math.floor(timeout / targets.length)) : timeout
+    let last = null
+    for (const target of targets) {
+      last = await this._socksProbe(proxy, host, attemptTimeout, target)
+      if (last.ok) return last
+      // Auth and protocol failures answer the same for every target; only a
+      // refused/unreachable destination is worth retrying elsewhere.
+      if (!last.retryable) break
+    }
+    return last
+  }
+
+  _socksProbe(proxy, host, timeout, target = null) {
     return new Promise((resolve) => {
       const socket = net.connect({ host, port: proxy.port })
       this._probeSockets.set(socket, proxy)
+      const started = Date.now()
+      let activeSocket = socket
       let done = false
       let connected = false
       let greeted = false
+      let phase = 'greeting'
       let buf = Buffer.alloc(0)
-      const finish = (ok, error) => {
+      let dnsId = 0
+      const finish = (ok, error, extra = {}) => {
         if (done) return
         done = true
         this._probeSockets.delete(socket)
         try {
-          socket.destroy()
+          activeSocket.destroy()
         } catch {
           /* */
+        }
+        if (activeSocket !== socket) {
+          try {
+            socket.destroy()
+          } catch {
+            /* */
+          }
         }
         const reason = proxyBlockedReason(proxy, this.state.config.ipv6_enabled)
         if (reason) {
           resolve({ ok: false, scope: 'policy', error: reason, latency_ms: null })
           return
         }
-        resolve({
-          ok,
-          latency_ms: Date.now() - started,
-          error: error || null,
-        })
+        if (ok) {
+          resolve({ ok: true, latency_ms: Date.now() - started, error: null })
+          return
+        }
+        resolve({ ok: false, scope: 'socks', error: error || null, latency_ms: null, ...extra })
       }
+      const notSocks = () => (connected && !greeted ? 'not_socks5：请填写 SOCKS5 端口' : null)
+      const startConnect = () => {
+        if (!target) {
+          finish(true, null)
+          return
+        }
+        phase = 'connect'
+        const port = Buffer.alloc(2)
+        port.writeUInt16BE(target.port)
+        const ip = Buffer.from(target.host.split('.').map((n) => Number(n) & 0xff))
+        socket.write(Buffer.concat([Buffer.from([0x05, 0x01, 0x00, 0x01]), ip, port]))
+      }
+      const startDnsProbe = () => {
+        phase = 'dns'
+        buf = Buffer.alloc(0)
+        const query = forwarderDnsQuery()
+        dnsId = query.readUInt16BE(0)
+        const frame = Buffer.alloc(2 + query.length)
+        frame.writeUInt16BE(query.length, 0)
+        query.copy(frame, 2)
+        socket.write(frame)
+      }
+      const startTlsProbe = () => {
+        phase = 'tls'
+        socket.removeAllListeners('data')
+        socket.removeAllListeners('connect')
+        socket.removeAllListeners('timeout')
+        socket.removeAllListeners('error')
+        socket.removeAllListeners('close')
+        socket.setTimeout(0)
+        try {
+          const secure = tls.connect({
+            socket,
+            servername: target.servername,
+            // Liveness only: the exit may terminate TLS with any certificate.
+            rejectUnauthorized: false,
+          })
+          activeSocket = secure
+          secure.setTimeout(timeout, () =>
+            finish(false, 'egress_tls_timeout：经代理 TLS 握手超时', { retryable: true }),
+          )
+          secure.once('secureConnect', () => finish(true, null))
+          secure.once('error', (err) =>
+            finish(false, `egress_tls_failed：经代理 TLS 握手失败 (${String(err?.message || err)})`, {
+              retryable: true,
+            }),
+          )
+          secure.once('close', () => {
+            if (!done) finish(false, 'egress_tls_closed：代理在 TLS 握手前断开', { retryable: true })
+          })
+          socket.once('error', (err) =>
+            finish(false, `egress_tls_failed：经代理 TLS 握手失败 (${String(err?.message || err)})`, {
+              retryable: true,
+            }),
+          )
+          socket.once('close', () => {
+            if (!done) finish(false, 'egress_tls_closed：代理在 TLS 握手前断开', { retryable: true })
+          })
+        } catch (err) {
+          finish(false, `egress_tls_failed：经代理 TLS 握手失败 (${String(err?.message || err)})`, {
+            retryable: true,
+          })
+        }
+      }
+      const startApplicationProbe = () => {
+        if (!target) return finish(true, null)
+        if (target.kind === 'tls') return startTlsProbe()
+        if (target.kind === 'dns') return startDnsProbe()
+        finish(true, null)
+      }
+
       socket.setTimeout(timeout)
       socket.on('connect', () => {
         connected = true
-        // Offer no-auth and user/pass so a working endpoint is not 0xff-killed.
         socket.write(Buffer.from([0x05, 0x02, 0x00, 0x02]))
       })
       socket.on('data', (data) => {
         buf = Buffer.concat([buf, data])
-        if (buf.length < 2) return
-        greeted = true
-        if (buf[0] !== 0x05) {
-          finish(false, 'not_socks5：请填写 SOCKS5 端口')
+        if (phase === 'greeting') {
+          if (buf.length < 2) return
+          greeted = true
+          if (buf[0] !== 0x05) return finish(false, 'not_socks5：请填写 SOCKS5 端口')
+          const method = buf[1]
+          buf = buf.subarray(2)
+          // 0xff means "no acceptable method": wrong credentials, not health.
+          if (method === 0xff) return finish(false, 'proxy_auth_unsupported：代理不接受提供的认证方式')
+          if (method === 0x02) {
+            const user = Buffer.from(String(proxy.username || ''), 'utf8')
+            const pass = Buffer.from(String(proxy.password || ''), 'utf8')
+            if (!user.length && !pass.length) return finish(false, 'proxy_auth_required：代理要求用户名密码')
+            if (user.length > 255 || pass.length > 255) return finish(false, 'proxy_auth_too_long')
+            phase = 'auth'
+            socket.write(Buffer.concat([Buffer.from([0x01, user.length]), user, Buffer.from([pass.length]), pass]))
+            return
+          }
+          if (method !== 0x00) return finish(false, 'not_socks5：请填写 SOCKS5 端口')
+          startConnect()
           return
         }
-        if (buf[1] === 0x00 || buf[1] === 0x02 || buf[1] === 0xff) {
+        if (phase === 'auth') {
+          if (buf.length < 2) return
+          const accepted = buf[0] === 0x01 && buf[1] === 0x00
+          buf = buf.subarray(2)
+          if (!accepted) return finish(false, 'proxy_auth_failed：代理拒绝用户名密码')
+          startConnect()
+          return
+        }
+        if (phase === 'connect') {
+          if (buf.length < 4) return
+          if (buf[0] !== 0x05) return finish(false, 'not_socks5：请填写 SOCKS5 端口')
+          if (buf[1] !== 0x00) {
+            const code = buf[1]
+            return finish(false, `egress_unreachable：代理无法连接检测目标 (rep=0x${code.toString(16)})`, {
+              retryable: true,
+              reply: code,
+            })
+          }
+          const atyp = buf[3]
+          const need = atyp === 0x01 ? 10 : atyp === 0x04 ? 22 : atyp === 0x03 ? 7 + (buf[4] ?? 0) : -1
+          // Consume the whole bound address so a trailing reply cannot be
+          // mistaken for a later phase.
+          if (need < 0) return finish(false, 'not_socks5：请填写 SOCKS5 端口')
+          if (buf.length < need) return
+          startApplicationProbe()
+          return
+        }
+        if (phase === 'dns') {
+          if (buf.length < 2) return
+          const need = 2 + buf.readUInt16BE(0)
+          if (buf.length < need) return
+          const response = buf.subarray(2, need)
+          if (response.length < 12 || response.readUInt16BE(0) !== dnsId || (response[2] & 0x80) === 0) {
+            return finish(false, 'egress_dns_invalid：经代理 DNS 响应无效', { retryable: true })
+          }
           finish(true, null)
+        }
+      })
+      socket.on('timeout', () =>
+        finish(
+          false,
+          notSocks() ||
+            (phase === 'connect'
+              ? 'egress_timeout：经代理连接检测目标超时'
+              : phase === 'dns'
+                ? 'egress_dns_timeout：经代理 DNS 探测超时'
+                : 'timeout'),
+          phase === 'dns' ? { retryable: true } : {},
+        ),
+      )
+      socket.on('error', (e) =>
+        finish(false, notSocks() || String(e.message || e), phase === 'dns' ? { retryable: true } : {}),
+      )
+      socket.on('close', () => {
+        if (!done) finish(false, notSocks() || 'connection_closed', phase === 'dns' ? { retryable: true } : {})
+      })
+    })
+  }
+
+  /**
+   * HTTP proxies have no greeting, so a CONNECT tunnel is the smallest check
+   * that proves the port speaks HTTP proxy and accepts the credentials.
+   */
+  _httpProbe(proxy, host, timeout) {
+    const target = HTTP_PROBE_TARGET
+    return new Promise((resolve) => {
+      const socket = net.connect({ host, port: proxy.port })
+      this._probeSockets.set(socket, proxy)
+      const started = Date.now()
+      let done = false
+      let buf = Buffer.alloc(0)
+      const finish = (ok, error) => {
+        if (done) return
+        done = true
+        this._probeSockets.delete(socket)
+        socket.destroy()
+        const reason = proxyBlockedReason(proxy, this.state.config.ipv6_enabled)
+        if (reason) return resolve({ ok: false, scope: 'policy', error: reason, latency_ms: null })
+        if (ok) return resolve({ ok: true, latency_ms: Date.now() - started, error: null })
+        resolve({ ok: false, scope: 'socks', error, latency_ms: null })
+      }
+      socket.setTimeout(timeout)
+      socket.on('connect', () => {
+        const authority = `${target.host}:${target.port}`
+        const lines = [`CONNECT ${authority} HTTP/1.1`, `Host: ${authority}`]
+        if (proxy.username) {
+          const token = Buffer.from(`${proxy.username}:${proxy.password || ''}`, 'utf8').toString('base64')
+          lines.push(`Proxy-Authorization: Basic ${token}`)
+        }
+        socket.write(`${lines.join('\r\n')}\r\n\r\n`)
+      })
+      socket.on('data', (data) => {
+        buf = Buffer.concat([buf, data])
+        const eol = buf.indexOf('\r\n')
+        if (eol < 0) {
+          if (buf.length > 4096) finish(false, 'not_http_proxy：请填写 HTTP 代理端口')
           return
         }
-        finish(false, 'not_socks5：请填写 SOCKS5 端口')
+        const m = /^HTTP\/1\.[01] (\d{3})/.exec(buf.subarray(0, eol).toString('latin1'))
+        if (!m) return finish(false, 'not_http_proxy：请填写 HTTP 代理端口')
+        const code = Number(m[1])
+        if (code >= 200 && code < 300) return finish(true, null)
+        if (code === 407) {
+          return finish(
+            false,
+            proxy.username ? 'proxy_auth_failed：代理拒绝用户名密码' : 'proxy_auth_required：代理要求用户名密码',
+          )
+        }
+        finish(false, `egress_unreachable：代理无法连接检测目标 (http ${code})`)
       })
-      socket.on('timeout', () => finish(false, connected && !greeted ? 'not_socks5：请填写 SOCKS5 端口' : 'timeout'))
-      socket.on('error', (e) => {
-        const message = String(e.message || e)
-        finish(false, connected && !greeted ? 'not_socks5：请填写 SOCKS5 端口' : message)
-      })
-      socket.on('close', () => {
-        if (!done) finish(false, connected && !greeted ? 'not_socks5：请填写 SOCKS5 端口' : 'connection_closed')
-      })
+      socket.on('timeout', () => finish(false, 'timeout'))
+      socket.on('error', (e) => finish(false, String(e?.message || e)))
+      // Bytes that never formed a status line came from something other than an HTTP proxy.
+      socket.on('close', () => finish(false, buf.length ? 'not_http_proxy：请填写 HTTP 代理端口' : 'connection_closed'))
     })
   }
 
@@ -1396,12 +1742,11 @@ export class ProxyPool extends EventEmitter {
     if (result.scope === 'pending') return
     p.last_probe_at = new Date().toISOString()
     p.latency_ms = result.latency_ms
-    // Node rows are only ever disabled by an operator; a link result must not undo that.
-    if (result.scope === 'node' && !p.enabled) return
-    if (result.scope === 'node' && !result.ok) {
-      // The cluster link owns node health; a node hiccup must not disable the row or park its slots.
-      p.status = 'fail'
-      p.last_error = result.error || 'node_unreachable'
+    // SSH only measures the control-plane route; it cannot park or resume the slot's exit.
+    if (result.scope === 'node') {
+      if (!p.enabled) return
+      p.status = result.ok ? 'ok' : 'fail'
+      p.last_error = result.ok ? null : result.error || 'node_unreachable'
       return
     }
     if (result.scope === 'egress') {
@@ -1511,6 +1856,7 @@ export class ProxyPool extends EventEmitter {
     return {
       id: p.id,
       url: socksProxyUrl(p, 'socks5'),
+      scheme: p.scheme || 'socks5',
       host: p.host,
       port: p.port,
       username: p.username || null,

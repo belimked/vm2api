@@ -31,10 +31,37 @@ import {
 } from './usage-log-preds.mjs'
 import { collapseBlockKeywords, foldInterceptRows } from '../../protocol/intercept-stats.mjs'
 
+// Key self-service rows name the model the client sent; mapping targets stay internal.
+const CLIENT_MODEL_SQL = "COALESCE(NULLIF(model, ''), NULLIF(requested_model, ''), NULLIF(upstream_model, ''))"
+const KEY_SELF_MODELS = 50
+const KEY_SELF_RECENT_MAX = 100
+
+function emptyKeyUsage() {
+  return {
+    requests: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
+    total_tokens: 0,
+    cost: 0,
+  }
+}
+
+function addKeyUsage(into, row) {
+  for (const k of ['requests', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens', 'cost']) {
+    into[k] += Number(row[k] || 0)
+  }
+  into.total_tokens = into.input_tokens + into.output_tokens + into.cache_read_tokens + into.cache_creation_tokens
+  into.cost = Math.round(into.cost * 1e6) / 1e6
+}
+
 /** settings key: ISO instant before which usage_logs rows may have been pruned. Monotonic. */
 const PRUNED_THROUGH_KEY = 'usage_logs_pruned_through'
 const BILLING_STATS_CACHE_TTL_MS = 10_000
 const BILLING_BACKFILL_INTERVAL_MS = 60_000
+const LIFETIME_ACCOUNT_SQL = `COALESCE(NULLIF(usage_account_id, ''),
+  NULLIF(NULLIF(COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, '')), COALESCE(vm_id, '')), '—'))`
 
 function billingStatsCacheKey(accountWindows) {
   if (!Array.isArray(accountWindows) || accountWindows.length === 0) return 'rolling'
@@ -102,6 +129,7 @@ const SUMMARY_COLUMNS = [
   'attempt_count',
   'final_state',
   'final_account_id',
+  'usage_account_id',
   'input_cost',
   'output_cost',
   'cache_read_cost',
@@ -125,6 +153,8 @@ const SUMMARY_COLUMNS = [
   'reasoning_effort',
   'inbound_device_id',
   'estimated_input_tokens',
+  'upstream_status',
+  'upstream_400_message',
   'intercept',
   'jev_state',
   'vm_owner_user_id',
@@ -813,13 +843,14 @@ export class UsageLogsRepo {
     return this._costSelect(cond, params)
   }
 
-  costByAccount({ since = null, until = null } = {}) {
+  costByAccount({ since = null, until = null, withLifetime = false } = {}) {
     const { cond, params } = timeCond(since, until)
     const rows = this.db
       .prepare(`
       SELECT
         COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') AS account_id,
         vm_id,
+        ${withLifetime ? `${LIFETIME_ACCOUNT_SQL} AS lifetime_account_id,` : ''}
         COUNT(*) AS requests,
         SUM(CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END) AS success,
         SUM(CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
@@ -835,13 +866,14 @@ export class UsageLogsRepo {
         COALESCE(SUM(total_cost), 0) AS total_cost,
         COALESCE(SUM(CASE WHEN pricing_model = '${UNPRICED_MODEL}' AND (${TOTAL_TOKENS_SQL}) > 0 THEN 1 ELSE 0 END), 0) AS unpriced
       FROM usage_logs ${cond}
-      GROUP BY 1, vm_id
+      GROUP BY 1, vm_id${withLifetime ? ', lifetime_account_id' : ''}
       ORDER BY total_cost DESC
     `)
       .all(...params)
     return rows.map((r) => ({
       account_id: r.account_id,
       vm_id: r.vm_id || null,
+      ...(withLifetime ? { lifetime_account_id: r.lifetime_account_id } : {}),
       requests: Number(r.requests || 0),
       success: Number(r.success || 0),
       errors: Number(r.errors || 0),
@@ -941,6 +973,84 @@ export class UsageLogsRepo {
     })
   }
 
+  /**
+   * One managed key's totals for nested periods ending now (GET /v1/me/usage),
+   * read in one scan from the earliest `since`. `cost` is actual_cost, the
+   * group-rated spend the key quota counts. Only client-facing columns.
+   */
+  keyUsagePeriods({ apiKeyId, periods = [] } = {}) {
+    const list = periods
+      .map((p) => ({ name: String(p.name), since: new Date(p.since).toISOString() }))
+      .sort((a, b) => b.since.localeCompare(a.since))
+    if (!apiKeyId || !list.length) return {}
+    const bands = list.map((_, i) => `WHEN created_at >= ? THEN ${i}`).join(' ')
+    const rows = this.db
+      .prepare(`
+      SELECT ${CLIENT_MODEL_SQL} AS model,
+             CASE ${bands} END AS band,
+             COUNT(*) AS requests,
+             COALESCE(SUM(input_tokens), 0) AS input_tokens,
+             COALESCE(SUM(output_tokens), 0) AS output_tokens,
+             COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+             COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+             COALESCE(SUM(actual_cost), 0) AS cost
+      FROM usage_logs
+      WHERE api_key_id = ? AND created_at >= ?
+      GROUP BY 1, 2
+    `)
+      .all(...list.map((p) => p.since), apiKeyId, list[list.length - 1].since)
+    const out = {}
+    list.forEach((period, i) => {
+      const total = { since: period.since, ...emptyKeyUsage(), models: [] }
+      const byModel = new Map()
+      for (const row of rows) {
+        if (Number(row.band) > i) continue
+        addKeyUsage(total, row)
+        const name = row.model ?? null
+        if (!byModel.has(name)) byModel.set(name, { model: name, ...emptyKeyUsage() })
+        addKeyUsage(byModel.get(name), row)
+      }
+      total.models = [...byModel.values()]
+        .sort((a, b) => b.cost - a.cost || b.requests - a.requests)
+        .slice(0, KEY_SELF_MODELS)
+      out[period.name] = total
+    })
+    return out
+  }
+
+  /**
+   * Newest rows of one managed key, keyset on (created_at, id) like the log
+   * view. `before` is { created_at, id? }; without id it is a plain time bound.
+   */
+  keyRecentRequests({ apiKeyId, limit = 20, before = null } = {}) {
+    if (!apiKeyId) return { items: [], has_more: false, next: null }
+    const n = Math.max(1, Math.min(KEY_SELF_RECENT_MAX, Math.floor(Number(limit)) || 20))
+    const where = ['api_key_id = ?']
+    const params = [apiKeyId]
+    if (before?.created_at && before.id) {
+      // the leading bound lets idx_reqlog_key seek instead of skipping newer rows
+      where.push('created_at <= ?', '(created_at < ? OR (created_at = ? AND id < ?))')
+      params.push(before.created_at, before.created_at, before.created_at, before.id)
+    } else if (before?.created_at) {
+      where.push('created_at < ?')
+      params.push(before.created_at)
+    }
+    const rows = this.db
+      .prepare(`
+      SELECT id, request_id, created_at, ${CLIENT_MODEL_SQL} AS model, status, error_code,
+             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, actual_cost, duration_ms
+      FROM usage_logs
+      WHERE ${where.join(' AND ')}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `)
+      .all(...params, n + 1)
+    const page = rows.slice(0, n)
+    const last = page[page.length - 1]
+    const hasMore = rows.length > n
+    return { items: page, has_more: hasMore, next: hasMore ? { created_at: last.created_at, id: last.id } : null }
+  }
+
   _usageWindow({ vmId = null, apiKeyId = null, days = 30, rankExpr, rankKey, rankLimit = 8 } = {}) {
     const empty = { days: 0, since: null, history: [], models: [], [rankKey]: [] }
     if (!vmId && !apiKeyId) return empty
@@ -1015,7 +1125,7 @@ export class UsageLogsRepo {
       OR COALESCE(via, '') IN ('hard-regex', 'jev', 'distill-detect', 'refusal-guard')
       OR COALESCE(final_state, '') IN ('policy_blocked', 'distill_blocked', 'refusal_guard', 'refusal_similar', 'refusal_device')
     )`
-    const inference = `path IN ('/v1/messages', '/v1/responses', '/v1/chat/completions')`
+    const inference = `path IN ('/v1/messages', '/v1/responses', '/v1/chat/completions', '/v1/completions')`
     const row = this.db
       .prepare(
         `SELECT
@@ -1046,6 +1156,7 @@ export class UsageLogsRepo {
       .prepare(
         `SELECT intercept, via, error_message AS message,
                 CASE WHEN ${block} THEN 1 ELSE 0 END AS blocked,
+                CASE WHEN COALESCE(attempt_count, 0) > 0 THEN 1 ELSE 0 END AS hopped,
                 COUNT(*) AS count
          FROM usage_logs
          WHERE created_at >= ?
@@ -1053,7 +1164,7 @@ export class UsageLogsRepo {
              ${block}
              OR (${inference} AND COALESCE(via, '') != 'warmup-intercept')
            )
-         GROUP BY intercept, via, error_message, blocked`,
+         GROUP BY intercept, via, error_message, blocked, hopped`,
       )
       .all(since)
     const folded = foldInterceptRows(grouped)
@@ -1065,6 +1176,7 @@ export class UsageLogsRepo {
       keywords: collapseBlockKeywords(keywords),
       blocks: folded.blocks,
       passes: folded.passes,
+      routes: folded.routes,
     }
   }
 
@@ -1105,7 +1217,37 @@ export class UsageLogsRepo {
     const todayStart = shanghaiDayStartIso()
     const fiveHStart = new Date(now - WINDOW_5H_MS).toISOString()
     const sevenDStart = new Date(now - WINDOW_7D_MS).toISOString()
-    const accountsTotal = this.costByAccount()
+    const keyOf = (a) => a.account_id + '\0' + (a.vm_id || '')
+    const bySlot = new Map()
+    const lifetime = new Map(
+      this.db
+        .prepare('SELECT account_id, total_cost, total_tokens FROM account_lifetime_usage_archive')
+        .all()
+        .map((row) => [row.account_id, { ...row }]),
+    )
+    for (const { lifetime_account_id, ...row } of this.costByAccount({ withLifetime: true })) {
+      if (lifetime_account_id) {
+        const previous = lifetime.get(lifetime_account_id)
+        lifetime.set(lifetime_account_id, {
+          account_id: lifetime_account_id,
+          total_cost: (previous?.total_cost || 0) + row.total_cost,
+          total_tokens: (previous?.total_tokens || 0) + totalTokens(row),
+        })
+      }
+      const key = keyOf(row)
+      const previous = bySlot.get(key)
+      if (!previous) {
+        bySlot.set(key, row)
+        continue
+      }
+      bySlot.set(key, {
+        account_id: row.account_id,
+        vm_id: row.vm_id,
+        ...sumCostBuckets([previous, row]),
+        unpriced: previous.unpriced + row.unpriced,
+      })
+    }
+    const accountsTotal = [...bySlot.values()].sort((left, right) => right.total_cost - left.total_cost)
     const accountsToday = this.costByAccount({ since: todayStart })
     // The per-account queries already cover every row. Re-sum them for the
     // global buckets instead of scanning the entire usage table two more times.
@@ -1115,7 +1257,6 @@ export class UsageLogsRepo {
     const todayBucket = sumCostBuckets(accountsToday)
     const total = { ...totalBucket, ...cacheHitStats(totalBucket) }
     const today = { ...todayBucket, ...cacheHitStats(todayBucket) }
-    const keyOf = (a) => a.account_id + '\0' + (a.vm_id || '')
     const todayById = new Map(accountsToday.map((a) => [keyOf(a), a]))
     const aligned = Array.isArray(accountWindows) && accountWindows.length > 0
     let eventsSince = sevenDStart
@@ -1137,6 +1278,7 @@ export class UsageLogsRepo {
     const fiveById = aligned ? null : new Map(this.costByAccount({ since: fiveHStart }).map((a) => [keyOf(a), a]))
     const sevenById = aligned ? null : new Map(this.costByAccount({ since: sevenDStart }).map((a) => [keyOf(a), a]))
     const eventsByKey = aligned ? groupCostEvents(events) : null
+    const health = this.healthBuckets({ now })
     const accounts = accountsTotal.map((a) => {
       const t = todayById.get(keyOf(a)) || emptyCostBucket()
       const win = aligned ? resolveAccountWindow(accountWindows, a) : null
@@ -1194,6 +1336,7 @@ export class UsageLogsRepo {
         window_7d_unpriced: Number(w7.unpriced || 0),
         window_7d_start: aligned ? new Date(since7).toISOString() : sevenDStart,
         window_fable,
+        health_24h: health.get(keyOf(a)) || null,
       }
     })
     const window5h = aligned
@@ -1225,6 +1368,7 @@ export class UsageLogsRepo {
       window_7d: window7d,
       total,
       accounts,
+      lifetime_accounts: [...lifetime.values()],
     }
   }
 
@@ -1250,6 +1394,70 @@ export class UsageLogsRepo {
     } catch {
       return null
     }
+  }
+
+  /**
+   * Request health per slot: `[[success, errors] x slots]`, oldest first, last
+   * slot ends at `now`. Success / error use the SLA predicates so the counts
+   * agree with window_7d_success / window_7d_errors. Rows with neither are
+   * skipped. Keyed like billingStats accounts (`account_id\0vm_id`), or by
+   * vm_id when `vmId` is given.
+   */
+  healthBuckets({ now = Date.now(), slots = 48, slotMin = 30, vmId = null } = {}) {
+    const slotMs = slotMin * 60_000
+    const start = now - slots * slotMs
+    const sinceIso = new Date(start).toISOString()
+    const rows = this.db
+      .prepare(
+        `
+      SELECT
+        COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') AS account_id,
+        vm_id,
+        created_at,
+        CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END AS success,
+        CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END AS errors
+      FROM usage_logs
+      WHERE created_at >= ?${vmId ? ' AND vm_id = ?' : ''}
+    `,
+      )
+      .all(...(vmId ? [sinceIso, String(vmId)] : [sinceIso]))
+    const out = new Map()
+    for (const row of rows) {
+      if (!row.success && !row.errors) continue
+      const at = Date.parse(row.created_at)
+      if (!Number.isFinite(at) || at < start || at > now) continue
+      const i = Math.min(slots - 1, Math.floor((at - start) / slotMs))
+      const key = vmId ? String(vmId) : row.account_id + '\0' + (row.vm_id || '')
+      let buckets = out.get(key)
+      if (!buckets) {
+        buckets = Array.from({ length: slots }, () => [0, 0])
+        out.set(key, buckets)
+      }
+      buckets[i][0] += row.success ? 1 : 0
+      buckets[i][1] += row.errors ? 1 : 0
+    }
+    return out
+  }
+
+  /** Failed requests for one slot since `since`, grouped by error code, most frequent first. */
+  topErrors({ vmId, since, limit = 5 }) {
+    return this.db
+      .prepare(
+        `
+      SELECT COALESCE(NULLIF(error_code, ''), CAST(status AS TEXT), 'error') AS code,
+        MAX(status) AS status, COUNT(*) AS count, MAX(created_at) AS last_at
+      FROM usage_logs
+      WHERE vm_id = ? AND created_at >= ? AND ${SLA_ERROR_PRED}
+      GROUP BY 1 ORDER BY count DESC, last_at DESC LIMIT ?
+    `,
+      )
+      .all(String(vmId), since, Math.max(1, Math.min(20, Number(limit) || 5)))
+      .map((r) => ({
+        code: r.code,
+        status: r.status == null ? null : Number(r.status),
+        count: Number(r.count),
+        last_at: r.last_at,
+      }))
   }
 
   _costEventsSince(since) {
@@ -1617,6 +1825,18 @@ export class UsageLogsRepo {
   _pruneUsage(cutoff) {
     this.db.exec('BEGIN')
     try {
+      this.db
+        .prepare(`
+        INSERT INTO account_lifetime_usage_archive (account_id, total_cost, total_tokens)
+        SELECT ${LIFETIME_ACCOUNT_SQL}, COALESCE(SUM(total_cost), 0), COALESCE(SUM(${TOTAL_TOKENS_SQL}), 0)
+        FROM usage_logs
+        WHERE created_at < ? AND (${LIFETIME_ACCOUNT_SQL}) IS NOT NULL
+        GROUP BY 1
+        ON CONFLICT(account_id) DO UPDATE SET
+          total_cost = total_cost + excluded.total_cost,
+          total_tokens = total_tokens + excluded.total_tokens
+      `)
+        .run(cutoff)
       const deleted = this._deleteOldUsage.run(cutoff).changes
       if (deleted > 0) {
         const prev = this._prunedThrough()

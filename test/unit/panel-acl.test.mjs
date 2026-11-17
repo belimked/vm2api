@@ -14,9 +14,10 @@ const serverSrc = [
   fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/server.mjs'), 'utf8'),
 ].join('\n')
 
-test('user sees vm / proxies / keys / billing / logs / statistics', () => {
-  assert.deepEqual(viewsForRole('user'), ['vm', 'proxies', 'keys', 'billing', 'logs', 'statistics'])
-  assert.deepEqual(viewsForRole('super'), ['overview', 'cluster', 'logs', 'statistics', 'vm'])
+test('signed-in buyers of every panel role can open CRAG subscriptions', () => {
+  for (const role of ['user', 'super', 'admin']) assert.equal(canViewPage(role, 'crag-subscription'), true)
+  assert.deepEqual(viewsForRole('user'), ['vm', 'keys', 'billing', 'logs', 'statistics', 'crag-subscription'])
+  assert.deepEqual(viewsForRole('super'), ['overview', 'cluster', 'logs', 'statistics', 'vm', 'crag-subscription'])
   assert.equal(canViewPage('admin', 'statistics'), true)
   assert.equal(canViewPage('user', 'vm'), true)
   assert.equal(canViewPage('user', 'overview'), false)
@@ -32,18 +33,29 @@ test('user sees vm / proxies / keys / billing / logs / statistics', () => {
   assert.equal(hasCapability('user', 'vm.schedule'), true)
 })
 
-test('user can manage owned vm/proxy/key surfaces and nothing else', () => {
+test('user can view owned vms and manage keys, not proxies or reauth', () => {
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01', 'user').ok, true)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/create', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/create-options', 'user').ok, true)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/schedulable', 'user').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/import', 'user').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/package', 'user').ok, true)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/import', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/package', 'user').ok, false)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/package', 'user').ok, false)
   assert.equal(authorizePanelRoute('PUT', '/api/panel/vms/vm-01/package', 'user').ok, false)
   assert.equal(authorizePanelRoute('DELETE', '/api/panel/vms/vm-01', 'user').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/proxies', 'user').ok, true)
+  assert.equal(authorizePanelRoute('GET', '/api/panel/proxies', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/proxies/import', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/generate-auth-url', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/exchange-code', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/credentials/sync', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/credentials/sync', 'super').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/credentials/sync', 'admin').ok, true)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/shell-ticket', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/shell-ticket', 'super').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/shell-ticket', 'admin').ok, true)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/refresh', 'user').ok, false)
+  assert.equal(authorizePanelRoute('PUT', '/api/panel/vms/vm-01/oauth/credential', 'user').ok, false)
   assert.equal(authorizePanelRoute('GET', '/api/panel/api-keys', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/api-keys/key_a/stats', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/request-logs', 'user').ok, true)
@@ -63,6 +75,7 @@ test('user can manage owned vm/proxy/key surfaces and nothing else', () => {
 
 test('user can query quota and redeem reset credits on owned vms and keys', () => {
   const allowed = [
+    '/api/panel/vms/vm-01/usage/query',
     '/api/panel/vms/vm-01/openai-quota/refresh',
     '/api/panel/vms/vm-01/openai-quota/reset',
     '/api/panel/vms/vm-01/claude-reset/query',
@@ -120,7 +133,7 @@ test('super can schedule VMs but cannot touch credentials or delete', () => {
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/to-setup-token', 'super').ok, false)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/oauth/credential', 'super').ok, false)
   assert.equal(authorizePanelRoute('PUT', '/api/panel/vms/vm-01/oauth/credential', 'super').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/oauth/credential', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/refresh', 'user').ok, false)
   assert.equal(authorizePanelRoute('DELETE', '/api/panel/vms/vm-01', 'super').ok, false)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/create', 'super').ok, false)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/create-options', 'super').ok, false)
