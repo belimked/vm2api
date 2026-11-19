@@ -492,12 +492,21 @@ function ProdCell({ vm }: { vm: Vm }) {
   return (
     <>
       <PlatformMark vm={vm} />
-      <span
-        className='shrink-0 font-mono font-semibold'
-        title={vm.name || vm.id}
-      >
-        {vm.id}
-      </span>
+      {vm.name && vm.name !== vm.id ? (
+        <span
+          className='min-w-0 truncate font-semibold'
+          title={`${vm.name}（编号 ${vm.id}）`}
+        >
+          {vm.name}
+          <span className='text-muted-foreground ml-1 font-mono text-[10px] font-normal'>
+            {vm.id}
+          </span>
+        </span>
+      ) : (
+        <span className='shrink-0 font-mono font-semibold' title={vm.id}>
+          {vm.id}
+        </span>
+      )}
       {tier.label && tier.label !== '—' ? (
         <span
           className={cn(
