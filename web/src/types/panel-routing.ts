@@ -202,6 +202,7 @@ export type JevInterceptConfig = {
     fail_open: boolean
     dedup_sec: number
     max_state_chars: number
+    long_windows?: number
     expand_base64: boolean
     strip_reminders: boolean
     openai_platform_enabled: boolean
@@ -222,6 +223,7 @@ export type JevInterceptConfig = {
   fail_open: boolean
   dedup_sec: number
   max_state_chars: number
+  long_windows?: number
   expand_base64: boolean
   strip_reminders: boolean
   categories: string[]

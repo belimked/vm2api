@@ -41,7 +41,10 @@ function ToolUseGateSettings() {
   const current = draft ?? query.data
   const save = useMutation({
     mutationFn: (value: ToolGateConfig) =>
-      api<ToolGateConfig>('/api/panel/tool-use-gate', { method: 'PUT', body: JSON.stringify(value) }),
+      api<ToolGateConfig>('/api/panel/tool-use-gate', {
+        method: 'PUT',
+        body: JSON.stringify(value),
+      }),
     onSuccess: () => {
       setDraft(null)
       setToolsText(null)
@@ -51,15 +54,22 @@ function ToolUseGateSettings() {
     onError: (error: Error) => toast.error(error.message),
   })
   if (!current) return null
-  const update = (patch: Partial<ToolGateConfig>) => setDraft({ ...current, ...patch })
+  const update = (patch: Partial<ToolGateConfig>) =>
+    setDraft({ ...current, ...patch })
   return (
     <Group
       title='工具调用审核'
       hint='审核 Claude 格式的工具调用。参数和部分前序内容会发送给配置的 Jev 服务；OpenAI 原生输出不在审核范围内。'
     >
       <div className='space-y-4'>
-        <ToggleItem label='启用工具审核' desc='默认关闭；需配置 Jev 服务，沿用其安全分阈值。'>
-          <Switch checked={current.enabled} onCheckedChange={(enabled) => update({ enabled })} />
+        <ToggleItem
+          label='启用工具审核'
+          desc='默认关闭；需配置 Jev 服务，沿用其安全分阈值。'
+        >
+          <Switch
+            checked={current.enabled}
+            onCheckedChange={(enabled) => update({ enabled })}
+          />
         </ToggleItem>
         <FieldLine label='工具名（逗号分隔）' htmlFor='tool-gate-tools'>
           <Input
@@ -68,7 +78,12 @@ function ToolUseGateSettings() {
             onChange={(e) => {
               const text = e.target.value
               setToolsText(text)
-              update({ tools: text.split(/[,，]/).map((name) => name.trim()).filter(Boolean) })
+              update({
+                tools: text
+                  .split(/[,，]/)
+                  .map((name) => name.trim())
+                  .filter(Boolean),
+              })
             }}
           />
         </FieldLine>
@@ -89,22 +104,37 @@ function ToolUseGateSettings() {
             min={1000}
             max={64000}
             value={current.max_context_chars}
-            onChange={(e) => update({ max_context_chars: Number(e.target.value) })}
+            onChange={(e) =>
+              update({ max_context_chars: Number(e.target.value) })
+            }
           />
         </FieldLine>
-        <ToggleItem label='审核服务异常时放行' desc='开启后，审核服务异常或超时不会阻止调用。参数不完整或超限仍暂停。'>
-          <Switch checked={current.fail_open} onCheckedChange={(fail_open) => update({ fail_open })} />
+        <ToggleItem
+          label='审核服务异常时放行'
+          desc='开启后，审核服务异常或超时不会阻止调用。参数不完整或超限仍暂停。'
+        >
+          <Switch
+            checked={current.fail_open}
+            onCheckedChange={(fail_open) => update({ fail_open })}
+          />
         </ToggleItem>
         <div className='space-y-1'>
           <Label>工具审核题库</Label>
-          <p className='text-muted-foreground text-xs'>
-            独立于上方 Jev 会话题库。每题单独打分，任一题低于安全分线即暂停；参数与上下文是数据的提示会自动附加。
+          <p className='text-xs text-muted-foreground'>
+            独立于上方 Jev
+            会话题库。每题单独打分，任一题低于安全分线即暂停；参数与上下文是数据的提示会自动附加。
           </p>
         </div>
-        <QuestionBank rows={current.questions} onChange={(questions) => update({ questions })} />
+        <QuestionBank
+          rows={current.questions}
+          onChange={(questions) => update({ questions })}
+        />
         <Button
           disabled={
-            !draft || !current.tools.length || !current.questions.some((q) => q.enabled) || save.isPending
+            !draft ||
+            !current.tools.length ||
+            !current.questions.some((q) => q.enabled) ||
+            save.isPending
           }
           onClick={() => save.mutate(current)}
         >
@@ -146,6 +176,7 @@ const OWNED = [
   'fail_open',
   'dedup_sec',
   'max_state_chars',
+  'long_windows',
 ] as const
 
 type EndpointForm = {
@@ -345,6 +376,7 @@ export function ModelSettings({
         fail_open: draft.fail_open !== false,
         dedup_sec: Number(draft.dedup_sec ?? 60),
         max_state_chars: Number(draft.max_state_chars ?? 16000),
+        long_windows: Number(draft.long_windows ?? 4),
         questions: draft.question_bank || [],
       }
       if (!filled.length) {
@@ -563,6 +595,7 @@ export function ModelSettings({
       fail_open: defaults?.fail_open !== false,
       dedup_sec: defaults?.dedup_sec ?? 60,
       max_state_chars: defaults?.max_state_chars ?? 16000,
+      long_windows: defaults?.long_windows ?? 4,
     })
   }
   const questions = draft.question_bank || []
@@ -929,7 +962,7 @@ export function ModelSettings({
           </button>
         }
       >
-        <div className='grid gap-3 sm:grid-cols-3'>
+        <div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-4'>
           <div className='space-y-1.5'>
             <Label htmlFor='jev-threshold'>阈值</Label>
             <Input
@@ -972,6 +1005,24 @@ export function ModelSettings({
                 setDraft({ ...draft, max_state_chars: Number(e.target.value) })
               }
             />
+          </div>
+          <div className='space-y-1.5'>
+            <Label htmlFor='jev-windows'>长消息分段上限</Label>
+            <Input
+              id='jev-windows'
+              type='number'
+              min={1}
+              max={8}
+              className='tabular-nums'
+              value={draft.long_windows ?? 4}
+              onChange={(e) =>
+                setDraft({ ...draft, long_windows: Number(e.target.value) })
+              }
+            />
+            <p className='text-xs text-muted-foreground'>
+              当前消息超过送模上限一半时，切成几段分别送审，任一段不通过即拦截。1
+              表示不分段
+            </p>
           </div>
         </div>
         <div className='space-y-1.5'>

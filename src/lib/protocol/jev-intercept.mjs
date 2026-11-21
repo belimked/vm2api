@@ -9,6 +9,7 @@
  * other HTTP status skips the rest of that host for this call only.
  * A line may be `https://host[/v1/systemone] <key>`, or a bare URL for a keyless host.
  */
+import { createHash } from 'node:crypto'
 import { ErrorCode, ErrorType, makeError } from '../core/errors.mjs'
 import { historyPrefixIntact, refusalUserDocument, refusalUserDocumentCache } from '../core/refusal-similarity.mjs'
 import { isNegatedExtraction, normalizeText } from '../core/distill-detect.mjs'
@@ -36,6 +37,9 @@ export const POLICY_BLOCK_MESSAGE = '请求被协议拦截'
 export const POLICY_NOUL = 0.5
 /** One category this close under the line is model noise, not a block. */
 export const POLICY_NOUL_BAND = 0.08
+/** Session audit: Jev windows spent on one long current message. 1 turns windowing off. */
+export const LONG_WINDOWS_DEFAULT = 4
+export const LONG_WINDOWS_MAX = 8
 
 export function isPolicyBlockMemory(message) {
   const text = String(message || '').trim()
@@ -404,6 +408,7 @@ export function defaultJevConfig() {
     fail_open: true,
     dedup_sec: 60,
     max_state_chars: 16000,
+    long_windows: LONG_WINDOWS_DEFAULT,
     expand_base64: true,
     strip_reminders: true,
     patterns: [],
@@ -760,6 +765,7 @@ export function normalizeJevConfig(raw) {
   const threshold = Number(raw.safety_threshold)
   const dedup = Number(raw.dedup_sec)
   const maxState = Number(raw.max_state_chars)
+  const longWindows = Number(raw.long_windows)
   return {
     enabled: raw.enabled === true,
     hard_regex_enabled: raw.hard_regex_enabled !== false,
@@ -789,6 +795,10 @@ export function normalizeJevConfig(raw) {
     fail_open: raw.fail_open !== false,
     dedup_sec: Number.isInteger(dedup) && dedup >= 0 && dedup <= 3600 ? dedup : 60,
     max_state_chars: Number.isInteger(maxState) && maxState >= 256 && maxState <= 64000 ? maxState : 16000,
+    long_windows:
+      Number.isInteger(longWindows) && longWindows >= 1 && longWindows <= LONG_WINDOWS_MAX
+        ? longWindows
+        : LONG_WINDOWS_DEFAULT,
     expand_base64: raw.expand_base64 !== false,
     strip_reminders: raw.strip_reminders !== false,
     patterns,
@@ -832,6 +842,7 @@ export function publicJevConfig(cfg) {
     fail_open: c.fail_open,
     dedup_sec: c.dedup_sec,
     max_state_chars: c.max_state_chars,
+    long_windows: c.long_windows,
     expand_base64: c.expand_base64,
     strip_reminders: c.strip_reminders,
     defaults: {
@@ -842,6 +853,7 @@ export function publicJevConfig(cfg) {
       fail_open: true,
       dedup_sec: 60,
       max_state_chars: 16000,
+      long_windows: LONG_WINDOWS_DEFAULT,
       expand_base64: true,
       strip_reminders: true,
       openai_platform_enabled: false,
@@ -938,6 +950,11 @@ export function validateJevPatch(body = {}) {
   if (Object.hasOwn(body, 'max_state_chars')) {
     const n = Number(body.max_state_chars)
     if (!Number.isInteger(n) || n < 256 || n > 64000) problems.push('max_state_chars 必须是 256–64000 的整数')
+  }
+  if (Object.hasOwn(body, 'long_windows')) {
+    const n = Number(body.long_windows)
+    if (!Number.isInteger(n) || n < 1 || n > LONG_WINDOWS_MAX)
+      problems.push(`long_windows 必须是 1–${LONG_WINDOWS_MAX} 的整数`)
   }
   for (const key of ['block_if_below', 'fail_open', 'expand_base64', 'strip_reminders', 'openai_platform_enabled']) {
     if (Object.hasOwn(body, key) && typeof body[key] !== 'boolean') problems.push(`${key} 必须是布尔`)
@@ -2011,7 +2028,9 @@ export async function classifyJev(text, cfg, fetchImpl = globalThis.fetch, now =
   }
   const document = toolGate
     ? text
-    : prepareInterceptText(text, {
+    : options.prepared
+      ? String(text || '').slice(-config.max_state_chars)
+      : prepareInterceptText(text, {
         stripReminders: config.strip_reminders,
         expandBase64: config.expand_base64,
       }).slice(-config.max_state_chars)
@@ -2098,4 +2117,174 @@ export async function classifyJev(text, cfg, fetchImpl = globalThis.fetch, now =
     }
   }
   return unavailable(config, network ? '网络异常' : http || '密钥失效')
+}
+
+// ---- Session audit: long conversations ----
+// classifyJev keeps only the last max_state_chars, so the start of a long paste
+// never reached Jev. Short documents still go through unchanged; long ones get a
+// per-message budget, and a long current message is audited window by window.
+
+const LONG_CACHE_TTL_MS = 6 * 3600 * 1000
+const LONG_CACHE_MAX = 500
+const LONG_OVERLAP = 500
+const LONG_CONTEXT = 2000
+const longVerdicts = new Map()
+
+export function clearJevLongVerdicts() {
+  longVerdicts.clear()
+}
+
+const omitted = (n) => `\n…[省略 ${n} 字]…\n`
+
+/** At most `cap` chars: first 60% and last 40%, the middle replaced by a marker. */
+export function headTail(text, cap) {
+  if (text.length <= cap) return text
+  const room = cap - omitted(text.length).length
+  if (room <= 0) return text.slice(-Math.max(0, cap))
+  const head = Math.ceil(room * 0.6)
+  const tail = room - head
+  return `${text.slice(0, head)}${omitted(text.length - head - tail)}${tail ? text.slice(-tail) : ''}`
+}
+
+const render = (part, body = part.body) => `${part.head}\n${body}`
+
+/** History in `budget` chars. Every kept message keeps its head and tail; oldest drop first. */
+function fitHistory(history, budget) {
+  const items = history.slice()
+  let dropped = 0
+  const cost = () => items.reduce((n, p) => n + p.head.length + 2, 0) + (dropped ? 40 : 0)
+  while (items.length && cost() + items.length * 64 > budget) {
+    items.shift()
+    dropped++
+  }
+  if (!items.length) return []
+  let left = budget - cost()
+  let cap = Infinity
+  const lens = items.map((p) => p.body.length).sort((a, b) => a - b)
+  for (let i = 0; i < lens.length; i++) {
+    const share = Math.floor(left / (lens.length - i))
+    if (lens[i] > share) {
+      cap = share
+      break
+    }
+    left -= lens[i]
+  }
+  const out = items.map((p) => render(p, headTail(p.body, cap)))
+  return dropped ? [`[省略更早的 ${dropped} 条消息]`, ...out] : out
+}
+
+function longCached(key, now) {
+  const row = longVerdicts.get(key)
+  if (!row) return null
+  if (now - row.at > LONG_CACHE_TTL_MS) {
+    longVerdicts.delete(key)
+    return null
+  }
+  return row.verdict
+}
+
+function longStore(key, verdict, now) {
+  longVerdicts.delete(key)
+  longVerdicts.set(key, { verdict, at: now })
+  while (longVerdicts.size > LONG_CACHE_MAX) longVerdicts.delete(longVerdicts.keys().next().value)
+}
+
+const marginOf = (v) => (Number.isFinite(v.margin) ? v.margin : Number.isFinite(v.score) ? v.score : Infinity)
+
+/** Window the long current message; any failed window blocks. */
+async function classifyWindows(current, history, cfg, config, fetchImpl, now) {
+  const M = config.max_state_chars
+  const hist = fitHistory(history, Math.min(LONG_CONTEXT, Math.floor(M / 5)))
+  const prefix = hist.length ? `${hist.join('\n')}\n[current ask]\n` : ''
+  const label = (i, k) => `${current.head.replace(/\]$/, '')} 第 ${i}/${k} 段]`
+  const W = Math.max(256, M - prefix.length - label(99, 99).length - 1)
+  const overlap = Math.min(LONG_OVERLAP, Math.floor(W / 10))
+  const step = W - overlap
+  const len = current.body.length
+  const need = len <= W ? 1 : Math.ceil((len - W) / step) + 1
+  const starts = []
+  if (need <= config.long_windows) {
+    for (let i = 0; i < need; i++) starts.push(Math.max(0, Math.min(i * step, len - W)))
+  } else {
+    for (let i = 0; i < config.long_windows - 1; i++) starts.push(i * step)
+    starts.push(len - W)
+  }
+  const k = starts.length
+  const results = await Promise.all(
+    starts.map((s, i) =>
+      classifyJev(`${prefix}${label(i + 1, k)}\n${current.body.slice(s, s + W)}`, cfg, fetchImpl, now, {
+        prepared: true,
+      }),
+    ),
+  )
+  const hit = results.findIndex((r) => r.action === 'block' && r.reason !== 'unavailable')
+  if (hit >= 0) return { ...results[hit], window: hit + 1, windows: k }
+  const down = results.find((r) => r.action === 'block' || r.reason === 'unavailable')
+  if (down) return { ...down, windows: k }
+  const scored = results.filter((r) => Number.isFinite(r.score))
+  if (!scored.length) return { ...results[0], windows: k }
+  const worst = scored.reduce((a, b) => (marginOf(b) < marginOf(a) ? b : a))
+  return { ...worst, windows: k }
+}
+
+/**
+ * Session audit entry. Documents that fit max_state_chars go to classifyJev as before.
+ * Longer ones: duplicate messages collapse, the current ask keeps up to half the budget,
+ * history shares the rest (head + tail each). A current message over half the budget is
+ * audited in up to long_windows windows the first time it is the ask; the verdict is
+ * remembered so a blocked paste stays blocked while it rides along in history.
+ */
+export async function classifyJevSession(inbound, body, cfg, fetchImpl = globalThis.fetch, options = {}) {
+  const now = options.now ?? Date.now()
+  const { parts, text } = buildJevModelParts(inbound, body, options.interceptOpts || {})
+  const config = normalizeJevConfig(cfg)
+  const prep = (value) =>
+    prepareInterceptText(value, { stripReminders: config.strip_reminders, expandBase64: config.expand_base64 })
+  const whole = prep(text)
+  const M = config.max_state_chars
+  if (!config.enabled || !whole || whole.length <= M) return classifyJev(whole, cfg, fetchImpl, now, { prepared: true })
+
+  const items = []
+  const seen = new Set()
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const at = parts[i].indexOf('\n')
+    const head = at < 0 ? parts[i] : parts[i].slice(0, at)
+    const value = at < 0 ? '' : prep(parts[i].slice(at + 1))
+    if (!value || seen.has(value)) continue
+    seen.add(value)
+    items.unshift({ head, body: value })
+  }
+  if (!items.length) return classifyJev(whole, cfg, fetchImpl, now, { prepared: true })
+
+  const half = Math.floor(M / 2)
+  const url = decisionUrl(config.base_url) || ''
+  const model = resolvedPolicyModel(config)
+  const keyOf = (value) =>
+    createHash('sha256')
+      .update(dedupKey(url, model, config, `long\0${value}`))
+      .digest('hex')
+  for (const item of items) {
+    if (item.body.length <= half) continue
+    const cached = longCached(keyOf(item.body), now)
+    if (cached?.action === 'block') return { ...cached, reason: 'replay' }
+  }
+
+  const current = items[items.length - 1]
+  const history = items.slice(0, -1)
+  if (current.body.length > half && config.long_windows > 1) {
+    const key = keyOf(current.body)
+    if (!longCached(key, now)) {
+      const verdict = await classifyWindows(current, history, cfg, config, fetchImpl, now)
+      const settled = verdict.action === 'block' ? verdict.reason !== 'unavailable' : verdict.reason === 'safe'
+      if (settled) longStore(key, verdict, now)
+      return verdict
+    }
+  }
+
+  const ask = render(current, headTail(current.body, half))
+  const marker = '\n[current ask]\n'
+  const hist = fitHistory(history, M - ask.length - marker.length)
+  return classifyJev(hist.length ? `${hist.join('\n')}${marker}${ask}` : ask, cfg, fetchImpl, now, {
+    prepared: true,
+  })
 }

@@ -20,11 +20,10 @@ import {
 } from '../core/refusal-guard.mjs'
 import {
   HARD_POLICY_RULES,
-  classifyJev,
+  classifyJevSession,
   isPolicyBlockMemory,
   jevDocument,
   jevAccountInScope,
-  jevModelDocument,
   jevScopeConfigured,
   jevScopeWaits,
   matchHardPolicy,
@@ -396,8 +395,9 @@ export async function evaluateProtocolIntercept({
   if (mandatoryOnly || outside) return pass(outside || 'unchecked')
 
   if (jev?.enabled) {
-    const modelDocument = jevModelDocument(inbound, body, interceptOpts)
-    const verdict = await classifyJev(modelDocument, { ...jev, policy_request_id: requestId }, fetchImpl)
+    const verdict = await classifyJevSession(inbound, body, { ...jev, policy_request_id: requestId }, fetchImpl, {
+      interceptOpts,
+    })
     if (verdict.action === 'block') {
       const unavailable = verdict.reason === 'unavailable'
       const error = policyBlockError(requestId)
