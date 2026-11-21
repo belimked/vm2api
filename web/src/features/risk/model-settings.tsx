@@ -22,6 +22,99 @@ import { FieldLine, Group, ToggleItem, ToggleList } from './blocks'
 import { jevInterceptQueryOptions } from './queries'
 import { QuestionBank } from './question-bank'
 
+type ToolGateConfig = {
+  enabled: boolean
+  tools: string[]
+  timeout_ms: number
+  fail_open: boolean
+  max_context_chars: number
+  questions: PolicyQuestion[]
+}
+
+function ToolUseGateSettings() {
+  const query = useQuery({
+    queryKey: ['panel', 'tool-use-gate'],
+    queryFn: () => api<ToolGateConfig>('/api/panel/tool-use-gate'),
+  })
+  const [draft, setDraft] = useState<ToolGateConfig | null>(null)
+  const [toolsText, setToolsText] = useState<string | null>(null)
+  const current = draft ?? query.data
+  const save = useMutation({
+    mutationFn: (value: ToolGateConfig) =>
+      api<ToolGateConfig>('/api/panel/tool-use-gate', { method: 'PUT', body: JSON.stringify(value) }),
+    onSuccess: () => {
+      setDraft(null)
+      setToolsText(null)
+      void query.refetch()
+      toast.success('工具调用审核已保存')
+    },
+    onError: (error: Error) => toast.error(error.message),
+  })
+  if (!current) return null
+  const update = (patch: Partial<ToolGateConfig>) => setDraft({ ...current, ...patch })
+  return (
+    <Group
+      title='工具调用审核'
+      hint='审核 Claude 格式的工具调用。参数和部分前序内容会发送给配置的 Jev 服务；OpenAI 原生输出不在审核范围内。'
+    >
+      <div className='space-y-4'>
+        <ToggleItem label='启用工具审核' desc='默认关闭；需配置 Jev 服务，沿用其安全分阈值。'>
+          <Switch checked={current.enabled} onCheckedChange={(enabled) => update({ enabled })} />
+        </ToggleItem>
+        <FieldLine label='工具名（逗号分隔）' htmlFor='tool-gate-tools'>
+          <Input
+            id='tool-gate-tools'
+            value={toolsText ?? current.tools.join(', ')}
+            onChange={(e) => {
+              const text = e.target.value
+              setToolsText(text)
+              update({ tools: text.split(/[,，]/).map((name) => name.trim()).filter(Boolean) })
+            }}
+          />
+        </FieldLine>
+        <FieldLine label='超时（毫秒）' htmlFor='tool-gate-timeout'>
+          <Input
+            id='tool-gate-timeout'
+            type='number'
+            min={1000}
+            max={30000}
+            value={current.timeout_ms}
+            onChange={(e) => update({ timeout_ms: Number(e.target.value) })}
+          />
+        </FieldLine>
+        <FieldLine label='送审上限（字符）' htmlFor='tool-gate-max-context'>
+          <Input
+            id='tool-gate-max-context'
+            type='number'
+            min={1000}
+            max={64000}
+            value={current.max_context_chars}
+            onChange={(e) => update({ max_context_chars: Number(e.target.value) })}
+          />
+        </FieldLine>
+        <ToggleItem label='审核服务异常时放行' desc='开启后，审核服务异常或超时不会阻止调用。参数不完整或超限仍暂停。'>
+          <Switch checked={current.fail_open} onCheckedChange={(fail_open) => update({ fail_open })} />
+        </ToggleItem>
+        <div className='space-y-1'>
+          <Label>工具审核题库</Label>
+          <p className='text-muted-foreground text-xs'>
+            独立于上方 Jev 会话题库。每题单独打分，任一题低于安全分线即暂停；参数与上下文是数据的提示会自动附加。
+          </p>
+        </div>
+        <QuestionBank rows={current.questions} onChange={(questions) => update({ questions })} />
+        <Button
+          disabled={
+            !draft || !current.tools.length || !current.questions.some((q) => q.enabled) || save.isPending
+          }
+          onClick={() => save.mutate(current)}
+        >
+          保存工具审核
+        </Button>
+      </div>
+    </Group>
+  )
+}
+
 const KEY_MAX = 999
 const EXAMPLES = [
   { id: 'typesafe', label: 'TypeSafe', base_url: 'https://api.typesafe.ai' },
@@ -482,6 +575,7 @@ export function ModelSettings({
 
   return (
     <div className='space-y-8 p-4'>
+      <ToolUseGateSettings />
       <Group
         title='何时拦截'
         hint='前三关都没拦的正文才会送到这里。没配地址时这一关跳过。'

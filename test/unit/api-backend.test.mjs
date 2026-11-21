@@ -18,6 +18,7 @@ import {
   runApiInference,
 } from '../../src/lib/pool/api-protocol.mjs'
 import { createClaudeMessageAssembler, applyClaudeSSELineToMessage } from '../../src/lib/protocol/convert.mjs'
+import { createToolUseGate, readToolUseGateConfig } from '../../src/lib/protocol/tool-use-gate.mjs'
 
 const unixTest = process.platform === 'win32' ? test.skip : test
 
@@ -1601,4 +1602,122 @@ unixTest('API OpenAI flushes buffered metadata with the first real output', asyn
   assert.match(run.wire, /response\.queued/)
   assert.match(run.wire, /response\.output_text\.delta/)
   assert.match(run.wire, /response\.completed/)
+})
+
+async function runGatedAnthropicApiFixture(events) {
+  const tempBase = path.resolve('.tmp')
+  fs.mkdirSync(tempBase, { recursive: true })
+  const root = fs.mkdtempSync(path.join(tempBase, 'api-tool-gate-'))
+  const socket = path.join(root, 'run', 'api-kernel.sock')
+  fs.mkdirSync(path.dirname(socket), { recursive: true })
+  const kernel = http.createServer((req, response) => {
+    req.resume()
+    req.on('end', () => {
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.end(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''))
+    })
+  })
+  let listening = false
+  let wire = ''
+  const res = {
+    headersSent: false,
+    write(chunk) { wire += chunk },
+  }
+  try {
+    await new Promise((resolve, reject) => {
+      kernel.once('error', reject)
+      kernel.listen(socket, resolve)
+    })
+    listening = true
+    const toolGate = createToolUseGate({
+      config: { ...readToolUseGateConfig(), enabled: true, fail_open: false },
+      inbound: { messages: [{ role: 'user', content: 'Test placeholder only' }] },
+      classify: async () => ({ action: 'block', score: 1 }),
+    })
+    const result = await runApiInference({
+      toolGate,
+      cfg: { paths: { data: root } },
+      res,
+      protocol: 'anthropic.messages',
+      clientStream: true,
+      deliveryMode: 'verified',
+      convertedBody: { model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'Test placeholder only' }] },
+      inbound: {},
+      converters: { writeSSEHeaders: () => { res.headersSent = true } },
+      scheduler: {
+        pick: () => ({
+          ok: true,
+          endpoint: { id: 'ep', kind: 'claude', protocol: 'anthropic', base_url: 'https://fixture.invalid' },
+          key: { id: 'key', api_key: 'fixture' },
+          upstream_model: 'claude-haiku-4-5',
+        }),
+      },
+    })
+    return {
+      result,
+      wire,
+      events: wire.split('\n').filter((line) => line.startsWith('data: ')).map((line) => JSON.parse(line.slice(6))),
+    }
+  } finally {
+    if (listening) {
+      kernel.closeAllConnections()
+      await new Promise((resolve) => kernel.close(resolve))
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+const gatedStart = { type: 'message_start', message: { type: 'message', role: 'assistant', content: [], model: 'claude-haiku-4-5' } }
+const gatedToolStart = { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool_placeholder', name: 'Bash', input: {} } }
+const gatedToolDelta = (partial_json) => ({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json } })
+
+unixTest('API Anthropic streaming gates split Bash arguments while preserving text and terminal events', async () => {
+  const secretMarker = 'PLACEHOLDER_ARGUMENT_DO_NOT_FORWARD'
+  const { result, wire, events } = await runGatedAnthropicApiFixture([
+    gatedStart,
+    gatedToolStart,
+    gatedToolDelta('{"command":"echo '),
+    gatedToolDelta(`${secretMarker}"}`),
+    { type: 'content_block_stop', index: 0 },
+    { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Safe answer' } },
+    { type: 'content_block_stop', index: 1 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+    { type: 'message_stop' },
+  ])
+  assert.equal(result.ok, true)
+  assert.equal(result.terminalState, 'verified')
+  assert.doesNotMatch(wire, /PLACEHOLDER_ARGUMENT_DO_NOT_FORWARD|input_json_delta|"name":"Bash"/)
+  assert.equal(events.find((event) => event.type === 'content_block_start')?.content_block.type, 'text')
+  assert.ok(events.some((event) => event.delta?.text === 'Safe answer'))
+  assert.equal(events.find((event) => event.type === 'message_delta')?.delta.stop_reason, 'end_turn')
+  assert.equal(events.at(-1)?.type, 'message_stop')
+})
+
+unixTest('API Anthropic streaming reports unfinished gated tool at upstream EOF without leaking arguments', async () => {
+  const { result, wire, events } = await runGatedAnthropicApiFixture([
+    gatedStart,
+    gatedToolStart,
+    gatedToolDelta('{"command":"echo PLACEHOLDER_UNFINISHED'),
+  ])
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 502)
+  assert.equal(result.terminalState, 'incomplete')
+  assert.equal(result.body.error.code, 'tool_use_gate_incomplete')
+  assert.equal(events.at(-1)?.error?.code, 'tool_use_gate_incomplete')
+  assert.doesNotMatch(wire, /PLACEHOLDER_UNFINISHED|input_json_delta|"name":"Bash"/)
+})
+
+unixTest('API Anthropic streaming forwards explicit upstream error over pending tool gate EOF', async () => {
+  const { result, wire, events } = await runGatedAnthropicApiFixture([
+    gatedStart,
+    gatedToolStart,
+    gatedToolDelta('{"command":"echo PLACEHOLDER_ERROR'),
+    { type: 'error', error: { type: 'api_error', code: 'fixture_upstream_error', status: 503, message: 'fixture failed' } },
+  ])
+  assert.equal(result.ok, false)
+  assert.equal(result.terminalState, 'rejected')
+  assert.equal(result.body.error.code, 'fixture_upstream_error')
+  assert.equal(events.at(-1)?.error?.code, 'fixture_upstream_error')
+  assert.doesNotMatch(wire, /PLACEHOLDER_ERROR|input_json_delta|tool_use_gate_incomplete/)
 })

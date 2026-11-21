@@ -5,6 +5,7 @@ import path from 'node:path'
 import { resolveStreamIdleTimeoutMs } from '../core/config.mjs'
 import { upstreamRiskClientError } from './intercept-gate.mjs'
 import { buildAnthropicSseError } from './stream-truncation.mjs'
+import { incompleteToolUseError } from './tool-use-gate.mjs'
 import { isClientStream, fromClaudeToOpenAIChat, fromClaudeToOpenAICompletions } from './convert.mjs'
 import { getVm, listVms, persistCodexUsage, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isValidVmId, listVmRecordFiles, readJsonCached } from '../vm/vm-file.mjs'
@@ -580,6 +581,7 @@ export async function handleCodexProtocol({
   captureOutbound = false,
   requestStartedAt = Date.now(),
   accountGate = null,
+  toolGate = null,
   keyScope = null,
   afterHop = null,
   ownerScope = null,
@@ -868,7 +870,9 @@ export async function handleCodexProtocol({
                     protocol === 'anthropic.messages'
                       ? responsesSseToAnthropicEvents(line, anthropicSse)
                       : responsesSseToChatChunk(line, 'codex', chatSse)
-                  if (mapped) res.write(mapped)
+                  if (mapped && toolGate && protocol === 'anthropic.messages') {
+                    for (const frame of await toolGate.frames(mapped)) res.write(frame)
+                  } else if (mapped) res.write(mapped)
                 } catch (error) {
                   if (error.code !== 'tool_arguments_mismatch') throw error
                   conversionError = { type: 'upstream_protocol_error', code: error.code, message: error.message }
@@ -918,6 +922,10 @@ export async function handleCodexProtocol({
           ? Math.max(0, result.firstByteAt - requestStartedAt)
           : (result?.firstByteMs ?? null)
         logBag.generation_ms = result?.generationMs ?? null
+        if (stream && !policyRefusal && !conversionError && toolGate?.hasPending()) {
+          conversionError = incompleteToolUseError()
+          if (res.headersSent) res.write(buildAnthropicSseError(conversionError))
+        }
         if (conversionError) {
           result.ok = false
           result.status = 502
@@ -966,7 +974,8 @@ export async function handleCodexProtocol({
               const assembled = assembleCodexBodyFromSse(chunks, result.body || {})
               body = assembled
               if (protocol !== 'openai.responses') {
-                const message = codexBodyToAnthropicMessage(assembled, converted.body.model)
+                let message = codexBodyToAnthropicMessage(assembled, converted.body.model)
+                if (toolGate && protocol === 'anthropic.messages') message = await toolGate.message(message)
                 body =
                   protocol === 'openai.chat'
                     ? fromClaudeToOpenAIChat(message, converted.body.model)

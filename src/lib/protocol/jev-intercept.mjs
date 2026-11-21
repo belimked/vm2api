@@ -1380,6 +1380,7 @@ export function parsePolicyDecision(payload, cfg = {}) {
     if (scoreBlocks(score, cfg)) hits.push({ category: id, score })
   }
   if (!scores.length) {
+    if (cfg.toolGate) return null
     const score = readScore(answers.safety)
     if (score === null) return null
     scores.push(score)
@@ -1387,7 +1388,7 @@ export function parsePolicyDecision(payload, cfg = {}) {
   }
   const score = cfg.block_if_below === false ? Math.max(...scores) : Math.min(...scores)
   const margin = cfg.block_if_below === false ? policyLine(cfg) - score : score - policyLine(cfg)
-  return { hits: dropLoneNearMiss(hits, cfg), score, margin: Math.max(0, margin) }
+  return { hits: cfg.toolGate ? hits : dropLoneNearMiss(hits, cfg), score, margin: Math.max(0, margin) }
 }
 
 function noulQuestion(instructions) {
@@ -1997,12 +1998,23 @@ let keyCursor = 0
 /**
  * @returns {{ action: 'pass', reason?: string } | { action: 'block', category: string, categories: string[] }}
  */
-export async function classifyJev(text, cfg, fetchImpl = globalThis.fetch, now = Date.now()) {
+export async function classifyJev(text, cfg, fetchImpl = globalThis.fetch, now = Date.now(), options = {}) {
   const config = normalizeJevConfig(cfg)
-  const document = prepareInterceptText(text, {
-    stripReminders: config.strip_reminders,
-    expandBase64: config.expand_base64,
-  }).slice(-config.max_state_chars)
+  // Tool auditing has its own question bank and a bounded, already prepared document.
+  const toolGate = Array.isArray(options.toolQuestions) && options.toolQuestions.length > 0
+  if (toolGate) {
+    config.toolGate = true
+    config.questions = options.toolQuestions
+    config.safety_instruction = ''
+    config.dedup_sec = 0
+    config.block_if_below = true
+  }
+  const document = toolGate
+    ? text
+    : prepareInterceptText(text, {
+        stripReminders: config.strip_reminders,
+        expandBase64: config.expand_base64,
+      }).slice(-config.max_state_chars)
   if (!config.enabled || !config.base_url || !document) return { action: 'pass', reason: 'skip' }
   const url = decisionUrl(config.base_url)
   if (!url || typeof fetchImpl !== 'function') return { action: 'pass', reason: 'skip' }
@@ -2023,13 +2035,14 @@ export async function classifyJev(text, cfg, fetchImpl = globalThis.fetch, now =
   let http = ''
   const skipUrl = new Set()
   for (let i = 0; i < targets.length; i++) {
+    if (options.signal?.aborted) break
     const target = targets[(start + i) % targets.length]
     if (skipUrl.has(target.url)) continue
     // One row per real provider attempt; dedup replays return before this loop.
     const attemptStarted = Date.now()
     const attemptUsage = {
       created_at: new Date(attemptStarted).toISOString(),
-      request_id: cfg?.policy_request_id,
+      request_id: options.policyRequestId ?? cfg?.policy_request_id,
       provider: config.provider,
       model,
       key_fingerprint: jevKeyFingerprint(target.apiKey),
@@ -2044,7 +2057,7 @@ export async function classifyJev(text, cfg, fetchImpl = globalThis.fetch, now =
           ...(target.apiKey ? { authorization: `Bearer ${target.apiKey}` } : {}),
         },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(config.timeout_ms),
+        signal: options.signal ?? AbortSignal.timeout(config.timeout_ms),
       })
       attemptUsage.http_status = Number(response?.status) || null
       attemptUsage.outcome = response?.ok ? 'invalid_response' : 'http_error'
@@ -2069,6 +2082,7 @@ export async function classifyJev(text, cfg, fetchImpl = globalThis.fetch, now =
             action: 'block',
             category: decision.hits[0].category,
             categories: decision.hits.map((hit) => hit.category),
+            ...(toolGate ? { score: decision.score } : {}),
             state: document,
           }
         : { action: 'pass', reason: 'safe', state: document, score: decision.score, margin: decision.margin }

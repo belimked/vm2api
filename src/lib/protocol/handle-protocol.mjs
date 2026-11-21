@@ -14,6 +14,12 @@ import { RefusalDeviceBlocksRepo } from '../db/repos/refusal-device-blocks-repo.
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { findAccount } from '../admin/panel-api.mjs'
 import { readJevConfig, scopeAccountFromVm } from './jev-intercept.mjs'
+import {
+  createConfiguredToolUseGate,
+  incompleteToolUseError,
+  TOOL_USE_GATE_INCOMPLETE,
+  toolGateSseLines,
+} from './tool-use-gate.mjs'
 import { observeUpstreamRisk, runProtocolIntercept, upstreamRiskClientError } from './intercept-gate.mjs'
 import {
   toClaudeMessages,
@@ -397,6 +403,15 @@ export function createHandleProtocol(deps) {
       return readJevConfig((key, fallback) => settings.get(key, fallback))
     } catch {
       return readJevConfig()
+    }
+  }
+
+  function runtimeToolGate(inbound, logBag) {
+    try {
+      return createConfiguredToolUseGate(deps.settings || new SettingsRepo(), inbound, logBag)
+    } catch {
+      // Test/in-memory handlers may not have a settings database; the default is disabled.
+      return null
     }
   }
 
@@ -1094,6 +1109,7 @@ export function createHandleProtocol(deps) {
             projectRoot: cfg.paths.project,
             captureOutbound: logCtx.capture_outbound === true,
             accountGate,
+            toolGate: runtimeToolGate(auditBody, logBag),
             ops: deps.codexOps || {},
             ...codexSticky,
           }),
@@ -1438,9 +1454,11 @@ export function createHandleProtocol(deps) {
       // This backend forwards caller cache controls unchanged. Billing must
       // use the upstream 5m/1h split, not the TTL requested for template fills.
       cacheTtl = null
+      const toolGate = !apiOpenAI || protocol === 'anthropic.messages' ? runtimeToolGate(auditBody, logBag) : null
       let result
       try {
         result = await runApiInference({
+          toolGate,
           req,
           res,
           cfg,
@@ -1528,7 +1546,8 @@ export function createHandleProtocol(deps) {
         return sendMapped(res, mapped)
       }
       let output
-      const clientBody = hidePersonaUsageOnMessage(result.body, personaHideTokens)
+      let clientBody = hidePersonaUsageOnMessage(result.body, personaHideTokens)
+      if (toolGate) clientBody = await toolGate.message(clientBody)
       if (protocol === 'anthropic.messages') output = clientBody
       else if (protocol === 'openai.chat') output = fromClaudeToOpenAIChat(clientBody, inbound.model)
       else if (protocol === 'openai.completions') output = fromClaudeToOpenAICompletions(clientBody, inbound.model)
@@ -2069,6 +2088,7 @@ export function createHandleProtocol(deps) {
           } else if (protocol === 'openai.responses') {
             state = createResponsesStreamState(inbound.model || body.model, candidate.vmId)
           }
+          const toolGate = runtimeToolGate(auditBody, logBag)
           const keepalive =
             anthropicKeepalive ||
             createDownstreamKeepalive({
@@ -2083,7 +2103,7 @@ export function createHandleProtocol(deps) {
             })
           keepalive.arm()
           try {
-            return await dispatchStreamInference({
+            const streamed = await dispatchStreamInference({
               exec: candidate.exec,
               admitCragInference: deps.admitCragInference,
               cacheTtl,
@@ -2120,32 +2140,40 @@ export function createHandleProtocol(deps) {
                 if (/response_headers/.test(String(line))) return
                 line = restoreToolNamesInSSELine(line, attemptMeta?.toolNames || {})
                 if (personaHideTokens) line = hidePersonaUsageInSseLine(line, personaHideTokens, cacheTtl)
-                keepalive.observeLine(line)
-                if (protocol === 'anthropic.messages') {
-                  streamTracker?.observe(line)
-                  if (!res.headersSent) writeSSEHeaders(res)
-                  const outbound = anthropicSseErrorRemapper ? anthropicSseErrorRemapper.remapLine(line) : line
-                  res.write(String(outbound).endsWith('\n') ? String(outbound) : String(outbound) + '\n')
-                  return
-                }
-                const writeChunks = (chunks) => {
-                  if (!chunks.length) return
-                  if (!res.headersSent) writeSSEHeaders(res)
-                  for (const chunk of chunks) {
-                    res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+                const lines = toolGate ? await toolGate.line(line) : [line]
+                for (const outputLine of lines) {
+                  keepalive.observeLine(outputLine)
+                  if (protocol === 'anthropic.messages') {
+                    streamTracker?.observe(outputLine)
+                    if (!res.headersSent) writeSSEHeaders(res)
+                    const outbound = anthropicSseErrorRemapper ? anthropicSseErrorRemapper.remapLine(outputLine) : outputLine
+                    res.write(String(outbound).endsWith('\n') ? String(outbound) : String(outbound) + '\n')
+                    continue
+                  }
+                  const writeChunks = (chunks) => {
+                    if (!chunks.length) return
+                    if (!res.headersSent) writeSSEHeaders(res)
+                    for (const chunk of chunks) res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+                  }
+                  for (const sseLine of toolGate ? toolGateSseLines(outputLine) : [outputLine]) {
+                    if (protocol === 'openai.chat') writeChunks(claudeSSELineToOpenAIChatChunks(sseLine, state))
+                    else if (protocol === 'openai.completions')
+                      writeChunks(claudeSSELineToOpenAICompletionChunks(sseLine, state))
+                    else writeChunks(claudeSSELineToResponsesEvents(sseLine, state))
                   }
                 }
-                if (protocol === 'openai.chat') {
-                  writeChunks(claudeSSELineToOpenAIChatChunks(line, state))
-                  return
-                }
-                if (protocol === 'openai.completions') {
-                  writeChunks(claudeSSELineToOpenAICompletionChunks(line, state))
-                  return
-                }
-                writeChunks(claudeSSELineToResponsesEvents(line, state))
               },
             })
+            if (toolGate?.hasPending() && !streamed?.body?.error && !isClientCancelledResult(streamed)) {
+              return {
+                ...streamed,
+                ok: false,
+                status: 502,
+                terminalState: 'incomplete',
+                body: { type: 'error', error: incompleteToolUseError() },
+              }
+            }
+            return streamed
           } finally {
             if (anthropicKeepalive) anthropicKeepalive.endAttempt()
             else keepalive.stop()
@@ -2282,8 +2310,10 @@ export function createHandleProtocol(deps) {
         stats.errors++
         logBag.error_code = result?.body?.error?.code || 'stream_incomplete'
         logBag.error_message = result?.body?.error?.message || 'Stream did not reach a verified terminal state'
-        if (logBag.error_code === ErrorCode.CLUSTER_DELIVERY_UNCONFIRMED && !res.writableEnded) {
-          const { body } = mapProtocolClientError(result, logBag, logBag.error_code)
+        if ([ErrorCode.CLUSTER_DELIVERY_UNCONFIRMED, TOOL_USE_GATE_INCOMPLETE].includes(logBag.error_code) && !res.writableEnded) {
+          const body = logBag.error_code === TOOL_USE_GATE_INCOMPLETE
+            ? result.body
+            : mapProtocolClientError(result, logBag, logBag.error_code).body
           if (protocol === 'anthropic.messages') {
             if (!streamTracker?.isFinished()) res.write(buildAnthropicSseError(body.error))
           } else if (protocol === 'openai.responses') {
@@ -2320,7 +2350,9 @@ export function createHandleProtocol(deps) {
     }
 
     let output
-    const clientBody = hidePersonaUsageOnMessage(result.body, personaHideTokens, cacheTtl)
+    const toolGate = runtimeToolGate(auditBody, logBag)
+    let clientBody = hidePersonaUsageOnMessage(result.body, personaHideTokens, cacheTtl)
+    if (toolGate) clientBody = await toolGate.message(clientBody)
     if (protocol === 'anthropic.messages') {
       output = { ...clientBody }
       if (String(req.headers['x-kin-debug'] || '') === '1') {

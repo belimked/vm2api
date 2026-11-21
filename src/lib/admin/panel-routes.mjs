@@ -28,6 +28,7 @@ import {
   publicJevKeys,
   readJevConfig,
 } from '../protocol/jev-intercept.mjs'
+import { applyToolUseGatePatch, readToolUseGateConfig } from '../protocol/tool-use-gate.mjs'
 import { JevUsageRepo } from '../db/repos/jev-usage-repo.mjs'
 import { RefusalGuardsRepo } from '../db/repos/refusal-guards-repo.mjs'
 import { RefusalDeviceBlocksRepo } from '../db/repos/refusal-device-blocks-repo.mjs'
@@ -6454,6 +6455,25 @@ export function createPanelHandler(ctx) {
             })
           throw error
         }
+      }
+      if (req.method === 'GET' && p === '/api/panel/tool-use-gate') {
+        const settings = new SettingsRepo()
+        return json(res, 200, panel.ok(readToolUseGateConfig((key, fallback) => settings.get(key, fallback))))
+      }
+      if (req.method === 'PUT' && p === '/api/panel/tool-use-gate') {
+        const body = await readBody(req, 64 * 1024).catch(() => null)
+        const patched = applyToolUseGatePatch(new SettingsRepo(), body)
+        if (!patched.ok) {
+          return json(res, 400, {
+            ok: false,
+            error: {
+              type: 'invalid_request_error',
+              code: 'invalid_tool_use_gate',
+              message: patched.problems.join('；'),
+            },
+          })
+        }
+        return json(res, 200, panel.ok(patched.config))
       }
       if (req.method === 'GET' && p === '/api/panel/jev-intercept') {
         return json(res, 200, panel.ok(jevInterceptSnapshot()))

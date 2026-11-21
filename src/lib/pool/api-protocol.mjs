@@ -22,6 +22,8 @@ import { usageFromSseLine } from '../protocol/handle-codex.mjs'
 import { BETA_CONTEXT_1M } from '../protocol/claude-code-betas.mjs'
 import { shouldPassContext1mByPolicy } from '../protocol/model-policy.mjs'
 import { createStreamTiming } from '../protocol/stream-timing.mjs'
+import { buildAnthropicSseError } from '../protocol/stream-truncation.mjs'
+import { incompleteToolUseError, toolGateSseLines } from '../protocol/tool-use-gate.mjs'
 import { mergeUsage } from '../protocol/openai-usage.mjs'
 import { ensureRedaction, maskJson, restoreSseLine } from '../redaction/runtime.mjs'
 
@@ -276,6 +278,7 @@ function mappedOpenAIResponsesFailure(resultBase, event, committed, extras = {})
 }
 
 export async function runApiInference({
+  toolGate = null,
   req,
   res,
   cfg,
@@ -469,6 +472,7 @@ export async function runApiInference({
       converters,
       body,
       timing,
+      toolGate,
     })
   }
 
@@ -616,24 +620,29 @@ export async function runApiInference({
     if (redaction) line = await restoreSseLine(line, redaction)
     if (personaHideTokens) line = converters.hidePersonaUsageInSseLine(line, personaHideTokens, cacheTtl) || line
     if (String(line).includes('message_stop')) sawStop = true
-    if (!committed && String(line).startsWith('data:')) {
-      committed = true
-      if (protocol === 'anthropic.messages' && !res.headersSent) converters.writeSSEHeaders(res)
+    const gatedLines = toolGate ? await toolGate.line(line) : [line]
+    for (const gatedLine of gatedLines) {
+      if (!committed && /(?:^|\n)data:/.test(String(gatedLine))) {
+        committed = true
+        if (protocol === 'anthropic.messages' && !res.headersSent) converters.writeSSEHeaders(res)
+      }
+      if (protocol === 'anthropic.messages') {
+        if (!res.headersSent) converters.writeSSEHeaders(res)
+        res.write(String(gatedLine).endsWith('\n') ? String(gatedLine) : `${gatedLine}\n`)
+        continue
+      }
+      const writeChunks = (chunks) => {
+        if (!chunks.length) return
+        if (!res.headersSent) converters.writeSSEHeaders(res)
+        for (const chunk of chunks) res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+      }
+      for (const sseLine of toolGate ? toolGateSseLines(gatedLine) : [gatedLine]) {
+        if (protocol === 'openai.chat') writeChunks(converters.claudeSSELineToOpenAIChatChunks(sseLine, state))
+        else if (protocol === 'openai.completions')
+          writeChunks(converters.claudeSSELineToOpenAICompletionChunks(sseLine, state))
+        else writeChunks(converters.claudeSSELineToResponsesEvents(sseLine, state))
+      }
     }
-    if (protocol === 'anthropic.messages') {
-      if (!res.headersSent) converters.writeSSEHeaders(res)
-      res.write(String(line).endsWith('\n') ? String(line) : `${line}\n`)
-      return
-    }
-    const writeChunks = (chunks) => {
-      if (!chunks.length) return
-      if (!res.headersSent) converters.writeSSEHeaders(res)
-      for (const chunk of chunks) res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-    }
-    if (protocol === 'openai.chat') writeChunks(converters.claudeSSELineToOpenAIChatChunks(line, state))
-    else if (protocol === 'openai.completions')
-      writeChunks(converters.claudeSSELineToOpenAICompletionChunks(line, state))
-    else writeChunks(converters.claudeSSELineToResponsesEvents(line, state))
   })
 
   const failure = classifierFailure()
@@ -652,6 +661,23 @@ export async function runApiInference({
     }
   }
 
+  if (toolGate?.hasPending()) {
+    const error = incompleteToolUseError()
+    if (res.headersSent) {
+      if (protocol === 'anthropic.messages') res.write(buildAnthropicSseError(error))
+      else res.write(`data: ${JSON.stringify({ error })}\n\n`)
+    }
+    return {
+      ...resultBase,
+      ...timing.snapshot(),
+      ok: false,
+      status: 502,
+      body: { type: 'error', error },
+      terminalState: 'incomplete',
+      usage: streamedUsage,
+      committed,
+    }
+  }
   return {
     ...resultBase,
     ...timing.snapshot(),
@@ -674,6 +700,7 @@ async function runOpenAIResponsesUpstream({
   converters,
   body,
   timing,
+  toolGate = null,
 }) {
   const chunks = []
   const anthropicSse = protocol === 'anthropic.messages' ? createAnthropicSseState() : null
@@ -686,7 +713,7 @@ async function runOpenAIResponsesUpstream({
   let terminalFailure = null
   const pendingLines = []
 
-  const writeStreamLine = (raw) => {
+  const writeStreamLine = async (raw) => {
     if (!res.headersSent) converters.writeSSEHeaders(res)
     if (protocol === 'openai.responses') {
       res.write(raw.endsWith('\n') ? raw : raw + '\n')
@@ -699,7 +726,9 @@ async function runOpenAIResponsesUpstream({
           ? responsesSseToAnthropicEvents(raw, anthropicSse)
           : responsesSseToChatChunk(raw, 'codex', chatSse)
       if (mapped) {
-        res.write(mapped)
+        if (toolGate && protocol === 'anthropic.messages') {
+          for (const line of await toolGate.frames(mapped)) res.write(line)
+        } else res.write(mapped)
         if (mapped.includes('[DONE]') || mapped.includes('event: message_stop\n')) completed = true
       }
     } catch (error) {
@@ -735,10 +764,10 @@ async function runOpenAIResponsesUpstream({
     if (!wasCommitted) {
       pendingLines.push(raw)
       if (!committed) return
-      for (const pending of pendingLines.splice(0)) writeStreamLine(pending)
+      for (const pending of pendingLines.splice(0)) await writeStreamLine(pending)
       return
     }
-    writeStreamLine(raw)
+    await writeStreamLine(raw)
   })
 
   if (!clientStream) {
@@ -785,6 +814,10 @@ async function runOpenAIResponsesUpstream({
       usage: streamedUsage,
       ...timing.snapshot(),
     })
+  if (!conversionError && toolGate?.hasPending()) {
+    conversionError = incompleteToolUseError()
+    if (res.headersSent) res.write(buildAnthropicSseError(conversionError))
+  }
   if (conversionError)
     return {
       ...resultBase,
