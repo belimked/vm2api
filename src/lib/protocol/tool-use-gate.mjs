@@ -158,7 +158,9 @@ export function toolGateSseLines(value) {
 
 export function createToolUseGate({ config, inbound, jev, classify = classifyJev, logBag = null, logger = console } = {}) {
   if (!config?.enabled) return null
-  const tools = new Set(config.tools)
+  // Clients name the same tool differently (Claude Code `Bash`, other agents `bash`).
+  const toolNames = new Set(config.tools.map((name) => name.toLowerCase()))
+  const controlled = (name) => typeof name === 'string' && toolNames.has(name.toLowerCase())
   const questions = enabledToolQuestions(config)
   const labels = new Map(questions.map((item) => [item.id, item.label || item.id]))
   const asked = questions.map((item) => ({
@@ -335,7 +337,7 @@ export function createToolUseGate({ config, inbound, jev, classify = classifyJev
           return []
         }
       }
-      if (isToolStart(event) && tools.has(event.content_block.name)) {
+      if (isToolStart(event) && controlled(event.content_block.name)) {
         pending = { index: event.index, block: event.content_block, lines: [], deltas: [], chars: 0, invalid: '' }
         buffer(frame)
         return prefix
@@ -352,7 +354,7 @@ export function createToolUseGate({ config, inbound, jev, classify = classifyJev
       blocked = passed = false
       const content = []
       for (const block of message.content) {
-        if (block?.type !== 'tool_use' || !tools.has(block.name)) {
+        if (block?.type !== 'tool_use' || !controlled(block.name)) {
           if (block?.type === 'tool_use') passed = true
           content.push(block)
           continue

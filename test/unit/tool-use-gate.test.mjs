@@ -28,6 +28,16 @@ test('disabled has no transformer; other tools pass through', async () => {
   const lines = [start(0, 'Read'), delta(0, '{}'), stop(0)]
   assert.deepEqual(await run(gate, lines), lines)
 })
+test('tool names match case-insensitively (bash vs Bash)', async () => {
+  let calls = 0
+  const gate = createToolUseGate({ config: cfg, classify: async () => { calls++; return { action: 'block' } } })
+  const events = parse(await run(gate, [start(0, 'bash'), delta(0, '{"command":"ls"}'), stop(0), reason]))
+  assert.equal(calls, 1)
+  assert.equal(events[0].content_block.type, 'text')
+  const message = await gate.message({ content: [{ type: 'tool_use', name: 'BASH', input: { command: 'ls' } }], stop_reason: 'tool_use' })
+  assert.equal(message.content[0].type, 'text')
+  assert.equal(calls, 2)
+})
 test('split SSE lines keep controlled event headers buffered', async () => {
   const gate = createToolUseGate({ config: cfg, classify: async () => ({ action: 'block' }) })
   const lines = ['event: content_block_start', `data: ${JSON.stringify({ type: 'content_block_start', index: 2, content_block: { type: 'tool_use', name: 'Bash', input: {} } })}`, '', 'event: content_block_stop', `data: ${JSON.stringify({ type: 'content_block_stop', index: 2 })}`, '']
