@@ -49,6 +49,7 @@ import {
   enforceCacheTtlOrder,
   normalizeCacheTtl,
   listCacheMarkers,
+  materializeAutomaticCache,
   stripIllegalCacheControlFields,
   validateCacheBreakpoints,
 } from './cache-ttl.mjs'
@@ -315,33 +316,6 @@ export function prepareCliPersonaInput(body, preset) {
   return out
 }
 
-/** CLI needs a block marker: project automatic caching onto the current message tail. */
-function materializeAutomaticCache(body) {
-  validateCacheBreakpoints(body)
-  const { cache_control: control, ...out } = body
-  const messages = Array.isArray(body.messages) ? body.messages : []
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]
-    if (!message || typeof message !== 'object') continue
-    // Supported mid-conversation system turns are also in the cache prefix.
-    // Skipping them could put this 5m marker before their explicit 1h marker.
-    const content = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content
-    if (!Array.isArray(content)) continue
-    for (let j = content.length - 1; j >= 0; j--) {
-      const block = content[j]
-      if (!block || ['thinking', 'redacted_thinking'].includes(block.type)) continue
-      // An explicit tail policy already caches the entire eligible prefix.
-      if (block.cache_control != null) return out
-      const next = content.slice()
-      next[j] = { ...block, cache_control: { ...control } }
-      out.messages = messages.slice()
-      out.messages[i] = { ...message, content: next }
-      return out
-    }
-  }
-  return out
-}
-
 /**
  * Caller fields plus Node-owned message breakpoints.
  * CLI owns persona layout and system/tools markers; kernel only forwards.
@@ -366,14 +340,11 @@ export function prepareCliHopBody(
     preserveCallerEnvironment = false,
     autoCompactWindow = null,
     routing = null,
-    outboundShape = null,
     personaPreset = null,
   } = {},
 ) {
   if (requestContext?.purpose === 'auto_mode_classifier') return prepareClassifierBody(canonicalBody, { stream })
   validateBetweenToolsThinking(canonicalBody)
-  // official_303 lean: renderOfficial303Body owns system, role=system placement and markers.
-  const lean = outboundShape === 'lean' && !requestContext
   if (preserveSystem) validateCacheBreakpoints(canonicalBody)
   let body = officialMessagesBody(canonicalBody, { stream, preserveContentShape: true })
   const windowTokens = Number(autoCompactWindow)
@@ -399,7 +370,7 @@ export function prepareCliHopBody(
       (Array.isArray(body.system) &&
         body.system.some((block) => textOf(block).trim() === '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')))
   if (!preserveSystem) {
-    if (!lean && !shaped && !preparedZero) {
+    if (!shaped && !preparedZero) {
       const leftover = stripCliOwnedSystem(body.system, { preserveCallerEnvironment })
       if (leftover == null) delete body.system
       else body.system = leftover
@@ -408,8 +379,8 @@ export function prepareCliHopBody(
     body = stabilizeMessageBudgets(body)
   }
   // cli-node sends mid-conversation-system. Only models that reject the role need the lift.
-  if (!lean && !modelSupportsMidConversationSystem(body.model)) body = liftMidConversationSystemMessages(body)
-  if (!preserveSystem && !lean) body = collapseSystemBudgetReminders(body)
+  if (!modelSupportsMidConversationSystem(body.model)) body = liftMidConversationSystemMessages(body)
+  if (!preserveSystem) body = collapseSystemBudgetReminders(body)
 
   // Native cli-node applies model policy and the medium effort default.
   // Explicit sampling fields stay omitted or present exactly as the caller sent them.
@@ -418,20 +389,22 @@ export function prepareCliHopBody(
   body = stripInvalidThinkingBlocks(body, { preserveThinkingBlocks })
   body = ensureOutputConfigSchema(body)
 
-  if (preparedZero && !lean && !preserveSystem && !requestContext && body.cache_control != null) {
+  if (preparedZero && !preserveSystem && !requestContext && body.cache_control != null) {
+    // Native passthrough judges the caller's markers before rewriting them.
+    validateCacheBreakpoints(body)
     body = materializeAutomaticCache(body)
   } else if (Object.prototype.hasOwnProperty.call(body, 'cache_control')) {
     delete body.cache_control
   }
   if (!requestContext) {
-    if (!lean && !shaped && !preparedZero) {
+    if (!shaped && !preparedZero) {
       body = { ...body, system: officialSystemTemplate(body.system, cacheTtl) }
       body.messages = officialMessageMarker(body.messages, cacheTtl)
     }
     // Zero owns its system layout, but does not assemble message breakpoints.
     // Only supply a fallback when the caller has no explicit cache policy:
     // preserving existing markers also preserves their budget and TTL order.
-    const zeroFallback = preparedZero && !lean && !shaped && !preserveSystem
+    const zeroFallback = preparedZero && !shaped && !preserveSystem
     if (zeroFallback) {
       const hasMarker = (node) => node?.cache_control != null
       const hasCallerMarkers =
@@ -448,7 +421,7 @@ export function prepareCliHopBody(
     }
     // Assembled official templates own their system markers, not the growing
     // conversation. Fill missing message anchors without moving caller markers.
-    const shapedFallback = shaped && !lean && !preserveSystem
+    const shapedFallback = shaped && !preserveSystem
     if (shapedFallback) {
       const markers = listCacheMarkers(body)
       if (!markers.some((marker) => marker.section === 'messages')) {
@@ -481,7 +454,7 @@ export function prepareCliHopBody(
       }
     }
     // (cus) After upstream's marker policy: retime ttl-less caller message markers.
-    if (!lean && callerCacheTtlFillEnabled()) body = fillMessageCacheTtl(body, cacheTtl)
+    if (callerCacheTtlFillEnabled()) body = fillMessageCacheTtl(body, cacheTtl)
   }
   const prepared = applyEagerToolStreaming(body, routing)
   return preserveSystem ? prepared : enforceCacheTtlOrder(prepared, cacheTtl)
@@ -519,6 +492,7 @@ export function prepareOutboundAttempt({
   firstUserIdentity = '',
   authScheme,
   credentialMode,
+  dropSampling = false,
 } = {}) {
   const inferenceOnly = isAnySetupTokenMode(credentialMode) || isApiKeyMode(credentialMode)
   const keepCallerSession = officialClient === true || (officialClient == null && !unofficial)
@@ -571,6 +545,7 @@ export function prepareOutboundAttempt({
     cacheTtl: cacheTtl || undefined,
     inbound,
     preserveThinkingBlocks,
+    dropSampling,
   })
   cleaned = stripIllegalCacheControlFields(cleaned)
   cleaned = enforceCacheTtlOrder(cleaned, cacheTtl || DEFAULT_CACHE_TTL)
@@ -636,6 +611,7 @@ export function prepareOutboundEnvelope({
   authScheme,
   credentialMode,
   want1m,
+  dropSampling = false,
 } = {}) {
   const prepared = prepareOutboundAttempt({
     requestContext,
@@ -669,6 +645,7 @@ export function prepareOutboundEnvelope({
     firstUserIdentity,
     authScheme,
     credentialMode,
+    dropSampling,
   })
   const headers = {
     ...prepareOutboundHeaders(

@@ -96,12 +96,25 @@ export type RefusalDeviceBlock = {
 export type RiskAuditPolicy = {
   ban_steps: number[]
   blocked_tools: { name: string; message: string }[]
+  block_system_prompt_rewrite: boolean
   upstream_policy_phrases: string[]
   downgrade_pool: string
   downgrade_endpoint: string
   downgrade_model: string
   route_margin: number
   model_margin: number
+}
+
+export type RefusalSessionBlock = {
+  session_id: string
+  first_seen_at: string
+  last_seen_at: string
+  hit_count: number
+  source_request_id: string | null
+  account_id: string | null
+  model: string | null
+  preview: string | null
+  reason: string | null
 }
 
 export type RefusalGuardConfig = {
@@ -111,10 +124,14 @@ export type RefusalGuardConfig = {
   similarity: number
   device_block_enabled: boolean
   risk_audit: RiskAuditPolicy
+  /** 独立于 enabled：上游拒答过的会话永久停止转发。 */
+  session_block_enabled: boolean
   count: number
   items: RefusalGuardItem[]
   device_count: number
   devices: RefusalDeviceBlock[]
+  session_count: number
+  sessions: RefusalSessionBlock[]
 }
 
 export type PolicyQuestion = {
@@ -262,6 +279,15 @@ export type NotifyWecomConfig = {
   mention_all: boolean
 }
 
+export type NotifyFeishuConfig = {
+  enabled: boolean
+  webhook: string
+  webhook_set?: boolean
+  secret: string
+  secret_set?: boolean
+  clear_secret?: boolean
+}
+
 /** `GET /routing -> notify` 与 `GET /notify -> config` 的脱敏通知配置。 */
 export type NotifyConfig = {
   enabled: boolean
@@ -274,6 +300,7 @@ export type NotifyConfig = {
   events: NotifyEvents
   telegram: NotifyTelegramConfig
   wecom: NotifyWecomConfig
+  feishu: NotifyFeishuConfig
   email?: Record<string, unknown>
 }
 
@@ -287,6 +314,7 @@ export type NotifyStatus = {
     email?: boolean
     telegram?: boolean
     wecom?: boolean
+    feishu?: boolean
     any?: boolean
   }
 }

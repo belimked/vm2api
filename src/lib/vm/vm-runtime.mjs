@@ -41,7 +41,16 @@ import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mj
 import { slotPick, workstationMacAddress } from '../identity/workstation-profile.mjs'
 import { ensureSlotComputer, rememberComputer } from '../identity/slot-computer.mjs'
 import { coerceRfc4122Uuid } from '../identity/rfc4122-uuid.mjs'
-import { boundProxyUrl, ensureProxyEgress, isLocalEgressProxy, slotNetworkForVm } from './egress.mjs'
+import {
+  boundProxyUrl,
+  ensureProxyEgress,
+  ensureSharedEgressForVm,
+  isLocalEgressProxy,
+  releaseSharedIp,
+  slotNetworkArgs,
+  slotNetworkForVm,
+} from './egress.mjs'
+import { isSharedModeVm, sharedNodeIdForVm } from './shared-egress.mjs'
 import { socksProxyEndpoint } from './socks-address.mjs'
 import { assertProxyAllowed } from './proxy-policy.mjs'
 import { toHostPath } from './host-path.mjs'
@@ -588,6 +597,13 @@ export function runtimePatch(vm, info, extra = {}) {
     worker_token_file: rest.worker_token_file || vm.runtime?.worker_token_file || null,
     kernel_socket: rest.kernel_socket || vm.runtime?.kernel_socket || null,
     egress: rest.egress || (isLocalEgressProxy(vm.proxy) ? 'local' : 'explicit-socks5'),
+    // Carried across refreshes like the worker paths above: this object is
+    // rebuilt from scratch each time, and these two decide which network the
+    // slot is attached to and at which address. Losing them would leave a VM
+    // sitting on the shared bridge while the control plane looked for a per-VM
+    // one that was never created for it.
+    egress_mode: rest.egress_mode || vm.runtime?.egress_mode || null,
+    shared_ip: rest.shared_ip || vm.runtime?.shared_ip || null,
     ...rest,
     ...(rest.kernel_socket ? { kernel_socket: rest.kernel_socket } : {}),
   }
@@ -1150,6 +1166,9 @@ export function buildKvmRunArgs({
   image,
   hostName,
   network,
+  // Set for a shared-network VM: the helper's route table is keyed on this
+  // exact address, so it cannot be left to Docker.
+  ip = '',
   memory,
   accel,
   uid,
@@ -1182,6 +1201,7 @@ export function buildKvmRunArgs({
     hostName,
     '--network',
     network,
+    ...(ip ? ['--ip', ip] : []),
     '--restart',
     slotRestartPolicy(vm, routing),
     '--stop-timeout',
@@ -1191,7 +1211,7 @@ export function buildKvmRunArgs({
     '--memory-swap',
     mem,
     '--pids-limit',
-    '256',
+    String(slotCreationLimits(vm, routing).pids),
     '--security-opt',
     'no-new-privileges',
     '--cap-drop',
@@ -1314,8 +1334,15 @@ async function startVmRuntimeAdmitted(
 
   const proxy = ensureOuterSocks(vm)
   if (!proxy.ok) return proxy
-  const eg = await ensureProxyEgress(projectRoot, vm.proxy)
+  // A shared-mode VM is routed through its node's one helper, and comes back
+  // with the address it must be attached at. It is written onto the VM before
+  // slotNetworkArgs reads it below, and carried across refreshes by
+  // runtimePatch; the caller persists the VM as it already does.
+  const eg = isSharedModeVm(vm)
+    ? await ensureSharedEgressForVm(projectRoot, vm)
+    : await ensureProxyEgress(projectRoot, vm.proxy)
   if (!eg.ok) return eg
+  if (eg.ip) vm.runtime = { ...vm.runtime, egress_mode: 'shared', shared_ip: eg.ip }
   if (!eg.network && !eg.name) return { ok: false, error: 'egress network missing; refusing host fallback' }
 
   let existing = inspectContainer(name)
@@ -1439,8 +1466,10 @@ async function startVmRuntimeAdmitted(
   } catch {}
   const machineIdFile = ensureGuestMachineIdFile(projectRoot, vm)
   const hostOf = (p) => toHostPath(p, { projectRoot })
-  const netName = slotNetworkForVm(vm)
-  if (!netName || netName === 'host' || netName === 'bridge') {
+  const slotNet = slotNetworkArgs(vm)
+  if (!slotNet.ok) return slotNet
+  const netName = slotNet.network
+  if (netName === 'host' || netName === 'bridge') {
     return { ok: false, error: 'bound SOCKS5 network required; refusing host/bridge fallback' }
   }
 
@@ -1457,6 +1486,7 @@ async function startVmRuntimeAdmitted(
       image,
       hostName: host,
       network: netName,
+      ip: slotNet.ip || '',
       memory: mem,
       accel: accelOpt,
       uid: runtimeUidNum(vm),
@@ -1505,8 +1535,7 @@ async function startVmRuntimeAdmitted(
       // Docker's own 02:42:* range marks the NIC as a container.
       '--mac-address',
       workstationMacAddress(vm),
-      '--network',
-      netName,
+      ...slotNet.args,
       '--restart',
       slotRestartPolicy(vm, resolvedRouting),
       ...dockerSlotResourceArgs(vm, resolvedRouting),
@@ -1586,6 +1615,12 @@ async function startVmRuntimeAdmitted(
 
   const r = sh(args, { timeout: 90_000 })
   if (!r.ok) return { ok: false, error: r.stderr || r.stdout || 'docker run failed' }
+  // The container is on the bridge now, so the network can speak for this
+  // address and the claim has done its job. Dropping it is tidiness rather
+  // than correctness: a claim left behind keeps an address reserved until it
+  // expires, which is the safe direction, and readSharedClaims discards
+  // expired entries on read.
+  if (slotNet.ip) releaseSharedIp(projectRoot, sharedNodeIdForVm(vm), vm.id)
   const chownErr = applyKvmBindChown(name, vm)
   if (chownErr) return chownErr
   runtimePatch(vm, inspectContainer(name), {

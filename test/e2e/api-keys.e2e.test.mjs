@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import os from 'node:os'
 import { startGateway, api } from '../harness.mjs'
 
 const MODEL = 'claude-haiku-4-5-20251001'
@@ -29,6 +30,16 @@ test('real admin and user sessions cannot list or operate each other personal ke
     const userKey = await personal(userCookie, 'POST', '/api/panel/api-keys', { name: 'user-key' })
     assert.equal(userKey.status, 201, userKey.text)
     assert.equal(userKey.json.item.user_id, userId)
+    const deniedGeminiKey = await personal(userCookie, 'POST', '/api/panel/api-keys', {
+      name: 'tenant-gemini',
+      group_type: 'Gemini',
+    })
+    assert.equal(deniedGeminiKey.status, 403)
+    assert.equal(deniedGeminiKey.json.error.code, 'gemini_key_forbidden')
+    const deniedGeminiPatch = await personal(userCookie, 'PATCH', `/api/panel/api-keys/${userKey.json.item.id}`, {
+      group_type: 'gemini',
+    })
+    assert.equal(deniedGeminiPatch.status, 403)
     const adminKey = await personal(adminCookie, 'POST', '/api/panel/api-keys', { name: 'admin-key', user_id: userId })
     assert.equal(adminKey.status, 201, adminKey.text)
     assert.ok(adminKey.json.item.user_id)
@@ -97,6 +108,51 @@ test('panel creates managed key; key can call /v1/messages', async () => {
     assert.equal(list.status, 200)
     assert.ok(list.json.keys.some((k) => k.name === 'e2e'))
     assert.ok(list.json.keys[0].key.includes('…'))
+  } finally {
+    await gw.stop()
+  }
+})
+
+test('Gemini keys persist, remain isolated and fail closed without the host service', async () => {
+  const gw = await startGateway({
+    env: { KIN_GEMINI_HOST_SOCKET: `${os.tmpdir()}/missing-gemini-${process.pid}.sock` },
+  })
+  try {
+    const created = await api(gw, 'POST', '/api/panel/api-keys', { body: { name: 'host-oauth', group_type: 'gemini' } })
+    assert.equal(created.status, 201, created.text)
+    const { id, key } = created.json.item
+    assert.equal(created.json.item.group_type, 'gemini')
+    const updated = await api(gw, 'PATCH', `/api/panel/api-keys/${id}`, { body: { rpm: 2 } })
+    assert.equal(updated.status, 200, updated.text)
+    assert.equal(updated.json.item.group_type, 'gemini')
+    const wrongCategory = await api(gw, 'PATCH', `/api/panel/api-keys/${id}`, { body: { category: 'api' } })
+    assert.equal(wrongCategory.status, 400, wrongCategory.text)
+    assert.equal(wrongCategory.json.error.code, 'invalid_gemini_key_scope')
+    const headers = { authorization: `Bearer ${key}` }
+
+    const wrongKey = await api(gw, 'POST', '/v1/gemini/sessions', { body: {} })
+    assert.equal(wrongKey.status, 403, wrongKey.text)
+    assert.equal(wrongKey.json.error.code, 'gemini_key_required')
+    const unavailable = await api(gw, 'POST', '/v1/gemini/sessions/turn-1', {
+      headers,
+      body: { model: 'gemini-3-pro', input: 'hello' },
+    })
+    assert.equal(unavailable.status, 503, unavailable.text)
+    assert.equal(unavailable.json.error.code, 'gemini_host_unavailable')
+    const models = await api(gw, 'GET', '/v1/models', { headers })
+    assert.equal(models.status, 503, models.text)
+    assert.equal(models.json.error.code, 'gemini_host_unavailable')
+    const messages = await api(gw, 'POST', '/v1/messages', {
+      headers,
+      body: { model: 'gemini-3-pro', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] },
+    })
+    assert.equal(messages.status, 503, messages.text)
+    assert.equal(messages.json.error.code, 'gemini_host_unavailable')
+    // Must stay a path outside isGeminiSharedPath: a Gemini key legitimately
+    // reaches the shared OpenAI paths, so asserting the mismatch there is moot.
+    const isolated = await api(gw, 'POST', '/v1/completions', { headers, body: {} })
+    assert.equal(isolated.status, 403, isolated.text)
+    assert.equal(isolated.json.error.code, 'key_group_mismatch')
   } finally {
     await gw.stop()
   }

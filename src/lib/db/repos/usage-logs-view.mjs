@@ -30,6 +30,8 @@ const SCAN_CAP = 2000
 const SUMMARY_SCAN_CAP = 5000
 /** Recent rows mined for distinct filter values / empty-prefix session suggestions. */
 const RECENT_SCAN = 5000
+/** One conversation = the caller's session id; rows without one fall back to the outbound id. */
+const CONVERSATION_KEY_SQL = "COALESCE(NULLIF(session_id, ''), outbound_session_id)"
 const OPTION_LIMIT = 200
 const EXPORT_LIMIT_DEFAULT = 2000
 const EXPORT_LIMIT_MAX = 5000
@@ -141,18 +143,9 @@ function specialSettings(row) {
     out.push({ key: 'mismatch', label: '模型重定向', value: `${row.requested_model} → ${row.upstream_model}` })
   if (row.speed === 'fast') out.push({ key: 'fast', label: 'Fast 模式', value: row.speed })
   if (row.service_tier === 'priority') out.push({ key: 'priority', label: 'Priority', value: row.service_tier })
-  // Sent priority, upstream echoed another tier: Codex did not serve it as Fast (#777).
-  if (
-    (row.service_tier === 'priority' || row.service_tier === 'fast') &&
-    row.upstream_service_tier &&
-    row.upstream_service_tier !== 'priority' &&
-    row.upstream_service_tier !== 'fast'
-  )
-    out.push({
-      key: 'tier_downgrade',
-      label: 'Fast 未生效',
-      value: `${row.service_tier} → ${row.upstream_service_tier}`,
-    })
+  if (row.service_tier === 'ultrafast') out.push({ key: 'ultrafast', label: 'Ultrafast', value: row.service_tier })
+  if (['priority', 'fast', 'ultrafast'].includes(row.service_tier) && row.upstream_service_tier)
+    out.push({ key: 'upstream_service_tier', label: '上游档位回显', value: row.upstream_service_tier })
   if (row.long_context === 1) out.push({ key: 'context1m', label: '1M 上下文' })
   if (row.via && row.via !== DEFAULT_VIA) out.push({ key: 'via', label: '路由', value: row.via })
   return out
@@ -716,7 +709,12 @@ export class UsageLogsView {
       .map((r) => r.sid)
   }
 
-  /** Outbound sessions with a completed request in the last `minutes`. */
+  /**
+   * Conversations with a completed request in the last `minutes`, grouped by the
+   * caller's session_id (falling back to the outbound id). Grouping by outbound id
+   * splits one conversation into many: side requests (title / topic / suggestion
+   * forks) mint their own session id while sharing the main prompt cache.
+   */
   activeSessions({ minutes = 5, limit = 50, owner_user_id = null, now = Date.now() } = {}) {
     const mins = clampInt(minutes, 1, 1440, 5)
     const n = clampInt(limit, 1, 200, 50)
@@ -728,23 +726,35 @@ export class UsageLogsView {
       params.push(...own.params)
     }
     const cond = `WHERE ${where.join(' AND ')}`
-    const total = this.db
-      .prepare(`SELECT COUNT(DISTINCT outbound_session_id) AS n FROM usage_logs ${cond}`)
-      .get(...params).n
+    // "One-off" = a conversation key seen once with no tools: side requests (title /
+    // topic forks) that mint their own session id. Counted apart, never merged.
+    const counts = this.db
+      .prepare(`
+      SELECT COUNT(*) AS total,
+             COALESCE(SUM(CASE WHEN c.requests = 1 AND c.tools = 0 THEN 1 ELSE 0 END), 0) AS one_off
+      FROM (
+        SELECT COUNT(*) AS requests, SUM(IFNULL(has_tools, 0)) AS tools
+        FROM usage_logs ${cond}
+        GROUP BY ${CONVERSATION_KEY_SQL}
+      ) c
+    `)
+      .get(...params)
+    const total = counts.total
     // Aggregate first, then pull the newest row per session by id; SQLite's
     // bare-column-with-MAX shortcut is undefined once MIN() is also present.
     const rows = this.db
       .prepare(`
       WITH s AS (
-        SELECT outbound_session_id AS sid,
+        SELECT ${CONVERSATION_KEY_SQL} AS sid,
                MAX(created_at) AS last_at,
                MIN(created_at) AS first_at,
                COUNT(*) AS requests,
                SUM(IFNULL(input_tokens, 0) + IFNULL(output_tokens, 0) + IFNULL(cache_read_tokens, 0) + IFNULL(cache_creation_tokens, 0)) AS tokens,
-               COALESCE(SUM(total_cost), 0) AS cost
+               COALESCE(SUM(total_cost), 0) AS cost,
+               CASE WHEN COUNT(*) = 1 AND SUM(IFNULL(has_tools, 0)) = 0 THEN 1 ELSE 0 END AS one_off
         FROM usage_logs ${cond}
-        GROUP BY outbound_session_id
-        ORDER BY last_at DESC
+        GROUP BY ${CONVERSATION_KEY_SQL}
+        ORDER BY one_off ASC, last_at DESC
         LIMIT ?
       )
       SELECT s.*, l.session_id AS client_session_id, l.user_id, l.api_key_id, l.vm_id, l.model, l.status, l.duration_ms,
@@ -752,10 +762,10 @@ export class UsageLogsView {
       FROM s
       JOIN usage_logs l ON l.id = (
         SELECT id FROM usage_logs
-        WHERE outbound_session_id = s.sid AND created_at = s.last_at${own.sql ? ` AND ${own.sql}` : ''}
+        WHERE ${CONVERSATION_KEY_SQL} = s.sid AND created_at = s.last_at${own.sql ? ` AND ${own.sql}` : ''}
         ORDER BY id DESC LIMIT 1
       )
-      ORDER BY s.last_at DESC
+      ORDER BY s.one_off ASC, s.last_at DESC
     `)
       .all(...params, n, ...own.params)
     const names = lookupNames(this.db, {
@@ -767,8 +777,10 @@ export class UsageLogsView {
     return {
       minutes: mins,
       total: num(total),
+      oneOffTotal: num(counts.one_off),
       sessions: rows.map((r) => ({
         sessionId: r.sid,
+        oneOff: r.one_off === 1,
         clientSessionId: r.client_session_id ?? null,
         userName: r.user_id ? (names.users.get(r.user_id) ?? null) : null,
         keyName: r.api_key_id ? (names.keys.get(r.api_key_id) ?? null) : null,
@@ -819,7 +831,7 @@ export class UsageLogsView {
                COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
                AVG(duration_ms) AS avg_duration_ms,
                AVG(first_token_ms) AS avg_ttft_ms,
-               COUNT(DISTINCT outbound_session_id) AS sessions
+               COUNT(DISTINCT CASE WHEN outbound_session_id IS NOT NULL THEN ${CONVERSATION_KEY_SQL} END) AS sessions
         FROM usage_logs WHERE ${where.join(' AND ')}
       `)
         .get(...params)

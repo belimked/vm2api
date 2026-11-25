@@ -1,5 +1,6 @@
 import { CLAUDE_OFFICIAL_URL, OPENAI_OFFICIAL_URL, normalizeProtocol, trimBaseUrl } from './api-presets.mjs'
 import {
+  canonicalizeDottedClaudeId,
   isCatalogModelId,
   isCodexCatalogModel,
   listGptPublicModels,
@@ -102,7 +103,9 @@ export function resolveUpstreamPool(ep, requestedModel) {
     const raw = stripPrefix(requestedModel, ep?.prefix)
     const resolved = resolveCatalogModel(raw)
     if (resolved?.ok && resolved.model) return [resolved.model]
-    if (isCatalogModelId(raw)) return [raw]
+    // Catalog unavailable: still hand upstream the hyphenated id it accepts.
+    const canonical = canonicalizeDottedClaudeId(raw)
+    if (isCatalogModelId(canonical)) return [canonical]
   } else if (isOfficialOpenAI(ep)) {
     const raw = stripPrefix(requestedModel, ep?.prefix)
     if (isGptSeriesId(raw) || isCodexCatalogModel(raw)) return [raw]
@@ -150,6 +153,7 @@ export class ApiScheduler {
       const proto = normalizeProtocol(ep.protocol, ep.kind)
       if (targetGroup === 'anthropic' && proto !== 'anthropic') continue
       if (targetGroup === 'openai' && proto !== 'openai') continue
+      if (targetGroup === 'gemini' && proto !== 'gemini') continue
       for (const id of modelIdsForEndpoint(ep, { forcePrefix: this.forcePrefix })) {
         const k = lower(id)
         if (seen.has(k)) continue
@@ -175,6 +179,7 @@ export class ApiScheduler {
         const proto = normalizeProtocol(ep.protocol, ep.kind)
         if (targetGroup === 'anthropic' && proto !== 'anthropic') return false
         if (targetGroup === 'openai' && proto !== 'openai') return false
+        if (targetGroup === 'gemini' && proto !== 'gemini') return false
         return endpointMatchesModel(ep, requestedModel)
       })
       .sort((a, b) => (Number(b.priority) || 0) - (Number(a.priority) || 0))

@@ -347,7 +347,7 @@ for (const placement of ['local', 'cluster']) {
       assert.deepEqual(events, ['hold', 'project', 'release'])
     })
 
-    test(`unlicensed ${placement} KVM ${entry} cannot switch or change scheduling`, async (t) => {
+    test(`unlicensed ${placement} KVM ${entry} allows switching to CRAG and defers running start cleanly`, async (t) => {
       const { root, vm } = fixture(t, {
         dataplane: entry === 'default' ? undefined : 'wrap',
         ...(placement === 'cluster' ? { node_id: 'node-1' } : {}),
@@ -355,14 +355,28 @@ for (const placement of ['local', 'cluster']) {
         schedule_off: true,
       })
       seedEncryptedPackage(root)
-      const record = fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`))
+      const routing = { inference: { dataplane: 'wrap' } }
+      const events = []
       const operations = {
-        routingConfig: { inference: { dataplane: 'wrap' } },
-        persistRoutingPatch: async () => assert.fail('unlicensed switch must not change the global default'),
-        kernelWatchdog: { hold: async () => assert.fail('unlicensed switch must not enter maintenance') },
+        routingConfig: routing,
+        persistRoutingPatch: async (patch) => Object.assign(routing.inference, patch.inference),
+        kernelWatchdog: {
+          hold: async () => events.push('hold'),
+          release: () => events.push('release'),
+          reset: () => events.push('reset'),
+        },
         kernelPolicyOps: {
-          restartRustKernel: async () => assert.fail('unlicensed switch must not restart the guest'),
-          startSlotReady: async () => assert.fail('unlicensed switch must not recreate the runner'),
+          writeKernelConfig: (project, selected, options) =>
+            writeKernelConfig(project, selected, { ...options, publish: false }),
+          restartRustKernel: async () => {
+            events.push('restart')
+            return { ok: false, code: 'license_required', error: 'Activate CRAG license' }
+          },
+          stopSlot: async () => {
+            events.push('stop')
+            return { ok: true, runtime: { stopped: true } }
+          },
+          startSlotReady: async () => assert.fail('KVM switch must not recreate the runner'),
         },
       }
       const response =
@@ -376,10 +390,17 @@ for (const placement of ['local', 'cluster']) {
               operations,
               '/dataplane',
             )
-      assert.equal(response.status, 403, JSON.stringify(response.body))
-      assert.match(response.body.error.code, /^license_/)
-      assert.deepEqual(fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`)), record)
-      assert.equal(fs.existsSync(path.join(root, 'vms', vm.id, 'run', 'kernel.json')), false)
+      assert.equal(response.status, 200, JSON.stringify(response.body))
+      const payload = entry === 'slot' ? response.body.data : response.body.data.items[0]
+      assert.equal(payload.deferred_start, true)
+      assert.equal(payload.deferred_reason, 'license_required')
+      const saved = getVm(root, vm.id)
+      assert.equal(saved.status, 'stopped')
+      assert.equal(saved.schedule_off, true)
+      assert.equal(saved.unschedulable, undefined)
+      assert.equal(entry === 'default' ? routing.inference.dataplane : saved.dataplane, 'crag')
+      assert.equal(fs.existsSync(path.join(root, 'vms', vm.id, 'run', 'kernel.json')), true)
+      assert.deepEqual(events, ['hold', 'restart', 'stop', 'reset', 'release'])
     })
   }
 }
@@ -747,6 +768,22 @@ test('the first request after CRAG cutover uses the new kernel capabilities, not
     if (previous == null) delete process.env.KIN_KERNEL_BIN
     else process.env.KIN_KERNEL_BIN = previous
   })
+  // A local hop first requires the slot to load its OAuth credential, so a slot
+  // that cannot never reaches the capability question this test is about. The
+  // fixture VM claims `has_access`, so give it the grant that claim implies.
+  const claudeDir = path.join(root, 'vms', vm.id, 'cli-home', '.claude')
+  fs.mkdirSync(claudeDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(claudeDir, 'credentials.json'),
+    JSON.stringify({
+      claudeAiOauth: {
+        accessToken: 'fixture-access',
+        refreshToken: 'fixture-refresh',
+        expiresAt: Date.now() + 3600000,
+        scopes: ['user:inference'],
+      },
+    }),
+  )
   const result = await dispatchCallInference({
     exec: {
       vmId: vm.id,
@@ -892,10 +929,9 @@ test('a failed cluster cutover exposes its error and retrying the saved target r
   assert.equal(unitCircuit.view(vm.id).state, 'closed')
 })
 
-test('async kernel switching preserves stopped intent and rejects unlicensed or non-admin admission', async (t) => {
+test('async kernel switching preserves stopped intent when unlicensed and rejects non-admin admission', async (t) => {
   const { root, vm } = fixture(t, { node_id: 'node-1', status: 'stopped', schedule_off: true })
   seedEncryptedPackage(root)
-  const record = fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`))
   const { call, finished } = await kernelSwitchApi(t, root, {
     kernelPolicyOps: {
       writeKernelConfig: (project, selected, options) =>
@@ -903,16 +939,14 @@ test('async kernel switching preserves stopped intent and rejects unlicensed or 
       startSlotReady: async () => assert.fail('a stopped slot must not be started by kernel selection'),
     },
   })
-  assert.equal((await call('POST', { dataplane: 'crag' })).status, 403)
-  assert.equal((await call()).body.data, null)
-  assert.deepEqual(fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`)), record)
   for (const role of ['super', 'user']) {
     assert.equal((await call('GET', undefined, role)).status, 403)
     assert.equal((await call('POST', { dataplane: 'wrap' }, role)).status, 403)
   }
-  activateCragLicense(root, vm, issueUniversalCode(root).code)
   assert.equal((await call('POST', { dataplane: 'crag' })).status, 202)
   assert.equal((await finished()).status, 'succeeded')
+  assert.equal(getVm(root, vm.id).dataplane, 'crag')
+  assert.equal(getVm(root, vm.id).crag_kernel_version, 'v2')
   assert.equal(getVm(root, vm.id).status, 'stopped')
   assert.equal(getVm(root, vm.id).schedule_off, true)
 })

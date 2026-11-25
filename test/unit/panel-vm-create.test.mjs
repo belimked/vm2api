@@ -22,7 +22,15 @@ function makeCreateHandler(project, body, proxyPool, accountQuota, extra = {}) {
     ...(accountQuota ? { accountQuota } : {}),
     ...(extra.routingConfig ? { routingConfig: extra.routingConfig } : {}),
     ...(extra.probeLocalKvm ? { probeLocalKvm: extra.probeLocalKvm } : {}),
+    ...(extra.panelUsers ? { panelUsers: extra.panelUsers } : {}),
     requireAuth(req) {
+      if (extra.role && extra.role !== 'admin') {
+        req.panelUser = 'tenant'
+        req.apiKeyKind = 'session'
+        req.panelRole = extra.role
+        req.panelUserId = 'u-1'
+        return true
+      }
       req.apiKeyKind = 'master'
       req.panelRole = 'admin'
       return true
@@ -404,7 +412,7 @@ test('both Anthropic choices install both packages with a cold standard wrapper'
     assert.equal(saved.crag_kernel_version, dataplane === 'crag' ? 'v2' : undefined)
     if (dataplane) {
       assert.equal(vm.schedulable, false)
-      assert.match(start_error, /激活本槽授权/)
+      assert.equal(start_error, undefined)
     } else assert.equal(start_error, undefined)
     const kin = path.join(root, 'vms', vm.id, 'cli-home', '.kin')
     assert.equal(fs.readFileSync(path.join(kin, 'kin-kernel.bin'), 'utf8'), 'fixture')
@@ -522,4 +530,30 @@ test('GET /vms/create-options is available to a tenant user', async () => {
   assert.equal(response.body.data.vm.memory, '4g')
   assert.equal(response.body.data.vm.default_runtime, 'kvm')
   assert.deepEqual(response.body.data.kvm, { ok: true, accel: 'tcg', error: null })
+})
+
+test('create enables the browser desktop only for an admin docker slot', async () => {
+  const cases = [
+    { role: 'admin', expect: true },
+    { role: 'user', expect: false },
+  ]
+  for (const { role, expect } of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-create-desktop-'))
+    try {
+      const { handlePanel, response } = makeCreateHandler(
+        root,
+        { runtime_type: 'docker', start: false, auto_allocate_proxy: false, desktop: true },
+        null,
+        null,
+        { role, panelUsers: { getById: () => ({ vm_create_quota: 5 }), getByUsername: () => null } },
+      )
+      await handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/create'))
+      assert.equal(response.status, 200, `${role}: ${JSON.stringify(response.body)}`)
+      const vm = response.body.data.vm
+      const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`), 'utf8'))
+      assert.equal(saved.desktop?.enabled === true, expect, `${role} desktop`)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  }
 })

@@ -2,7 +2,6 @@ import { useEffect, useState, type ReactNode } from 'react'
 import type { ApiEndpoint } from '@/types/panel-api-endpoints'
 import type { ApiKeyItem, VmPool } from '@/types/panel-keys'
 import type { Vm } from '@/types/panel-vm'
-import { isCodexVm } from '@/lib/vm-kind'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -21,6 +20,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import type { KeyGroupType, KeyLimitsDraft } from './key-payload'
+import { keyVmSelection, vmsInGroup } from './key-vm-selection'
 
 const CONC = [0, 1, 2, 4, 8, 16, 20, 32, 64]
 const QUOTA_CREATE = [0, 1000, 5000, 10000, 50000]
@@ -94,6 +94,8 @@ export function KeyLimitsDialog({
   pending,
   onSubmit,
   vms = [],
+  vmsReady = false,
+  vmsError = false,
   pools,
   channels,
   channelsLoading,
@@ -106,6 +108,8 @@ export function KeyLimitsDialog({
   pending: boolean
   onSubmit: (draft: KeyLimitsDraft) => void
   vms?: Vm[]
+  vmsReady?: boolean
+  vmsError?: boolean
   pools?: VmPool[]
   channels?: ApiEndpoint[]
   channelsLoading?: boolean
@@ -154,13 +158,16 @@ export function KeyLimitsDialog({
     !!draft.api_endpoint_id &&
     initial?.api_endpoint_id === draft.api_endpoint_id
   const listed = vmsInGroup(vms || [], draft.group_type)
+  const selection = keyVmSelection(draft, vms, vmsReady)
   const scopeBlocked = isApi
     ? !selectedChannel &&
       !unchangedChannel &&
       !(legacyApi && !draft.api_endpoint_id)
     : draft.group_type === 'pool'
       ? !draft.vm_pool_id
-      : draft.group_type !== 'all' && draft.allowed_vms.length === 0
+      : draft.group_type !== 'all' &&
+        draft.group_type !== 'gemini' &&
+        selection.blocked
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -202,7 +209,8 @@ export function KeyLimitsDialog({
                     category: v === 'api' ? 'api' : 'oauth',
                     api_endpoint_id: v === 'api' ? d.api_endpoint_id : '',
                     group_type:
-                      v === 'api' && d.group_type === 'pool'
+                      v === 'api' &&
+                      (d.group_type === 'pool' || d.group_type === 'gemini')
                         ? 'all'
                         : d.group_type,
                     allowed_vms: v === 'api' ? [] : d.allowed_vms,
@@ -311,7 +319,9 @@ export function KeyLimitsDialog({
               <p className='text-xs text-muted-foreground'>
                 {selectedChannel
                   ? selectedChannel.models?.length
-                    ? `已保存 ${selectedChannel.models.length} 个模型；此密钥只调用所选渠道。`
+                    ? selectedChannel.protocol === 'gemini'
+                      ? `已保存 ${selectedChannel.models.length} 个模型；默认走原生 Gemini（/v1beta 与 /v1），同时支持 OpenAI / Anthropic 多协议调用。`
+                      : `已保存 ${selectedChannel.models.length} 个模型；此密钥只调用所选渠道。`
                     : '此渠道尚未保存模型。请先到 API 页面获取模型。'
                   : channelsError
                     ? '无法加载 API 渠道。请重试。'
@@ -326,7 +336,7 @@ export function KeyLimitsDialog({
             </div>
           ) : null}
           {!isApi || (legacyApi && !draft.api_endpoint_id) ? (
-            <Field label={isApi ? 'API 协议' : '分组'}>
+            <Field label={isApi ? 'API 协议' : '平台 / 分组'}>
               <Select
                 value={draft.group_type}
                 onValueChange={(v) => {
@@ -338,7 +348,10 @@ export function KeyLimitsDialog({
                     ...d,
                     group_type: group,
                     allowed_vms:
-                      isApi || group === 'all' || group === 'pool'
+                      isApi ||
+                      group === 'all' ||
+                      group === 'pool' ||
+                      group === 'gemini'
                         ? []
                         : d.allowed_vms.filter((id) => keep.has(id)),
                     ...(pools
@@ -368,6 +381,9 @@ export function KeyLimitsDialog({
                   <SelectItem value='openai'>
                     {isApi ? 'openai · OpenAI 协议' : 'openai'}
                   </SelectItem>
+                  {!isApi && pools ? (
+                    <SelectItem value='gemini'>Gemini · CRAGAnti</SelectItem>
+                  ) : null}
                 </SelectContent>
               </Select>
             </Field>
@@ -394,6 +410,12 @@ export function KeyLimitsDialog({
                   </SelectContent>
                 </Select>
               </Field>
+            ) : draft.group_type === 'gemini' ? (
+              <p className='text-xs text-muted-foreground sm:col-span-2'>
+                仅用于 Gemini 宿主机账号，不使用 VM 或直连渠道。默认支持原生
+                Gemini（/v1beta 与 /v1），同时兼容 OpenAI Chat / Responses 与
+                Anthropic Messages 协议。
+              </p>
             ) : draft.group_type === 'all' ? (
               <p className='text-xs text-muted-foreground sm:col-span-2'>
                 all 是最高权限，不再选择 VM。
@@ -401,6 +423,18 @@ export function KeyLimitsDialog({
             ) : (
               <div className='sm:col-span-2'>
                 <Field label='可用 VM'>
+                  {!vmsReady ? (
+                    <p role='status' className='text-xs text-muted-foreground'>
+                      {vmsError
+                        ? '无法加载可用 VM，请刷新后重试。保存已暂停。'
+                        : '正在核对可用 VM…'}
+                    </p>
+                  ) : selection.removed.length > 0 ? (
+                    <p role='status' className='text-xs text-muted-foreground'>
+                      已排除当前不可用的旧选择：{selection.removed.join(', ')}。
+                      请确认可用 VM 后保存。
+                    </p>
+                  ) : null}
                   <div className='max-h-40 space-y-1 overflow-y-auto rounded-md border p-2'>
                     {listed.length === 0 ? (
                       <p className='text-xs text-muted-foreground'>
@@ -415,7 +449,10 @@ export function KeyLimitsDialog({
                           <input
                             type='checkbox'
                             className='size-3.5'
-                            checked={draft.allowed_vms.includes(vm.id)}
+                            checked={selection.draft.allowed_vms.includes(
+                              vm.id
+                            )}
+                            disabled={!vmsReady}
                             onChange={(e) => {
                               const on = e.target.checked
                               setDraft((d) => ({
@@ -464,7 +501,9 @@ export function KeyLimitsDialog({
             取消
           </Button>
           <Button
-            onClick={() => onSubmit(draft)}
+            onClick={() => {
+              if (!scopeBlocked) onSubmit(selection.draft)
+            }}
             disabled={
               pending ||
               (mode === 'create' && !draft.name.trim()) ||
@@ -497,12 +536,7 @@ function blankDraft(): KeyLimitsDraft {
 }
 
 function groupOf(value: string | undefined): KeyGroupType {
-  if (value === 'anthropic' || value === 'openai') return value
+  if (value === 'anthropic' || value === 'openai' || value === 'gemini')
+    return value
   return 'all'
-}
-
-function vmsInGroup(vms: Vm[], group: KeyGroupType): Vm[] {
-  if (group === 'openai') return vms.filter((vm) => isCodexVm(vm))
-  if (group === 'anthropic') return vms.filter((vm) => !isCodexVm(vm))
-  return []
 }

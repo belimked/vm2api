@@ -29,9 +29,9 @@
 <details>
 <summary>点击展开赞助商说明 · Click to expand</summary>
 
-<a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=vm2api&utm_medium=affiliate&utm_campaign=vm2api_sponsor_202610&utm_content=github_readme"><img src="docs/images/sponsor-proxylane.png" alt="ProxyLane（赞助商）" width="100%" /></a>
+<a href="https://proxylane.dev/go/vm2api-gh"><img src="docs/images/sponsor-proxylane.png" alt="ProxyLane（赞助商）" width="100%" /></a>
 
-**赞助商（ProxyLane）**：AI 账号专用的原生静态住宅 IP，Scamalytics 低欺诈评分，每个 IP 独享，不限流量，$3.90 起。一个槽位绑一个 IP：把 SOCKS5 `host:port:user:pass` 粘贴到「代理池」→「添加代理」即可。首次购买优惠码 `VM2API30` 享 7 折。详见 [ProxyLane](https://proxylane.dev/zh-cn/isp-proxies?utm_source=vm2api&utm_medium=affiliate&utm_campaign=vm2api_sponsor_202610&utm_content=github_readme)。
+**赞助商（ProxyLane）**：Claude Max 专用的原生静态住宅 IP：从未用于注册 Claude 账号，严格筛选 IP 与网段，Scamalytics 低欺诈评分，一个号一个独享 IP，不限流量，$7.90 起。一个槽位绑一个 IP：把 SOCKS5 `host:port:user:pass` 粘贴到「代理池」→「添加代理」即可。首次购买优惠码 `VM2API30` 享 7 折（有效期到 12 月 31 日）。详见 [ProxyLane](https://proxylane.dev/go/vm2api-gh)。
 
 </details>
 
@@ -110,7 +110,7 @@
 
 ### 3️⃣ 封控拦截与风险审计
 
-推理出站前检查设备／会话封禁、禁用工具、系统提示词改写、蒸馏、硬正则和拒答缓存。通过硬规则后，Jev 只审核用户会话和可解析的内联文件文本，并在常规放行、指定账号池／渠道、指定模型和拒绝之间选择。没有身份字段的第三方请求不因此被封禁。
+推理出站前检查设备／会话封禁、禁用工具、系统提示词改写（可关闭）、蒸馏、硬正则和拒答缓存。通过硬规则后，Jev 只审核用户会话和可解析的内联文件文本，并在常规放行、指定账号池／渠道、指定模型和拒绝之间选择。没有身份字段的第三方请求不因此被封禁。
 
 「风险审计」（`/console/#/risk`）展示封禁原因和原请求、上游 HTTP 400，以及实际降级出站次数。默认设备封禁阶梯为 10 分钟、24 小时、永久；违规会话持续封锁。普通上游 400 不计违规。
 
@@ -123,6 +123,7 @@
 
 ### 5️⃣ 前置协议清洗与多协议统一结构化
 - **入站多协议通吃**：客户端可以使用 Anthropic 原生协议（`/v1/messages`）、OpenAI 标准格式（`/v1/chat/completions`）或新版 `/v1/responses` 格式发起请求。
+- **Codex 调用 Claude**：在 `/v1/responses` 指定允许的 Claude 模型。控制面先把指令、消息和工具调用/结果转为结构化 Messages，再交给选中的 Claude 内核。HTTP 续接需重发完整 `input` 历史；WebSocket 可引用同连接的 `previous_response_id`。无法转换的字段或不完整的工具历史在本地报错，上游计费拒绝仍按实际结果返回。
 - **深度清洗与官方对齐**：控制面在毫秒级内完成协议清洗与规范化，纠正非法角色、清理脏工具参数、补齐结构化要求，最终向 VM 内部官方进程交付符合官方客户端完全规范的纯净载荷。
 
 ---
@@ -409,6 +410,8 @@ VM 页「总计」按当前账号累计本平台已记录的官方价费用和 t
 
 ## 开发验证与 CI
 
+**提 PR 前先确认目标分支（base）是 `dev`。** 功能与修复 PR 一律指向 `dev`，分支从 `origin/dev` 切出；`main` 只接受 `dev → main` 的发版 PR 或 `hotfix/<slug>`，tag 只打在 `main` 上。base 选错不用重开 PR，在 PR 页面标题下方的 base 下拉框改成 `dev` 即可。分支、工作树与发版流程见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+
 CI 配置以 [`.github/workflows/test.yml`](.github/workflows/test.yml) 为准，使用 Node.js 22、pnpm 10 和 Go 1.25。日常验证优先运行本次改动涉及的核心测试或指定测试文件，完整回归按需运行。
 
 先按需安装依赖：后端 `npm ci`，前端 `pnpm -C web install --frozen-lockfile`。以下命令均在仓库根目录执行：
@@ -436,7 +439,7 @@ CI 配置以 [`.github/workflows/test.yml`](.github/workflows/test.yml) 为准�
 
 原有 `npm test` / `npm run test:all` 仍执行后端全量单测和 `worker` race 测试，不包含前端、`api-kernel`、`redact` 或 E2E。CI 绿灯只表示该次实际执行的检查通过；日常 CI 不代表全量、ARM 或生产验证已经完成。
 
-Daily CI runs core tests plus added or modified test files for affected components. Full regression and formatting checks are available with `full=true`; native ARM packaging is enabled separately with `arm64=true`.
+Open pull requests against `dev`, branched from `origin/dev`; `main` only takes release PRs from `dev` or `hotfix/<slug>`. If you opened one against `main`, switch the base with the dropdown — no need to reopen. Daily CI runs core tests plus added or modified test files for affected components. Full regression and formatting checks are available with `full=true`; native ARM packaging is enabled separately with `arm64=true`.
 
 ---
 

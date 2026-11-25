@@ -25,11 +25,20 @@ for (const dataplane of ['wrap', 'crag']) {
   test(`fresh ${dataplane} VM has private, VM-owned first-launch settings`, (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fresh-settings-'))
     t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-    const vm = { id: 'vm-13', node_id: 'node-a', dataplane, timezone: 'Asia/Shanghai' }
+    const vm = {
+      id: 'vm-13',
+      node_id: 'node-a',
+      dataplane,
+      timezone: 'Asia/Shanghai',
+      seed_policy: { telemetry_disabled: false, extra_env: { CLAUDE_CODE_DISABLE_TELEMETRY: '0', CUSTOM: 'kept' } },
+    }
     const { homeDir } = seedFreshCliHome(root, vm)
     const file = path.join(homeDir, '.claude', 'settings.json')
     const settings = JSON.parse(fs.readFileSync(file, 'utf8'))
     assert.equal(settings.env.TZ, 'Asia/Shanghai')
+    assert.equal(settings.env.CUSTOM, 'kept')
+    assert.equal(settings.env.CLAUDE_CODE_DISABLE_TELEMETRY, undefined)
+    assert.equal(settings.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, undefined)
     assert.equal(settings.autoUpdates, false)
     assert.equal(fs.statSync(file).mode & 0o777, 0o600)
     for (const dir of [homeDir, path.dirname(file)]) {
@@ -121,7 +130,7 @@ test('writeSlotSeedFiles writes latest settings and workstation kin-seed', () =>
   const claudeSetting = fs.readFileSync(path.join(leftover, 'claude.setting'), 'utf8')
   const seed = JSON.parse(fs.readFileSync(path.join(leftover, 'kin-seed.json'), 'utf8'))
   assert.equal(settings.env.DISABLE_TELEMETRY, undefined)
-  assert.equal(settings.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1')
+  assert.equal(settings.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, undefined)
   assert.equal(settings.env.ANTHROPIC_BASE_URL, undefined)
   assert.equal(settings.env.ANTHROPIC_API_KEY, undefined)
   assert.equal(settings.env.KEEP, '1')
@@ -246,6 +255,26 @@ test('malformed existing settings fail instead of silently overwriting VM settin
     assert.throws(() => writeSlotSeedFiles(root, { id: 'vm-13' }))
     assert.equal(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'), '{broken')
     assert.equal(fs.existsSync(path.join(dir, 'kin-seed.json')), false)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('writeSlotSeedFiles writes CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 only when global switch enables it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-seed-nonessential-'))
+  try {
+    const vm = { id: 'vm-14', seed_policy: { telemetry_disabled: false } }
+    const suppressed = writeSlotSeedFiles(root, vm, null, {
+      cragNativeTelemetry: true,
+      routing: { telemetry: { disable_nonessential_traffic: true } },
+    })
+    assert.equal(suppressed.settings.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1')
+
+    const restored = writeSlotSeedFiles(root, vm, null, {
+      cragNativeTelemetry: true,
+      routing: { telemetry: { disable_nonessential_traffic: false } },
+    })
+    assert.equal(restored.settings.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, undefined)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

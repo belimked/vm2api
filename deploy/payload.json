@@ -1,19 +1,44 @@
 {
   "repo": "dofastted/vm2api",
-  "release": "payload-2026.11.17-kernel-1091-968-crag-3.1.4",
-  "crag_release": "payload-2026.11.17-crag-3.1.4",
+  "release": "payload-2026.11.22-oauth-short-lived",
+  "crag_release": "payload-2026.11.23-crag-3.1.14",
   "crag_authorization": {
     "family": "crag",
     "product": "crag-v2",
     "issuer_public_key_id": "9dbb4bc2109f1637e64174d80d659168910843b34dbe4870f70a14af49ccb902",
     "payload_key_id": "835451e266145220a2e75b1f39ff22a0d7b17be48395553a24666b1946e0333a"
   },
+  "geminiDefaultLinuxAmd64": {
+    "tag": "payload-2026.11.23-gemini-0.4.3",
+    "assets": {
+      "craggemini": {
+        "size": 1196680,
+        "sha256": "387a06eada19b80d00af621d8f6bf8f04babe986f666bf9b637872c24a4f306d"
+      },
+      "craggemini.payload.enc": {
+        "size": 6164340,
+        "sha256": "962a17b7535b05cf51fbc689244c71b05e7a324221b9d75b84ece6b97e4c744e"
+      },
+      "libagy_bridge.so": {
+        "size": 966384,
+        "sha256": "fe4c558b0c44b1f1a78bf10b1a779001713d3821848222f9d19c7e1a9f8dbcc4"
+      },
+      "crag-license-public.pem": {
+        "size": 113,
+        "sha256": "f6e3ef3a50fd49abd4ce3519db512af74fc438b47b1bbec83f6602ebe4b3930a"
+      },
+      "manifest.json": {
+        "size": 1887,
+        "sha256": "2db4a7cc1c9771c294b013306031ee4196cbafb7633ddf43f4aea4006a3e75bf"
+      }
+    }
+  },
   "files": [
     {
       "path": "bin/kin-kernel",
       "asset": "kin-kernel",
-      "size": 13312992,
-      "sha256": "9284c8197d4aa665b92506c028b5621f8f429e1c855aca70bb6aa4a13ab5875e"
+      "size": 13193840,
+      "sha256": "25cd83e35466d914d109c627d10a6e6e88bb4e8df1e3f9288dc0dcc18ae108ca"
     },
     {
       "path": "bin/kin-codex-kernel",
@@ -24,8 +49,8 @@
     {
       "path": "bin/kin-oauth-auth",
       "asset": "kin-oauth-auth",
-      "size": 47385574,
-      "sha256": "04c926c7a3e56c22421c9281efe61af126d0acd4114d05ee0334e59f08d85f65"
+      "size": 47421622,
+      "sha256": "66abd58482bb90221dfc0776640cf9c519df6b8af0e0ffc3df25d301c7be85b3"
     },
     {
       "path": "bin/kin-computer",
@@ -36,14 +61,14 @@
     {
       "path": "bin/kin-worker",
       "asset": "kin-worker",
-      "size": 11540584,
-      "sha256": "941a2ce603854a96e7d97ce0fb86a786c3581ff874b36492025f538dd4cb32ce"
+      "size": 11567288,
+      "sha256": "402716ec3a168a2f80dbb1b38fe37733546dafa37f9d482a5c5618eb22975300"
     },
     {
       "path": "bin/kin-egress",
       "asset": "kin-egress",
-      "size": 6199128,
-      "sha256": "528ca2a4044a13ed9f032f23efe41717c90fbed61ebfab39a05138331e080002"
+      "size": 6254776,
+      "sha256": "7dcae417108551390a0fdaea0ef7fd8cfd82b055636c8b287546165bc930049a"
     },
     {
       "path": "bin/kin-slot-gate",
@@ -54,14 +79,14 @@
     {
       "path": "share/wrap-cli/cli-node",
       "asset": "cli-node",
-      "size": 27934744,
-      "sha256": "62a184ee1d42f8923cd39b398fdaf7bea5faca25c3244038061a3378b0c8c766"
+      "size": 31005108,
+      "sha256": "f6c3744dda01f756049360113607d2bd9a25911de0fdaf30fe9bb1a1918a6788"
     },
     {
       "path": "share/wrap-cli/kin-kernel.bin",
       "asset": "kin-kernel",
-      "size": 13312992,
-      "sha256": "9284c8197d4aa665b92506c028b5621f8f429e1c855aca70bb6aa4a13ab5875e"
+      "size": 13193840,
+      "sha256": "25cd83e35466d914d109c627d10a6e6e88bb4e8df1e3f9288dc0dcc18ae108ca"
     },
     {
       "path": "share/wrap-cli/glibc239/ld-linux-x86-64.so.2",
@@ -119,15 +144,15 @@
     },
     {
       "path": "share/crag/kernels/v2/amd64/crag-v2",
-      "asset": "crag-v2-amd64-v3.1.4-crag-v2",
+      "asset": "crag-v2-amd64-v3.1.14-crag-v2",
       "size": 894472,
-      "sha256": "bf987f220835e0f30f95e2bd9f04a9ee37314c1ccdc867b3473855823d199a52"
+      "sha256": "b4dcec728afa2877613c6d36e4e118387c225e24758b01f00e0acbc846953dc6"
     },
     {
       "path": "share/crag/kernels/v2/amd64/crag-v2.payload.enc",
-      "asset": "crag-v2-amd64-v3.1.4-crag-v2.payload.enc",
-      "size": 12998692,
-      "sha256": "9d427d9b126f61c054f2361381a5d75932b31e9779db5ee28d3525c9e192d6bb"
+      "asset": "crag-v2-amd64-v3.1.14-crag-v2.payload.enc",
+      "size": 13259868,
+      "sha256": "facce40a6f4093ac011eb08a03c3cba970784340315bac1039e41845e02c53e8"
     },
     {
       "path": "share/crag/kernels/v2/amd64/kernel.json.example",
@@ -137,21 +162,21 @@
     },
     {
       "path": "share/crag/kernels/v2/amd64/manifest.json",
-      "asset": "crag-v2-amd64-v3.1.4-manifest.json",
-      "size": 2720,
-      "sha256": "67224bbec4d1db42b7c446b22a674702d41d2ed0aaf61f26ab60764a5085a235"
+      "asset": "crag-v2-amd64-v3.1.14-manifest.json",
+      "size": 2721,
+      "sha256": "a7a053d0b2eb54472000cba576b7364042b838a9c75f65605d5529b8634afe1b"
     },
     {
       "path": "share/crag/kernels/v2/amd64/unpack-note.md",
       "asset": "crag-v2-amd64-unpack-note.md",
-      "size": 15874,
-      "sha256": "1f5cce1c9491f03ceeeffcafa80db4bcbff8f5042fa86ef344c97bcf3b62062d"
+      "size": 15748,
+      "sha256": "ee7ca2fce548bc4b35ad4236c9a36d76d38e55315cb5175faec454952582e731"
     },
     {
       "path": "dist/crag-v2-licensed-amd64.tar.gz",
       "asset": "crag-v2-licensed-amd64.tar.gz",
-      "size": 170833337,
-      "sha256": "295e40ba1b1830c0e8b58540d96633b1aa6f2c52f6a437c09e6c976d9f21238c"
+      "size": 171094224,
+      "sha256": "d0b52089efd324fe23f6189b6863a763b6b1ac4f47250561819cdbc4ad6189c8"
     }
   ]
 }

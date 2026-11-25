@@ -63,6 +63,18 @@ export function RefusalSettings({
         >
           <ToggleList>
             <ToggleItem
+              label='封锁拒答会话'
+              desc='上游拒答一次，这个会话（含子 agent）永久不再转发，也不换号重试；不受下面总开关影响'
+            >
+              <Switch
+                checked={data.session_block_enabled !== false}
+                disabled={save.isPending}
+                onCheckedChange={(session_block_enabled) =>
+                  save.mutate({ session_block_enabled })
+                }
+              />
+            </ToggleItem>
+            <ToggleItem
               label='拦截重复拒答'
               desc='REFUSAL_GUARD=0 时不使用拒答缓存'
             >
@@ -83,7 +95,7 @@ export function RefusalSettings({
             </ToggleItem>
             <ToggleItem
               label='启用分级封禁'
-              desc='设备／机器按违规次数升级；违规会话永久阻止。系统提示词改写不受此开关放行。'
+              desc='设备／机器按违规次数升级；违规会话永久阻止。'
             >
               <Switch
                 checked={data.device_block_enabled !== false}

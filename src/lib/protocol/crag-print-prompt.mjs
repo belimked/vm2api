@@ -8,6 +8,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { normalizeCragKernelVersion, normalizeKernelDataplane, normalizeSlotPersonaPreset } from '../vm/slot-engine.mjs'
+import { materializeAutomaticCache } from './cache-ttl.mjs'
+import { normalizeImageContentBlocks } from './images.mjs'
+import { needsCragProviderCompatibility } from './kernel-request.mjs'
 /**
  * Print is the CRAG v2 worker only. A live health report wins, then an
  * explicit dataplane on the VM, then the kernel.json that worker was started
@@ -213,6 +216,17 @@ export function cragPromptTooLarge(bytes) {
   return error
 }
 
+// Unwrapped result items become top-level user blocks. CRAG takes text, image
+// and document there; a ToolSearch tool_reference (or any other result-only
+// block) is rejected as "unsupported native history block", so it goes to text.
+const READ_ONLY_RESULT_TYPES = new Set(['text', 'image', 'document'])
+
+function readOnlyResultBlock(item) {
+  if (READ_ONLY_RESULT_TYPES.has(item?.type)) return item
+  if (item?.type === 'tool_reference') return { type: 'text', text: `[tool_reference ${item.tool_name}]` }
+  return { type: 'text', text: JSON.stringify(item) }
+}
+
 function readOnlySummaryResults(messages) {
   if (!Array.isArray(messages)) return messages
   const index = messages.findLastIndex((message) => message?.role === 'user')
@@ -226,7 +240,7 @@ function readOnlySummaryResults(messages) {
     const label = { type: 'text', text: `[tool result ${block.tool_use_id}${block.is_error ? ' (error)' : ''}]` }
     if (block.cache_control) label.cache_control = block.cache_control
     const result = typeof block.content === 'string' ? [{ type: 'text', text: block.content }] : block.content || []
-    return [label, ...result]
+    return [label, ...result.map(readOnlyResultBlock)]
   })
   const out = messages.slice()
   out[index] = { ...message, content }
@@ -422,8 +436,22 @@ export function prepareCragPrintBody(
     foldSystemMessages = true,
   } = {},
 ) {
-  const out = { ...(body || {}) }
+  // The CRAG kernel reads block markers only and 400s on a top-level
+  // cache_control. Convert it here, before any early return, so every path out
+  // of this function hands the kernel the standard shape.
+  const out = materializeAutomaticCache({ ...(body || {}) })
+  const nativeV3 = Array.isArray(capabilities) && capabilities.includes('generation_controls_v3')
+  if (nativeV3 && Array.isArray(out.messages)) {
+    out.messages = out.messages.map((message) => {
+      const content = normalizeImageContentBlocks(message?.content, { inlineOnly: true })
+      return content === message?.content ? message : { ...message, content }
+    })
+  }
   if (agentSummary) out.messages = readOnlySummaryResults(out.messages)
+  if (needsCragProviderCompatibility(out, capabilities)) {
+    stripCallerPromptAlias(out)
+    return out
+  }
   if (foldSystemMessages) {
     const folded = agentSummary ? foldSummarySystemTurns(out.messages) : foldSystemTurns(out.messages)
     out.messages = folded.messages
@@ -438,7 +466,6 @@ export function prepareCragPrintBody(
   stripCallerPromptAlias(out)
   if (capabilities !== undefined && (!Array.isArray(capabilities) || !capabilities.includes(`prompt_${mode}`)))
     return out
-  const nativeV3 = Array.isArray(capabilities) && capabilities.includes('generation_controls_v3')
   const textCache = nativeV3 && capabilities.includes('system_text_cache_v3')
   if (
     nativeV3 &&
@@ -471,6 +498,10 @@ export function prepareCragPrintBody(
   }
   const tail = officialPassthrough ? '' : callerSystemTail(body?.system)
   if (!tail) return out
+  if (textCache && mode === 'append') {
+    out.system = body.system
+    return out
+  }
   if (!nativeV3 && mode === 'replace' && Buffer.byteLength(tail, 'utf8') > CRAG_PRINT_PROMPT_MAX_BYTES) {
     throw cragPromptTooLarge(Buffer.byteLength(tail, 'utf8'))
   }

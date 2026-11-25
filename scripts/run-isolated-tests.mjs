@@ -8,6 +8,14 @@
  * and a runaway allocation can exhaust host memory within minutes.
  *   VM2API_TEST_FILE_TIMEOUT_MS  default 300000
  *   VM2API_TEST_FILE_MAX_RSS_MB  default 4096 (Linux only; 0 disables)
+ *   VM2API_TEST_CONCURRENCY      default 1 (serial, as before)
+ *
+ * Concurrency stays opt-in: the whole unit suite is 412 files and over a quarter
+ * of an hour serially, which does not fit a CI job, but raising it everywhere
+ * would change how every existing caller behaves. Above 1 each file's output is
+ * buffered and printed when that file exits, so a run stays readable instead of
+ * interleaving twelve reporters. The per-file memory budget is per process group
+ * and unchanged, so N workers can hold N times that -- size it accordingly.
  */
 import { spawn } from 'node:child_process'
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
@@ -43,6 +51,7 @@ console.log(`Running ${files.length}/${available.length} isolated test files`)
 
 const timeoutMs = positiveInt(process.env.VM2API_TEST_FILE_TIMEOUT_MS, 300_000)
 const maxRssMb = positiveInt(process.env.VM2API_TEST_FILE_MAX_RSS_MB, 4096)
+const concurrency = Math.max(1, positiveInt(process.env.VM2API_TEST_CONCURRENCY, 1))
 const pollMs = 500
 
 function positiveInt(raw, fallback) {
@@ -71,7 +80,7 @@ function groupRssMb(pgid) {
   return kb / 1024
 }
 
-let current = null
+const inFlight = new Set()
 function killGroup(child) {
   try {
     process.kill(-child.pid, 'SIGKILL')
@@ -79,7 +88,7 @@ function killGroup(child) {
 }
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
-    if (current) killGroup(current)
+    for (const child of inFlight) killGroup(child)
     process.exit(130)
   })
 }
@@ -87,14 +96,22 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 function runFile(file) {
   return new Promise((resolve) => {
     const started = Date.now()
+    // Serial runs keep streaming straight through, so an interrupted run still
+    // shows how far the current file got. Concurrent ones cannot.
+    const buffered = concurrency > 1
     // cus: tests mkdtemp under os.tmpdir() without cleanup; scope each file's TMPDIR and drop it afterwards.
     const tmp = mkdtempSync(path.join(os.tmpdir(), 'vm2api-test-'))
     const child = spawn(process.execPath, ['--test', file], {
-      stdio: 'inherit',
+      stdio: buffered ? ['ignore', 'pipe', 'pipe'] : 'inherit',
       env: { ...process.env, TMPDIR: tmp },
       detached: true,
     })
-    current = child
+    inFlight.add(child)
+    const chunks = []
+    if (buffered) {
+      child.stdout.on('data', (chunk) => chunks.push(chunk))
+      child.stderr.on('data', (chunk) => chunks.push(chunk))
+    }
     let reason = null
     const stop = (why) => {
       if (reason) return
@@ -106,10 +123,11 @@ function runFile(file) {
       const rss = maxRssMb ? groupRssMb(child.pid) : null
       if (rss !== null && rss > maxRssMb) stop(`resident memory ${Math.round(rss)}MB exceeded ${maxRssMb}MB`)
     }, pollMs)
-    child.on('exit', (code) => {
+    child.on('close', (code) => {
       clearInterval(timer)
       rmSync(tmp, { recursive: true, force: true })
-      current = null
+      inFlight.delete(child)
+      if (buffered) process.stdout.write(Buffer.concat(chunks))
       if (reason) console.error(`\n✖ ${file} killed: ${reason}`)
       resolve(!reason && code === 0)
     })
@@ -117,9 +135,15 @@ function runFile(file) {
 }
 
 const failures = []
-for (const file of files) {
-  if (!(await runFile(file))) failures.push(file)
-}
+const queue = [...files]
+await Promise.all(
+  Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+    for (let file = queue.shift(); file !== undefined; file = queue.shift()) {
+      if (!(await runFile(file))) failures.push(file)
+    }
+  }),
+)
+failures.sort()
 
 if (failures.length) {
   // Every file above prints its own output, so the per-file stdio is far more than

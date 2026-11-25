@@ -29,6 +29,7 @@ import {
   restrictionCopy,
   seatTitle,
   vmRunning,
+  vmRequestingCount,
 } from '@/lib/vm-status'
 import { fmtHitPct, vmTodayStats, vmWeekOutcome } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
@@ -104,7 +105,7 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
   const tier = claudeTier(vm)
   const blocked = refreshBlockedReason(vm)
   const restricted = restrictionTitle(vm)
-  const inflight = Number(vm.inflight) || 0
+  const requesting = vmRequestingCount(vm)
   const queued = Number(vm.queue_depth) || 0
   return (
     <>
@@ -118,7 +119,7 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
         ) : null}
         <span className='text-xs text-muted-foreground'>
           {vmRunning(vm) ? '运行' : '停止'}
-          {inflight > 0 ? ` · 在飞 ${inflight}` : ''}
+          {requesting > 0 ? ` · 请求中 ${requesting}` : ''}
         </span>
         {vm.seats_max != null ? (
           <span
@@ -147,7 +148,7 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
       <VmMemoryBlock vm={vm} />
 
       <div className='grid gap-2 sm:grid-cols-2'>
-        <Section title='今日'>
+        <Section title='今日 · 北京时间'>
           <div className='flex items-baseline justify-between'>
             <span className='text-lg leading-tight font-semibold tabular-nums'>
               {fmtUsd(today.today, 2)}
@@ -162,7 +163,7 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
             {fmtHitPct(today.hit)}
           </div>
         </Section>
-        <Section title='7D 请求'>
+        <Section title='7 天窗口请求'>
           <div className='flex items-baseline justify-between'>
             <span className='text-lg leading-tight font-semibold tabular-nums'>
               {fmtNum(week.known ? week.success + week.fail : week.req)}
@@ -178,7 +179,7 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
             </span>
           </div>
           <div className='mt-1 text-[11px] text-muted-foreground'>
-            7D 窗口 · 成功 / 失败
+            7 天窗口 · 成功 / 失败
           </div>
         </Section>
       </div>

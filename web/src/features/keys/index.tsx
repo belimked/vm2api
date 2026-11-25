@@ -274,6 +274,8 @@ export function KeysPage() {
         onOpenChange={setCreateOpen}
         pending={create.isPending}
         vms={vmItems}
+        vmsReady={vms.isSuccess && !vms.isFetching}
+        vmsError={vms.isError}
         pools={isAdmin ? pools.data?.pools || [] : undefined}
         channels={isAdmin ? channels.data?.items || [] : undefined}
         channelsLoading={channels.isPending}
@@ -288,6 +290,8 @@ export function KeysPage() {
         }}
         initial={editing}
         vms={vmItems}
+        vmsReady={vms.isSuccess && !vms.isFetching}
+        vmsError={vms.isError}
         pools={isAdmin ? pools.data?.pools || [] : undefined}
         channels={isAdmin ? channels.data?.items || [] : undefined}
         channelsLoading={channels.isPending}
@@ -474,6 +478,7 @@ function KeyRow({
 }
 
 function scopeText(item: ApiKeyItem): string {
+  if (item.group_type === 'gemini') return 'Gemini · CRAGAnti'
   if (item.vm_pool_id) return `账号池 · ${item.vm_pool_name || item.vm_pool_id}`
   if (item.group_type === 'anthropic')
     return `Anthropic · ${item.allowed_vms?.length || 0} 台`

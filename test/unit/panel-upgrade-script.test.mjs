@@ -124,6 +124,11 @@ async function runUpgrade({ source = true, arch = 'amd64', override, env = {} } 
             BOOT_VERSION: bootVersion,
             PORT: String(server.address().port),
             VM2API_API_KEY: 'test-key',
+            // The probe paces itself to `KIN_RATE_REFILL` requests per second,
+            // one by default. The fake-bin `sleep` shim only removes the retry
+            // loop's own wait, so a verification that exhausts all 45 attempts
+            // spent ~52s inside that pacing alone and blew the timeout below.
+            KIN_RATE_REFILL: '1000',
             ...env,
           },
           timeout: 20000,
@@ -229,7 +234,10 @@ test('image upgrade pulls the pinned ARM64 release and records VERSION only afte
   assert.equal(result.version, '1.2.7\n')
   assert.equal(result.cragOverlays.length, 1)
   const [overlay] = result.cragOverlays
-  assert.match(overlay.content, /source: \/etc\/machine-id\n\s+target: \/run\/crag-host-machine-id\n\s+read_only: true/)
+  assert.match(
+    overlay.content,
+    /source: "\$\{VM2API_CRAG_HOST_ID_FILE:-\/etc\/machine-id\}"\n\s+target: \/run\/crag-host-machine-id\n\s+read_only: true/,
+  )
   assert.match(overlay.content, /create_host_path: false/)
   const up = result.calls.find((args) => args.includes('up'))
   assert.deepEqual(up.at(-1).split(':'), [

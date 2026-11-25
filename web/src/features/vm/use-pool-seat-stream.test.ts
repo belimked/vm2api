@@ -5,9 +5,20 @@ import {
   mergeProxyVm,
   mergeSeatSnapshot,
   parseSseFrames,
+  isLiveSeatQueryKey,
 } from './use-pool-seat-stream'
 
 describe('seat stream frames', () => {
+  it('recognizes the caches the seat stream writes', () => {
+    expect(isLiveSeatQueryKey(['panel', 'vms'])).toBe(true)
+    expect(isLiveSeatQueryKey(['panel', 'dashboard'])).toBe(true)
+    expect(isLiveSeatQueryKey(['panel', 'dashboard', 'extra'])).toBe(true)
+    expect(isLiveSeatQueryKey(['panel', 'vm', 'vm-1'])).toBe(true)
+    expect(isLiveSeatQueryKey(['panel', 'vm', 'vm-1', 'seed'])).toBe(false)
+    expect(isLiveSeatQueryKey(['panel', 'vms', 'create-options'])).toBe(false)
+    expect(isLiveSeatQueryKey(['panel', 'usage'])).toBe(false)
+  })
+
   it('keeps a frame split across chunks until its blank line arrives', () => {
     const first = parseSseFrames('event: seats\ndata: {"seats":')
     expect(first.frames).toEqual([])
@@ -103,6 +114,33 @@ describe('seat snapshot merge', () => {
     }
     const [next] = mergeSeatSnapshot([seated], snap({ 'vm-1': live }))
     expect(next).toBe(seated)
+  })
+
+  it('updates the root even when only its child counts or limit change', () => {
+    const session = {
+      index: 0,
+      session_id: 'root',
+      state: 'active',
+      inflight: 1,
+      subagents_running: 1,
+      subagents_queued: 0,
+      subagents_max: 1,
+    }
+    const vm = { ...claude, seat_sessions: [session] }
+    for (const field of [
+      'subagents_running',
+      'subagents_queued',
+      'subagents_max',
+    ] as const) {
+      const updated = { ...session, [field]: 2 }
+      const [next] = mergeSeatSnapshot(
+        [vm],
+        snap({
+          'vm-1': { ...claude, sessions: [updated] },
+        } as PoolSeatSnapshot['seats'])
+      )
+      expect(next.seat_sessions).toEqual([updated])
+    }
   })
 })
 

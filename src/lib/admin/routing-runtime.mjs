@@ -24,6 +24,7 @@ import { slotExec } from '../vm/slot-runtime.mjs'
 import { maxRequestBytes, streamIdleTimeoutMs } from '../core/config.mjs'
 
 import { accountTierKey, mergeTierMaps, normalizeTiers } from '../pool/quota-tiers.mjs'
+import { mergeBatchGroupConfig } from '../pool/batch-group.mjs'
 import { vmQuotaOverrideOf } from '../pool/vm-quota-override.mjs'
 import { PoolScheduler, normalizePoolRouting } from '../pool/pool-scheduler.mjs'
 import { FailoverRunner } from '../pool/failover-runner.mjs'
@@ -34,7 +35,7 @@ import { RequestAttemptsRepo } from '../db/repos/request-attempts-repo.mjs'
 import { normalizeOfficialCcConfig } from '../oauth/official-cc-bootstrap.mjs'
 import { normalizeHealthProbeConfig } from './health-probe.mjs'
 import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
-import { mergeNotifyConfig } from './notify.mjs'
+import { mergeNotifyConfig, validateNotifyRoutingPatch } from './notify.mjs'
 import { normalizeRedaction } from '../redaction/policy.mjs'
 import { ensureRedaction } from '../redaction/runtime.mjs'
 import { normalizeLoggingConfig } from './request-log.mjs'
@@ -61,7 +62,11 @@ import { syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { wakeOpenAIWaiter } from '../pool/openai-account-runtime.mjs'
 import { normalizeVmConfig } from '../vm/machine-spec.mjs'
 import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
-import { telemetryUploadInterval } from '../vm/native-telemetry.mjs'
+import {
+  telemetryDefaultEnabled,
+  telemetryDisableNonessentialTraffic,
+  telemetryUploadInterval,
+} from '../vm/native-telemetry.mjs'
 
 export function createRoutingRuntime(ctx) {
   const getRouting = () => (typeof ctx.getRoutingConfig === 'function' ? ctx.getRoutingConfig() : ctx.routingConfig)
@@ -442,18 +447,35 @@ export function createRoutingRuntime(ctx) {
   }
 
   // Native slots hot-read kernel.json; publication must be acknowledged per VM.
-  async function syncTelemetryUploadInterval(routingConfig) {
+  async function syncTelemetryUploadInterval(
+    routingConfig,
+    { defaultEnabled = false, prevDefaultEnabled = false, disableNonessentialChanged = false } = {},
+  ) {
     const project = ctx.cfg.paths.project
     const applied = { updated: 0, queued: 0, skipped: 0, failed: [] }
+    const optIn = defaultEnabled === true && prevDefaultEnabled !== true
     for (const { id } of listVms(project)) {
       const vm = getVm(project, id)
       if (!vm || isCodexVm(vm)) continue
-      if (resolveKernelDataplane(vm, routingConfig) === 'crag') {
+      if (optIn && vm.seed_policy?.telemetry_disabled !== false) {
+        const vmPath = path.join(project, 'vms', `${id}.json`)
+        const fresh = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+        fresh.seed_policy = { ...(fresh.seed_policy || {}), telemetry_disabled: false }
+        fresh.updated_at = new Date().toISOString()
+        atomicWriteJson(vmPath, fresh, { mode: 0o600 })
+      }
+      if (resolveKernelDataplane(vm, routingConfig) === 'crag' && !optIn && !disableNonessentialChanged) {
         applied.skipped += 1
         continue
       }
       try {
-        const result = await applyNativeTelemetry({ projectRoot: project, vm, routing: routingConfig })
+        const current = getVm(project, id) || vm
+        const result = await applyNativeTelemetry({
+          projectRoot: project,
+          vm: current,
+          routing: routingConfig,
+          lifecycle: { watchdog: ctx.kernelWatchdog, poolScheduler: ctx.poolScheduler },
+        })
         if (result.supported === false) {
           applied.skipped += 1
           continue
@@ -471,6 +493,7 @@ export function createRoutingRuntime(ctx) {
   }
 
   async function persistRoutingPatch(body = {}) {
+    validateNotifyRoutingPatch(body)
     const hasCodexQuota = body?.codex && Object.prototype.hasOwnProperty.call(body.codex, 'quota')
     if (hasCodexQuota) validateOpenAIQuotaPatch(body.codex.quota)
     validateInferenceWebsocketPatch(body)
@@ -490,12 +513,20 @@ export function createRoutingRuntime(ctx) {
     const prevIdleMs = streamIdleTimeoutMs(routingConfig)
     const prevRequestBytes = maxRequestBytes(routingConfig)
     const prevUploadInterval = telemetryUploadInterval(routingConfig)
+    const prevDefaultEnabled = telemetryDefaultEnabled(routingConfig)
+    const prevDisableNonessential = telemetryDisableNonessentialTraffic(routingConfig)
     setRouting(routingConfig)
     if (body.sticky) routingConfig.sticky = { ...(routingConfig.sticky || {}), ...body.sticky }
     if (body.quota) routingConfig.quota = { ...(routingConfig.quota || {}), ...body.quota }
     if (body.concurrency) routingConfig.concurrency = { ...(routingConfig.concurrency || {}), ...body.concurrency }
     if (body.pool) {
       routingConfig.pool = normalizePoolRouting({ ...(routingConfig.pool || {}), ...body.pool })
+    }
+    if (body.batch_group && typeof body.batch_group === 'object' && !Array.isArray(body.batch_group)) {
+      routingConfig.batch_group = mergeBatchGroupConfig({
+        ...(routingConfig.batch_group || {}),
+        ...body.batch_group,
+      })
     }
     if (body.failover) routingConfig.failover = { ...(routingConfig.failover || {}), ...body.failover }
     if (body.inference) {
@@ -537,11 +568,18 @@ export function createRoutingRuntime(ctx) {
       }
       routingConfig.vm = normalizeVmConfig(next)
     }
-    if (body.telemetry && Object.hasOwn(body.telemetry, 'upload_interval_seconds')) {
-      routingConfig.telemetry = {
-        ...(routingConfig.telemetry || {}),
-        upload_interval_seconds: telemetryUploadInterval({ telemetry: body.telemetry }),
+    if (body.telemetry && typeof body.telemetry === 'object' && !Array.isArray(body.telemetry)) {
+      const nextTelemetry = { ...(routingConfig.telemetry || {}) }
+      if (Object.hasOwn(body.telemetry, 'upload_interval_seconds')) {
+        nextTelemetry.upload_interval_seconds = telemetryUploadInterval({ telemetry: body.telemetry })
       }
+      if (Object.hasOwn(body.telemetry, 'default_enabled')) {
+        nextTelemetry.default_enabled = body.telemetry.default_enabled === true
+      }
+      if (Object.hasOwn(body.telemetry, 'disable_nonessential_traffic')) {
+        nextTelemetry.disable_nonessential_traffic = body.telemetry.disable_nonessential_traffic === true
+      }
+      routingConfig.telemetry = nextTelemetry
     }
     applyOfficialCcRoutingBody(body, prevOfficialCc)
     applyHealthProbeRoutingBody(body, prevHealthProbe)
@@ -587,9 +625,18 @@ export function createRoutingRuntime(ctx) {
       idleChanged || requestBytesChanged
         ? reloadClaudeKernelsWhenIdle(routingConfig, { idleOnly: !requestBytesChanged })
         : 0
+    const defaultEnabled = telemetryDefaultEnabled(routingConfig)
+    const disableNonessential = telemetryDisableNonessentialTraffic(routingConfig)
+    const disableNonessentialChanged = disableNonessential !== prevDisableNonessential
     const telemetrySync =
-      telemetryUploadInterval(routingConfig) !== prevUploadInterval
-        ? await syncTelemetryUploadInterval(routingConfig)
+      telemetryUploadInterval(routingConfig) !== prevUploadInterval ||
+      defaultEnabled !== prevDefaultEnabled ||
+      disableNonessentialChanged
+        ? await syncTelemetryUploadInterval(routingConfig, {
+            defaultEnabled,
+            prevDefaultEnabled,
+            disableNonessentialChanged,
+          })
         : null
     // Pool and failover settings hot-reload into the live scheduler and runner.
     // Rebuilding them would drop the seat book and queues while their requests
@@ -645,6 +692,7 @@ export function createRoutingRuntime(ctx) {
       doc.pool = normalizePoolRouting(doc.pool)
       doc.vm = normalizeVmConfig(doc.vm)
       if (!hasOpenAIQuota) migrateLegacyOpenAIPolicies(doc)
+      if (doc.batch_group != null) doc.batch_group = mergeBatchGroupConfig(doc.batch_group)
       if (doc.redaction != null) doc.redaction = normalizeRedaction(doc.redaction)
       return doc
     } catch (error) {
@@ -754,6 +802,7 @@ export function createRoutingRuntime(ctx) {
       accountQuota: ctx.accountQuota,
       runtimeRepo,
       workerHealth: rustKernelHealth,
+      getRouting,
       config: poolSchedulerConfig(),
     })
     setPool(poolScheduler)
@@ -783,11 +832,15 @@ export function createRoutingRuntime(ctx) {
       onProxyFailure: (vmId, reason) => {
         ctx.proxyPool.reportRuntimeFailure(vmId, reason)
       },
-      onFablePlanDenied: ({ selected }) => {
+      onFablePlanDenied: ({ selected, policy }) => {
         const accountId = selected?.accountId
         if (accountId && selected?.model) {
           try {
-            ctx.accountQuota.markModelUnsupported(accountId, selected.model)
+            if (policy?.reason === 'fable_credits_required') {
+              ctx.accountQuota.markFableCreditsRequired(accountId, selected.model)
+            } else {
+              ctx.accountQuota.markModelUnsupported(accountId, selected.model)
+            }
           } catch {}
         }
       },

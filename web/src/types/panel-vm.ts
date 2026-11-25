@@ -1,3 +1,4 @@
+import type { GeminiEnvironment } from '@/features/import/gemini-environments'
 import type { WindowEstimate } from './panel-pricing'
 
 /**
@@ -55,6 +56,8 @@ export type VmProxySnap = {
   scheme?: string
   /** 透明 TCP 把唯一 DNS 应答改写成 SOCKS 主机名。默认关。 */
   domain_forward?: boolean
+  /** 让 SVCB(64)/HTTPS(65) 返回空答案，屏蔽 HTTP/3 与加密 SNI 探测。按条生效，默认关。 */
+  dns_disable_svcb_https?: boolean
   /** 出口地理位置（IPv4）；从未检测过为 null。 */
   geo?: ProxyGeo | null
   geo_guard?: {
@@ -79,6 +82,13 @@ export type VmProxySnap = {
 }
 
 export type InferenceEngine = 'auto' | 'go' | 'rust'
+
+export type VmCodexCredits = {
+  has_credits?: boolean
+  unlimited?: boolean
+  balance?: string | number | null
+  fetched_at?: string | number | null
+}
 
 export type CragLicenseStatus = {
   status:
@@ -126,6 +136,13 @@ export type VmTelemetryState = {
   last_error: string | null
 }
 
+export type CragTelemetryState = {
+  state: 'launch_policy'
+  enabled: boolean | null
+  error: string | null
+  upload_confirmed: false
+}
+
 export type VmKernelHealth = {
   reachable?: boolean
   process_up?: boolean
@@ -148,7 +165,7 @@ export type VmKernelSnapshot = {
   credential_owner?: string | null
   credential_state?: string | null
   proxy_state?: string | null
-  telemetry?: VmTelemetryState | null
+  telemetry?: VmTelemetryState | CragTelemetryState | null
   process_topology?: {
     rust_pid1?: boolean
     go_worker_pid1?: boolean
@@ -251,12 +268,16 @@ export type SeatOccupant = {
   state: 'active' | 'held' | 'idle' | string
   inflight: number
   held_until?: number | null
+  subagents_running?: number
+  subagents_queued?: number
+  subagents_max?: number | null
 }
 
 export type ScheduleState = 'on' | 'off' | 'unschedulable' | 'restricted'
 
 export type Vm = {
   id: string
+  gemini?: GeminiEnvironment
   name?: string
   owner_user_id?: string | null
   /** 所在集群节点；null / 缺省 = 本机。 */
@@ -316,6 +337,8 @@ export type Vm = {
   unschedulable_reason?: string | null
   unschedulable_text?: string | null
   unschedulable_detail?: Record<string, unknown> | null
+  /** 进入不可调度（含吊销）的时刻，ISO 字符串 */
+  unschedulable_at?: string | null
   schedule_off?: boolean
   schedule_hold?: {
     reason: string
@@ -357,6 +380,7 @@ export type Vm = {
     credits?: Array<{ expires_at?: string }>
     fetched_at?: string
   } | null
+  codex_credits?: VmCodexCredits | null
   /** 限额重置按钮。setup-token 标签但 scope 含 user:profile 时也为 true。 */
   can_claude_reset?: boolean
   claude_reset_credits?: {
@@ -390,6 +414,14 @@ export type Vm = {
   rate_limit_tier?: string | null
   /** Whether official usage lists a Fable window; not a subscription identifier. */
   usage_has_fable?: boolean | null
+  /** 开了 pool.fable_requires_max 且本槽不是 Max：Fable 不会派到这里。 */
+  fable_requires_max?: boolean
+  /** 上游回「Usage credits are required」后 Fable 暂停调度到此槽，`until` 前有效。 */
+  fable_credits_required?: {
+    model?: string | null
+    at?: string | null
+    until?: string | null
+  } | null
   /** anthropic | openai。缺省按 Claude 槽展示。 */
   platform?: string | null
   /** claude | codex */
@@ -432,6 +464,12 @@ export type Vm = {
   /** Claude CLI native 执行位热准入上限，也是预调度的席位上限；内核固定预开 20。 */
   session_slots?: number | null
   session_slots_override?: boolean
+  /** Claude family mode root-session cap. */
+  max_primary_sessions?: number | null
+  max_primary_sessions_override?: boolean
+  /** null = family mode disabled, children keep their own seats. */
+  max_subagents_per_session?: number | null
+  max_subagents_per_session_override?: boolean
   /** 去掉本槽覆盖（PATCH 字段传 null）后会落回的值。 */
   scheduling_inherited?: VmSchedulingInherited | null
   /** 单槽位配额覆盖；缺字段 = 跟随全局 `settings/quota`。GPT 槽位恒为 null。 */
@@ -830,6 +868,8 @@ export type VmSchedulingInherited = {
   max_sessions?: number | null
   /** Codex 行为 null。 */
   session_slots: number | null
+  max_primary_sessions?: number | null
+  max_subagents_per_session?: number | null
 }
 
 export type OpenAIQuotaPolicy = {
