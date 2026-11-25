@@ -86,6 +86,12 @@ export const DEFAULT_POOL_ROUTING = Object.freeze({
    * returning to the original pin and rebuilding the prompt cache again.
    */
   session_affinity_first: false,
+  /**
+   * Cap each Claude VM's seats at its effective max concurrency, so tuning
+   * concurrency also tunes seats. session_slots and the slot capacity still
+   * cap it from above.
+   */
+  seats_follow_concurrency: false,
 })
 
 const DEFAULT_CONFIG = {
@@ -118,6 +124,7 @@ export function normalizePoolRouting(pool = {}) {
   delete next.max_waiters_per_account
   next.strategy = next.strategy === 'fill' ? 'fill' : 'balanced'
   next.session_affinity_first = next.session_affinity_first === true
+  next.seats_follow_concurrency = next.seats_follow_concurrency === true
   next.queue_max = clampNumber(next.queue_max, DEFAULT_POOL_ROUTING.queue_max, QUEUE_MAX_MIN, QUEUE_MAX_MAX)
   next.seat_grace_ms = clampNumber(next.seat_grace_ms, DEFAULT_POOL_ROUTING.seat_grace_ms, 0, SEAT_GRACE_MAX_MS)
   next.seat_budget_reserve_pct = clampNumber(
@@ -388,8 +395,12 @@ function maxConcurrencyOf(vm, fallback = 2) {
 
 /** Seats on this VM: its `session_slots` override, else the global default; clamped 1–20 by slot-engine. */
 /** Seats never exceed the native slots the VM's container can hold (slot-capacity.mjs). */
-function seatCapOf(vm, fallback = 20) {
-  return Math.min(resolveSessionSlots(vm, { inference: { session_slots: fallback } }), effectiveSlotCount(vm))
+/** With `concurrency` (pool.seats_follow_concurrency), seats also never exceed the VM's max concurrency. */
+export function seatCapOf(vm, fallback = 20, concurrency = null) {
+  const cap = Math.min(resolveSessionSlots(vm, { inference: { session_slots: fallback } }), effectiveSlotCount(vm))
+  const limit = Math.floor(Number(concurrency))
+  if (concurrency == null || !Number.isFinite(limit) || limit < 1) return cap
+  return Math.min(cap, limit)
 }
 
 function vmTierOf(vm) {
@@ -580,7 +591,7 @@ export class PoolScheduler extends EventEmitter {
         accountId: ent.account_id,
         index: Number(ent.slot_index),
         heldUntil,
-        cap: vm ? seatCapOf(vm, this.config.default_session_slots) : 0,
+        cap: vm ? this.seatCapFor(vm, this.restoreAccount(ent.account_id)) : 0,
       })
       if (seat) restored += 1
     }
@@ -1513,7 +1524,7 @@ export class PoolScheduler extends EventEmitter {
         parseConcurrency(this.config.default_max_per_account, 2),
       )
       const inflight = this.inflight.get(accountId) || 0
-      const seatCap = seatCapOf(vm, this.config.default_session_slots)
+      const seatCap = this.seatCapFor(vm, eligibility.account, maxConcurrency)
       this.planner.noteCap(vm.id, seatCap)
       candidates.push({
         ok: true,
@@ -2122,6 +2133,35 @@ export class PoolScheduler extends EventEmitter {
     )
     if (fromQuota != null && Number.isFinite(Number(fromQuota))) return Math.max(0, Number(fromQuota))
     return maxConcurrencyOf(vm, fallback)
+  }
+
+  /** Stored account record for a restored seat; null when the repo cannot say. */
+  restoreAccount(accountId) {
+    try {
+      return this.accountQuota?.repo?.get?.(accountId) || null
+    } catch {
+      return null
+    }
+  }
+
+  /** Seat cap for one VM; `maxConcurrency` skips recomputing it when the caller already has it. */
+  seatCapFor(vm, account, maxConcurrency = null) {
+    let concurrency = null
+    if (this.config.seats_follow_concurrency) {
+      concurrency = maxConcurrency
+      if (concurrency == null) {
+        try {
+          concurrency = this.effectiveMaxConcurrency(
+            vm,
+            account,
+            parseConcurrency(this.config.default_max_per_account, 2),
+          )
+        } catch {
+          concurrency = null
+        }
+      }
+    }
+    return seatCapOf(vm, this.config.default_session_slots, concurrency)
   }
 
   reloadConfig(config = {}) {

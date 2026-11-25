@@ -59,6 +59,17 @@ test('effective slots are the plan target clamped to what the recorded limits ho
   assert.equal(slotsForLimits({ memoryMiB: 256, pids: 128 }), 0)
 })
 
+test('KVM slots run sessions in the guest, so the container pids limit does not bind', () => {
+  const kvm = (vm) => ({ ...vm, runtime: { type: 'kvm' } })
+  // No recorded pids_limit: Docker reads the legacy 256 (2 slots), KVM goes by plan and memory.
+  assert.equal(effectiveSlotCount(max5({ memory: '4g' })), 2)
+  assert.equal(effectiveSlotCount(kvm(max5({ memory: '4g' }))), 12)
+  assert.equal(wrapSlotCount(kvm(max5({ memory: '4g' }))), 12)
+  // Memory still binds a KVM slot.
+  assert.equal(effectiveSlotCount(kvm(max5({ memory: '2g' }))), 5)
+  assert.equal(effectiveSlotCount({ ...max5({ memory: '4g' }), runtime_type: 'kvm' }), 12)
+})
+
 test('disabled capacity keeps the legacy fixed 20 slots and recorded limits', () => {
   configureSlotCapacity({ enabled: false })
   assert.equal(effectiveSlotCount(pro({ memory: '512m' })), 20)

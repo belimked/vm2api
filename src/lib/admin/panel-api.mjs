@@ -57,7 +57,7 @@ import { listQuotaFromHeaders, isOfficialWindowLimited } from '../pool/quota-win
 import { lastClosedWindow } from '../pool/window-history.mjs'
 import { hardBlockOf } from '../pool/rate-limit-service.mjs'
 import { unitCircuit } from '../pool/unit-circuit.mjs'
-import { accountIdOf, normalizePoolRouting } from '../pool/pool-scheduler.mjs'
+import { accountIdOf, normalizePoolRouting, seatCapOf } from '../pool/pool-scheduler.mjs'
 import { codexMaxSessions, codexScheduleLevel } from '../pool/codex-slot-pool.mjs'
 import { resolveCredentialScheduleLevel } from '../pool/credential-weight.mjs'
 import { activeHoursZoneOf, evaluateActiveHours } from '../pool/active-hours.mjs'
@@ -1845,6 +1845,28 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
   }
 }
 
+/**
+ * Seat cap as the scheduler computes it (pool-scheduler seatCapOf): session_slots
+ * clamped to the slot capacity and, with pool.seats_follow_concurrency, to the
+ * VM's effective max concurrency. The live seat stream reports the same number.
+ */
+function panelSeatCap(v, acc, accountQuota, routingConfig) {
+  const fallback = normalizeSessionSlots(routingConfig?.inference?.session_slots)
+  const follow = normalizePoolRouting(routingConfig?.pool).seats_follow_concurrency
+  return seatCapOf(v, fallback, follow ? panelEffectiveConcurrency(v, acc, accountQuota) : null)
+}
+
+/** Mirrors PoolScheduler.effectiveMaxConcurrency for a panel VM summary. */
+function panelEffectiveConcurrency(v, acc, accountQuota) {
+  if (v.max_concurrency_override) return v.max_concurrency
+  try {
+    const tier = v.claude?.account_tier || v.account_tier || null
+    const n = accountQuota?.limitFor?.(acc, accountQuota?.policyFor?.(acc, { tier }))
+    if (n != null && Number.isFinite(Number(n))) return Number(n)
+  } catch {}
+  return v.max_concurrency
+}
+
 function enrichVm(v, accountQuota, active, extras = {}) {
   if (extras.projectRoot && isLeftoverQuotaScheduleOff(v)) {
     migrateVmSchedule(extras.projectRoot, v.id)
@@ -2012,7 +2034,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     availability.reason ||
     null
   const circuit = isCodex ? null : circuitViewFor(v, extras.projectRoot)
-  const seatsMax = isCodex ? null : resolveSessionSlots(v, extras.routingConfig || {})
+  const seatsMax = isCodex ? null : panelSeatCap(v, acc, accountQuota, extras.routingConfig || {})
   const triad = resolveScheduleState({
     vm: v,
     availability,

@@ -205,6 +205,24 @@ test('seat cap comes from the VM override, else inference.session_slots, clamped
   assert.equal(clamped.find((c) => c.vmId === 'vm-02').seatCap, 20)
 })
 
+test('pool.seats_follow_concurrency caps seats at the VM max concurrency, under session_slots', async (t) => {
+  const specs = [
+    { id: 'vm-01', policy: { maxConcurrency: 4 } },
+    { id: 'vm-02', policy: { maxConcurrency: 4, sessionSlots: 2 } },
+    { id: 'vm-03', policy: { maxConcurrency: 30 } },
+  ]
+  const off = setup(t, specs)
+  const offCaps = Object.fromEntries((await off.eligibleCandidates({ model: MODEL })).map((c) => [c.vmId, c.seatCap]))
+  assert.deepEqual(offCaps, { 'vm-01': 20, 'vm-02': 2, 'vm-03': 20 })
+  const on = setup(t, specs, { seats_follow_concurrency: true })
+  const onCaps = Object.fromEntries((await on.eligibleCandidates({ model: MODEL })).map((c) => [c.vmId, c.seatCap]))
+  assert.deepEqual(onCaps, { 'vm-01': 4, 'vm-02': 2, 'vm-03': 20 })
+  assert.equal(on.seatSnapshot().seats['vm-01']?.seats_max ?? on.planner.caps.get('vm-01'), 4)
+  assert.equal(normalizePoolRouting({}).seats_follow_concurrency, false)
+  assert.equal(normalizePoolRouting({ seats_follow_concurrency: 'yes' }).seats_follow_concurrency, false)
+  assert.equal(normalizePoolRouting({ seats_follow_concurrency: true }).seats_follow_concurrency, true)
+})
+
 test('after the request ends the session frees the slot; sticky TTL does not keep it', async (t) => {
   const pool = setup(t, [{ id: 'vm-01', policy: { sessionSlots: 1 } }], { seat_grace_ms: 0 })
   pool.planner.stickyTtlMs = () => 86_400_000

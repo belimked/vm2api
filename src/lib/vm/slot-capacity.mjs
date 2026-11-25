@@ -20,6 +20,7 @@
 import { KERNEL_NATIVE_SLOT_COUNT } from './slot-engine.mjs'
 import { memoryMiB, slotMemory, VM_MEMORY_OPTIONS } from './machine-spec.mjs'
 import { isCodexVm } from './vm-kind.mjs'
+import { isKvmRuntime } from './runtime-kind.mjs'
 
 export const SLOT_PLAN_KEYS = Object.freeze(['pro', 'max_5x', 'max_20x', 'default'])
 /** Docker's default for slot containers before this module existed. */
@@ -153,8 +154,18 @@ export function effectiveSlotCount(vm, routing) {
   const cfg = slotCapacityConfig(routing)
   if (!cfg.enabled) return KERNEL_NATIVE_SLOT_COUNT
   const target = planSlots(vm, routing)
-  const fits = slotsForLimits({ memoryMiB: memoryMiB(slotMemory(vm, routing)), pids: recordedPidsLimit(vm) }, routing)
+  const fits = slotsForLimits({ memoryMiB: memoryMiB(slotMemory(vm, routing)), pids: slotPidsBudget(vm) }, routing)
   return Math.min(KERNEL_NATIVE_SLOT_COUNT, Math.max(1, Math.min(target, fits)))
+}
+
+/**
+ * pids budget for the slot count. A KVM slot runs its sessions inside the
+ * guest, so the container pids cgroup only holds qemu and never bounds the
+ * session count; the capacity reconciler also skips KVM and never records a
+ * raised `pids_limit`, which left every KVM slot at the legacy 256 → 2 slots.
+ */
+function slotPidsBudget(vm) {
+  return isKvmRuntime(vm) ? Number.POSITIVE_INFINITY : recordedPidsLimit(vm)
 }
 
 /** What the reconciler should raise this VM's container to. */
