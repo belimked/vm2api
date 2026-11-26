@@ -718,6 +718,15 @@ export async function runApiInference({
     }
   }
 
+  if (toolGate?.rejection) {
+    const blocked = toolGate.blockedError(res._kinRequestId)
+    if (res.headersSent) {
+      if (protocol === 'anthropic.messages') res.write(buildAnthropicSseError(blocked.body.error))
+      else res.write(`data: ${JSON.stringify(blocked.body)}\n\n`)
+    }
+    return { ...resultBase, ...timing.snapshot(), ok: false, status: 403, body: blocked.body,
+      terminalState: 'tool_gate_blocked', usage: streamedUsage, committed }
+  }
   if (toolGate?.hasPending()) {
     const error = incompleteToolUseError()
     if (res.headersSent) {
@@ -871,6 +880,12 @@ async function runOpenAIResponsesUpstream({
       usage: streamedUsage,
       ...timing.snapshot(),
     })
+  if (toolGate?.rejection) {
+    const blocked = toolGate.blockedError(res._kinRequestId)
+    if (res.headersSent) res.write(buildAnthropicSseError(blocked.body.error))
+    return { ...resultBase, ok: false, status: 403, body: blocked.body,
+      terminalState: 'tool_gate_blocked', committed, usage: streamedUsage, ...timing.snapshot() }
+  }
   if (!conversionError && toolGate?.hasPending()) {
     conversionError = incompleteToolUseError()
     if (res.headersSent) res.write(buildAnthropicSseError(conversionError))

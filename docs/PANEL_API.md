@@ -462,7 +462,7 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET/PUT | `/refusal-guards` | 精确指纹，以及可选的用户正文近似（`similarity_enabled`，`similarity` 为 80/85/90/95，默认开、90）。命中 HTTP 400 `policy_blocked`，`code=refusal_guard`，不 hop。相似度只比用户正文。`device_block_enabled` 默认开：命中后永久封禁入站 device id。响应带 `devices` |
+| GET/PUT | `/refusal-guards` | 精确指纹，以及可选的用户正文近似（`similarity_enabled`，`similarity` 为 80/85/90/95，默认开、90）。命中 HTTP 400 `policy_blocked`，`code=refusal_guard`，不 hop。相似度只比用户正文。`device_block_enabled` 默认开：命中后永久封禁入站 device id。响应带 `devices`。工具审核拦截条目只精确匹配，命中返回 403 `tool_use_blocked`，不封设备 |
 | DELETE | `/refusal-guards/:fingerprint` | 删除一条 64 位 hex 指纹 |
 | DELETE | `/refusal-guards` | 须 `{ "confirm": true }` 清空 |
 | DELETE | `/refusal-device-blocks` | `{ "device_id" }` 解封一条；`{ "confirm": true }` 清空。空 device、短于 8 字符的值不会入库 |
@@ -474,6 +474,7 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET/PUT | `/jev-intercept` | 协议入口。顺序：蒸馏硬规则 → 去掉 reminder、按需展开 base64 后的硬正则 → 拒答缓存 → 决策模型。没配地址则跳过模型；模型失败默认放行。`fail_open: false` 时模型不可用则 403，不封设备 |
+| GET/PUT | `/tool-use-gate` | 工具调用审核（Claude 格式 tool_use），配置每个请求现读。字段：`enabled`、`tools[]`、`timeout_ms`（1000–30000）、`fail_open`、`max_context_chars`（1000–64000，单次送审上限）、`tool_windows`（1–16，默认 4）、`overflow`（`pause` 默认 / `partial`）、`questions[]`。送审前只写入文件的 heredoc（`cat > f <<EOF`、`tee f <<EOF`）正文压缩为首 15 行 + 尾 5 行；喂给解释器、管道、敏感路径、后续会被执行的文件保持原样；转发的调用不变。仍超限则按上限切段并行送审，任一段不通过即拦截；段数不够时 `pause` 暂停，`partial` 只审前 `tool_windows-1` 段和最后一段、通过即放行，日志 `hop_meta.tool_gate` 记 `partial`、`unaudited_chars`、`windows`、`slimmed_chars` |
 
 `PUT` 写入 SQLite `settings.jev_intercept`。字段：`enabled`（默认关）、`hard_regex_enabled`（默认开）、`openai_platform_enabled`（默认关）、`provider`（`jev` 默认、`laya`、`modernbert`）、`base_url`、`model`、`timeout_ms`（200–8000，默认 2000）、`patterns[]`、`rules`（`null` 与 `[]` 都用内置规则；关掉这一层用 `hard_regex_enabled: false`）、`api_key` 或 `api_keys`（最多 999 把）、`question_ids`（题库 id，缺省为全部）。省略密钥保持原值；`api_key: ""` 或 `api_keys: []` 清除。一行可以是裸 key（用 `base_url`），或 `https://host/v1/systemone <key>` 打到另一个 systemone。`401` / `429` / `529` 退役该 key，之后不再调度，再次保存密钥列表会重新启用。网络错误和其它 HTTP 状态只跳过这一跳的同一主机，不退役 key；失败放行的原因写在放行 keyword（`网络异常` 或 `上游 <status>`）。另有 `safety_instruction`（空则不加自定义题）、`safety_threshold`（0–1，默认 0.5）、`block_if_below`（默认开）、`fail_open`（默认开）、`dedup_sec`（0–3600，默认 60）、`max_state_chars`（256–64000，默认 16000）、`expand_base64`、`strip_reminders`（后两个默认开）。GET 不回密钥，回 `api_key_set`、`api_key_count`、`question_bank`、`providers`、`builtin_patterns`、`rules`、`rules_customized`、`openai_platform_enabled`。
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- 工具审核拦截改为 403 `tool_use_blocked`；Jev 拦截写入精确拒答指纹，重命中不封设备。
+- 工具审核：写入文件的 heredoc 正文送审前压缩；超长参数按 `max_context_chars` 切段并行送审（`tool_windows` 1–16，默认 4）；段数不够时由 `overflow` 决定暂停（默认）或只审首尾后放行。
+
 ## 1.4.191+cus — 2026-11-25（定制分支 cus/v1.4.191）
 
 - 由 cus/v1.4.129 合并上游 v1.4.191（1189 个提交）。停在 191：1.4.192 起 compose 引入 PostgreSQL/Redis，且 `VM2API_DB_DRIVER=auto` + 默认 `DATABASE_HOST` 会把手工 `docker compose up -d` 的存量实例切到空 PG 库。

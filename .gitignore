@@ -75,3 +75,4 @@ patches/
 .omp
 /dist/
 share/wrap-cli/dist/
+.tmp/

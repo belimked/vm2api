@@ -1353,6 +1353,9 @@ export class FailoverRunner {
             },
           }
         }
+        if (result?.terminalState === 'tool_gate_blocked' || result?.body?.error?.code === 'tool_use_blocked') {
+          policy = { scope: 'request', action: 'stop', reason: 'tool_gate_blocked' }
+        }
         if (
           !pinVmId &&
           selected.accountId &&
