@@ -7,6 +7,7 @@
 
 ## 1.4.191+cus — 2026-11-25（定制分支 cus/v1.4.191）
 
+- 面板：设置 → 号池 →「席位」弹窗新增「席位跟随并发」开关（`pool.seats_follow_concurrency`，默认关），开启后每台 VM 席位不超过其最大并发；号池摘要显示「· 跟随并发」。此前只能经 `PUT /api/panel/routing` 设置。
 - 由 cus/v1.4.129 合并上游 v1.4.191（1189 个提交）。停在 191：1.4.192 起 compose 引入 PostgreSQL/Redis，且 `VM2API_DB_DRIVER=auto` + 默认 `DATABASE_HOST` 会把手工 `docker compose up -d` 的存量实例切到空 PG 库。
 - 16 个冲突文件的处理：
   - `pool-scheduler`：上游 #1627 的主会话/子代理限制（`familyLimitsOf`）与 cus 的 `seats_follow_concurrency` 并存，物理席位一律经 `seatCapFor`（KVM 不按容器 pids、可选席位跟并发），新增 `familyLimitsFor` 供子代理与席位快照路径使用；面板 `seats_max` 同源。

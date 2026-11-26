@@ -434,6 +434,7 @@ export function PoolPane({
 }: PoolPaneProps) {
   const strategy = pool.strategy === 'fill' ? 'fill' : 'balanced'
   const resetPriority = pool.reset_priority !== false
+  const seatsFollowConcurrency = pool.seats_follow_concurrency === true
   const seatCap = Math.min(
     SEAT_CAP_MAX,
     Math.max(1, numOf(inference, 'session_slots', SEAT_CAP_MAX))
@@ -514,6 +515,7 @@ export function PoolPane({
       })
       onPoolChange({
         seat_grace_ms: poolDraft.seat_grace_ms,
+        seats_follow_concurrency: poolDraft.seats_follow_concurrency === true,
         max_primary_sessions: poolDraft.max_primary_sessions ?? null,
         max_subagents_per_session: poolDraft.max_subagents_per_session ?? null,
         seat_budget_reserve_pct: poolDraft.seat_budget_reserve_pct,
@@ -581,7 +583,7 @@ export function PoolPane({
         <SummaryButton
           icon={Armchair}
           title='席位容量'
-          value={`${seatCap} 席 / VM`}
+          value={`${seatCap} 席 / VM${seatsFollowConcurrency ? ' · 跟随并发' : ''}`}
           desc={`对话结束即释放 · 预算预留 ${reservePct}%`}
           pending={pending}
           disabled={saving}
@@ -716,6 +718,23 @@ export function PoolPane({
                         numOf(inferenceDraft, 'session_slots', SEAT_CAP_MAX)
                       )
                     )}
+                  />
+                </div>
+                <div className='flex items-center justify-between gap-4 rounded-md border px-3 py-2.5'>
+                  <div>
+                    <Label htmlFor='pool-seats-follow-concurrency'>
+                      席位跟随并发
+                    </Label>
+                    <p className='text-xs leading-5 text-muted-foreground'>
+                      开启：每台 VM 的席位不超过它的最大并发，调并发就同时调席位。关闭：席位只受上面的上限和槽容量限制。保存后立即生效。
+                    </p>
+                  </div>
+                  <Switch
+                    id='pool-seats-follow-concurrency'
+                    checked={poolDraft.seats_follow_concurrency === true}
+                    onCheckedChange={(value) =>
+                      updateDraft('pool', { seats_follow_concurrency: value })
+                    }
                   />
                 </div>
                 <div className='flex items-center justify-between gap-4 rounded-md border px-3 py-2.5'>
