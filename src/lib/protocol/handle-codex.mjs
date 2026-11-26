@@ -922,17 +922,22 @@ export async function handleCodexProtocol({
           ? Math.max(0, result.firstByteAt - requestStartedAt)
           : (result?.firstByteMs ?? null)
         logBag.generation_ms = result?.generationMs ?? null
+        const gateBlocked = !policyRefusal && toolGate?.rejection ? toolGate.blockedError(res._kinRequestId) : null
+        if (stream && gateBlocked) {
+          conversionError = gateBlocked.body.error
+          if (res.headersSent) res.write(buildAnthropicSseError(conversionError))
+        }
         if (stream && !policyRefusal && !conversionError && toolGate?.hasPending()) {
           conversionError = incompleteToolUseError()
           if (res.headersSent) res.write(buildAnthropicSseError(conversionError))
         }
         if (conversionError) {
           result.ok = false
-          result.status = 502
-          result.terminalState = 'incomplete'
-          result.body = { error: conversionError }
+          result.status = gateBlocked ? 403 : 502
+          result.terminalState = gateBlocked ? 'tool_gate_blocked' : 'incomplete'
+          result.body = gateBlocked?.body || { error: conversionError }
         }
-        ingestCodexHop(projectRoot, vm.id, result, Date.now(), normalizeCodexRouting(routing.codex).quota)
+        if (!gateBlocked) ingestCodexHop(projectRoot, vm.id, result, Date.now(), normalizeCodexRouting(routing.codex).quota)
         if (result?.transport_retried) logBag.transport_retried = true
         if (result?.reasoning_history_retried) {
           logBag.attempt_count += 1
@@ -976,6 +981,12 @@ export async function handleCodexProtocol({
               if (protocol !== 'openai.responses') {
                 let message = codexBodyToAnthropicMessage(assembled, converted.body.model)
                 if (toolGate && protocol === 'anthropic.messages') message = await toolGate.message(message)
+                if (toolGate?.rejection) {
+                  const blocked = toolGate.blockedError(res._kinRequestId)
+                  stats.errors++
+                  logBag.final_state = 'tool_gate_blocked'
+                  return json(res, blocked.status, blocked.body)
+                }
                 body =
                   protocol === 'openai.chat'
                     ? fromClaudeToOpenAIChat(message, converted.body.model)
@@ -998,7 +1009,7 @@ export async function handleCodexProtocol({
           return res.end()
         }
         reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
-        const failureHold = !policyRefusal && codexFailureHold(result)
+        const failureHold = !gateBlocked && !policyRefusal && codexFailureHold(result)
         if (failureHold) holdOpenAIAccount(vm.id, failureHold)
         if (policyRefusal && policyRefusal !== 'upstream:billing_refusal') {
           stats.errors++
@@ -1016,7 +1027,7 @@ export async function handleCodexProtocol({
           logBag.upstream_status = result?.status || 0
           return res.end()
         }
-        if (!policyRefusal && isCodexFailoverError(result)) {
+        if (!gateBlocked && !policyRefusal && isCodexFailoverError(result)) {
           pickOpts.excluded.add(vm.id)
           leaveSticky()
           switches += 1

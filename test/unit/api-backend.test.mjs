@@ -1671,7 +1671,7 @@ const gatedStart = { type: 'message_start', message: { type: 'message', role: 'a
 const gatedToolStart = { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool_placeholder', name: 'Bash', input: {} } }
 const gatedToolDelta = (partial_json) => ({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json } })
 
-unixTest('API Anthropic streaming gates split Bash arguments while preserving text and terminal events', async () => {
+unixTest('API Anthropic streaming rejects Bash and discards later frames', async () => {
   const secretMarker = 'PLACEHOLDER_ARGUMENT_DO_NOT_FORWARD'
   const { result, wire, events } = await runGatedAnthropicApiFixture([
     gatedStart,
@@ -1685,13 +1685,12 @@ unixTest('API Anthropic streaming gates split Bash arguments while preserving te
     { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
     { type: 'message_stop' },
   ])
-  assert.equal(result.ok, true)
-  assert.equal(result.terminalState, 'verified')
-  assert.doesNotMatch(wire, /PLACEHOLDER_ARGUMENT_DO_NOT_FORWARD|input_json_delta|"name":"Bash"/)
-  assert.equal(events.find((event) => event.type === 'content_block_start')?.content_block.type, 'text')
-  assert.ok(events.some((event) => event.delta?.text === 'Safe answer'))
-  assert.equal(events.find((event) => event.type === 'message_delta')?.delta.stop_reason, 'end_turn')
-  assert.equal(events.at(-1)?.type, 'message_stop')
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 403)
+  assert.equal(result.terminalState, 'tool_gate_blocked')
+  assert.equal(result.body.error.code, 'tool_use_blocked')
+  assert.equal(events.at(-1)?.error?.code, 'tool_use_blocked')
+  assert.doesNotMatch(wire, /PLACEHOLDER_ARGUMENT_DO_NOT_FORWARD|input_json_delta|"name":"Bash"|Safe answer|message_stop/)
 })
 
 unixTest('API Anthropic streaming reports unfinished gated tool at upstream EOF without leaking arguments', async () => {

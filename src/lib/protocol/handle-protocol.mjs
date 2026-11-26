@@ -18,9 +18,10 @@ import {
   createConfiguredToolUseGate,
   incompleteToolUseError,
   TOOL_USE_GATE_INCOMPLETE,
+  TOOL_USE_GATE_BLOCKED,
   toolGateSseLines,
 } from './tool-use-gate.mjs'
-import { observeUpstreamRisk, runProtocolIntercept, upstreamRiskClientError } from './intercept-gate.mjs'
+import { observeUpstreamRisk, rememberToolGateBlock, runProtocolIntercept, upstreamRiskClientError } from './intercept-gate.mjs'
 import {
   toClaudeMessages,
   isClientStream,
@@ -344,6 +345,7 @@ export function createHandleProtocol(deps) {
   }
 
   function mapProtocolClientError(result, logBag, fallbackCode) {
+    if (result?.body?.error?.code === TOOL_USE_GATE_BLOCKED) return { status: 403, body: result.body }
     const opaqueCrag429 = result?.policy?.reason === 'crag_opaque_429'
     const originalCode = opaqueCrag429 ? result.policy.reason : result?.body?.error?.code || fallbackCode
     const originalMessage = result?.body?.error?.message || null
@@ -406,9 +408,10 @@ export function createHandleProtocol(deps) {
     }
   }
 
-  function runtimeToolGate(inbound, logBag) {
+  function runtimeToolGate(auditBody, logBag, { inbound, requestId, riskState }) {
     try {
-      return createConfiguredToolUseGate(deps.settings || new SettingsRepo(), inbound, logBag)
+      return createConfiguredToolUseGate(deps.settings || new SettingsRepo(), auditBody, logBag,
+        (rejection) => rememberToolGateBlock({ inbound, requestId, policy: riskState?.policy, repo: riskState?.repo, rejection }))
     } catch {
       // Test/in-memory handlers may not have a settings database; the default is disabled.
       return null
@@ -1109,7 +1112,7 @@ export function createHandleProtocol(deps) {
             projectRoot: cfg.paths.project,
             captureOutbound: logCtx.capture_outbound === true,
             accountGate,
-            toolGate: runtimeToolGate(auditBody, logBag),
+            toolGate: runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState }),
             ops: deps.codexOps || {},
             ...codexSticky,
           }),
@@ -1454,7 +1457,7 @@ export function createHandleProtocol(deps) {
       // This backend forwards caller cache controls unchanged. Billing must
       // use the upstream 5m/1h split, not the TTL requested for template fills.
       cacheTtl = null
-      const toolGate = !apiOpenAI || protocol === 'anthropic.messages' ? runtimeToolGate(auditBody, logBag) : null
+      const toolGate = !apiOpenAI || protocol === 'anthropic.messages' ? runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState }) : null
       let result
       try {
         result = await runApiInference({
@@ -1548,6 +1551,12 @@ export function createHandleProtocol(deps) {
       let output
       let clientBody = hidePersonaUsageOnMessage(result.body, personaHideTokens)
       if (toolGate) clientBody = await toolGate.message(clientBody)
+      if (toolGate?.rejection) {
+        const error = toolGate.blockedError(logCtx.request_id)
+        stats.errors++
+        logBag.final_state = 'tool_gate_blocked'
+        return sendMapped(res, error)
+      }
       if (protocol === 'anthropic.messages') output = clientBody
       else if (protocol === 'openai.chat') output = fromClaudeToOpenAIChat(clientBody, inbound.model)
       else if (protocol === 'openai.completions') output = fromClaudeToOpenAICompletions(clientBody, inbound.model)
@@ -2088,7 +2097,7 @@ export function createHandleProtocol(deps) {
           } else if (protocol === 'openai.responses') {
             state = createResponsesStreamState(inbound.model || body.model, candidate.vmId)
           }
-          const toolGate = runtimeToolGate(auditBody, logBag)
+          const toolGate = runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState })
           const keepalive =
             anthropicKeepalive ||
             createDownstreamKeepalive({
@@ -2164,6 +2173,10 @@ export function createHandleProtocol(deps) {
                 }
               },
             })
+            if (toolGate?.rejection && !isClientCancelledResult(streamed)) {
+              return { ...streamed, ok: false, status: 403, terminalState: 'tool_gate_blocked',
+                body: toolGate.blockedError(logCtx.request_id).body }
+            }
             if (toolGate?.hasPending() && !streamed?.body?.error && !isClientCancelledResult(streamed)) {
               return {
                 ...streamed,
@@ -2310,8 +2323,8 @@ export function createHandleProtocol(deps) {
         stats.errors++
         logBag.error_code = result?.body?.error?.code || 'stream_incomplete'
         logBag.error_message = result?.body?.error?.message || 'Stream did not reach a verified terminal state'
-        if ([ErrorCode.CLUSTER_DELIVERY_UNCONFIRMED, TOOL_USE_GATE_INCOMPLETE].includes(logBag.error_code) && !res.writableEnded) {
-          const body = logBag.error_code === TOOL_USE_GATE_INCOMPLETE
+        if ([ErrorCode.CLUSTER_DELIVERY_UNCONFIRMED, TOOL_USE_GATE_INCOMPLETE, TOOL_USE_GATE_BLOCKED].includes(logBag.error_code) && !res.writableEnded) {
+          const body = [TOOL_USE_GATE_INCOMPLETE, TOOL_USE_GATE_BLOCKED].includes(logBag.error_code)
             ? result.body
             : mapProtocolClientError(result, logBag, logBag.error_code).body
           if (protocol === 'anthropic.messages') {
@@ -2350,9 +2363,15 @@ export function createHandleProtocol(deps) {
     }
 
     let output
-    const toolGate = runtimeToolGate(auditBody, logBag)
+    const toolGate = runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState })
     let clientBody = hidePersonaUsageOnMessage(result.body, personaHideTokens, cacheTtl)
     if (toolGate) clientBody = await toolGate.message(clientBody)
+    if (toolGate?.rejection) {
+      const error = toolGate.blockedError(logCtx.request_id)
+      stats.errors++
+      logBag.final_state = 'tool_gate_blocked'
+      return sendMapped(res, error)
+    }
     if (protocol === 'anthropic.messages') {
       output = { ...clientBody }
       if (String(req.headers['x-kin-debug'] || '') === '1') {

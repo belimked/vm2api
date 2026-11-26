@@ -6,7 +6,7 @@ import path from 'node:path'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { RefusalGuardsRepo } from '../../src/lib/db/repos/refusal-guards-repo.mjs'
 import { RefusalDeviceBlocksRepo } from '../../src/lib/db/repos/refusal-device-blocks-repo.mjs'
-import { observeUpstreamRisk, runProtocolIntercept } from '../../src/lib/protocol/intercept-gate.mjs'
+import { observeUpstreamRisk, rememberToolGateBlock, runProtocolIntercept } from '../../src/lib/protocol/intercept-gate.mjs'
 import {
   REFUSAL_GUARD_MESSAGE,
   REFUSAL_GUARD_SETTING,
@@ -33,6 +33,38 @@ function body(user, extra = {}) {
     messages: [{ role: 'user', content: user }],
   }
 }
+
+test('tool gate memory matches the inbound fingerprint exactly without banning devices', async () => {
+  const inbound = body('Check authorized account', { stream: true })
+  let stored
+  const repo = {
+    remember: (item) => { stored = item },
+    get: (fingerprint) => fingerprint === stored?.fingerprint ? { error_message: stored.errorMessage } : null,
+    hit: (fingerprint) => assert.equal(fingerprint, stored.fingerprint),
+  }
+  const policy = { ...refusalGuardPolicy(), enabled: true }
+  rememberToolGateBlock({ inbound, requestId: 'original', policy, repo,
+    rejection: { tool: 'Bash', reason: '审核未通过' } })
+  assert.equal(stored.fingerprint, refusalFingerprint(inbound, inbound))
+  assert.equal(stored.signature, null)
+  const devices = { recordViolation: () => assert.fail('must not ban'), block: () => assert.fail('must not block') }
+  const decision = await runProtocolIntercept({ inbound, policy, repo, devices, requestId: 'retry',
+    jev: { enabled: false, hard_regex_enabled: false }, distillRules: { enabled: false } })
+  assert.equal(decision.action, 'block')
+  assert.equal(decision.error.status, 403)
+  assert.equal(decision.error.body.error.code, 'tool_use_blocked')
+  assert.equal(decision.reason, 'tool_gate_memory')
+})
+
+test('similar tool gate memories are ignored', async () => {
+  const inbound = body('Check authorized account')
+  const repo = { get: () => null, nearest: () => ({ fingerprint: 'other', score: 1,
+    error_message: '工具审核拦截：Bash：审核未通过' }) }
+  const decision = await runProtocolIntercept({ inbound, repo,
+    policy: { ...refusalGuardPolicy(), enabled: true, similarity_enabled: true },
+    jev: { enabled: false, hard_regex_enabled: false }, distillRules: { enabled: false } })
+  assert.equal(decision.action, 'pass')
+})
 
 test('strikes escalate after expiry; offending sessions stay blocked and device aliases share an identity', () => {
   const db = createDatabase({ dbPath: ':memory:' })

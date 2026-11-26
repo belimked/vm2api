@@ -28,6 +28,8 @@ type ToolGateConfig = {
   timeout_ms: number
   fail_open: boolean
   max_context_chars: number
+  tool_windows: number
+  overflow: 'pause' | 'partial'
   questions: PolicyQuestion[]
 }
 
@@ -109,9 +111,30 @@ function ToolUseGateSettings() {
             }
           />
         </FieldLine>
+        <FieldLine label='拆分段数上限' htmlFor='tool-gate-windows'>
+          <Input
+            id='tool-gate-windows'
+            type='number'
+            min={1}
+            max={16}
+            value={current.tool_windows}
+            onChange={(e) => update({ tool_windows: Number(e.target.value) })}
+          />
+        </FieldLine>
+        <ToggleItem
+          label='超长参数部分审核后放行'
+          desc='参数（写文件的 heredoc 已压缩）按送审上限切段，各段并行送审。段数用完仍放不下时：关闭则暂停；开启则只审开头和结尾，都通过就放行并记录未审字数。'
+        >
+          <Switch
+            checked={current.overflow === 'partial'}
+            onCheckedChange={(on) =>
+              update({ overflow: on ? 'partial' : 'pause' })
+            }
+          />
+        </ToggleItem>
         <ToggleItem
           label='审核服务异常时放行'
-          desc='开启后，审核服务异常或超时不会阻止调用。参数不完整或超限仍暂停。'
+          desc='开启后，审核服务异常或超时不会阻止调用。参数不完整仍暂停。'
         >
           <Switch
             checked={current.fail_open}

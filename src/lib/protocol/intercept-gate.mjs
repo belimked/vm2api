@@ -29,6 +29,7 @@ import {
   matchHardPolicy,
   policyBlockError,
 } from './jev-intercept.mjs'
+import { isToolGateMemory, TOOL_GATE_MEMORY_PREFIX, toolUseBlockedError } from './tool-use-gate.mjs'
 import { gateVerdict } from './intercept-stats.mjs'
 import { prepareInterceptText } from './jev-prepare.mjs'
 
@@ -147,6 +148,22 @@ function similarityRatio(value) {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) return 0.9
   return n > 1 ? n / 100 : n
+}
+
+export function rememberToolGateBlock({ inbound, requestId, policy, repo, rejection }) {
+  if (!policy?.enabled || !rejection) return
+  try {
+    repo?.remember?.({
+      fingerprint: refusalFingerprint(inbound, inbound),
+      model: inbound?.model || '',
+      requestId,
+      errorMessage: TOOL_GATE_MEMORY_PREFIX + `${rejection.tool}：${rejection.reason}`,
+      preview: refusalPreview(inbound, inbound),
+      signature: null,
+    })
+  } catch {
+    console.warn('[risk-audit] failed to persist tool gate block')
+  }
 }
 
 export function commitProtocolBlock(decision, { repo, devices, policy, requestId } = {}) {
@@ -369,6 +386,18 @@ export async function evaluateProtocolIntercept({
     })
     // Our own Jev/regex block used to be stored here and then blocked every retry.
     if (match && match.kind !== 'device' && isPolicyBlockMemory(match.row?.error_message)) match = null
+    if (match?.kind === 'similar' && isToolGateMemory(match.row?.error_message)) match = null
+    if (match?.kind === 'exact' && isToolGateMemory(match.row?.error_message)) {
+      const tool = String(match.row.error_message).slice(TOOL_GATE_MEMORY_PREFIX.length).split('：')[0] || ''
+      const error = toolUseBlockedError({ requestId, tool, reason: '此前已被工具审核拦截' })
+      return reject({
+        kind: 'exact', via: 'tool-gate-memory', final_state: 'tool_gate_blocked',
+        error, errorMessage: error.body.error.message,
+        intercept: gateVerdict({ kind: 'block', by: 'refusal', keyword: 'tool_gate' }),
+        deviceId: match.deviceId, fingerprint: match.fingerprint,
+        banDevice: false, reason: 'tool_gate_memory',
+      })
+    }
     if (match) {
       const error = refusalGuardError(requestId, match)
       return reject({
