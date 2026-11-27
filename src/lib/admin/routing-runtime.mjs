@@ -599,6 +599,7 @@ export function createRoutingRuntime(ctx) {
         debugRetainDays: routingConfig.logging.debug_retain_days,
         maxMb: routingConfig.logging.max_mb,
         mutedErrorClasses: routingConfig.logging.muted_error_classes,
+        bodyArchive: routingConfig.logging.body_archive,
       })
     }
     if (nextRedaction) routingConfig.redaction = nextRedaction

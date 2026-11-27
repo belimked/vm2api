@@ -48,7 +48,20 @@ export type RequestLogItem = {
   outbound_headers?: Record<string, unknown> | null
   outbound_headers_source?: 'cli_final' | 'unavailable' | null
   worker_envelope_headers?: Record<string, unknown> | null
+  /**
+   * 完整请求体文件（gzip 落盘，只有管理端能看到）。bytes 是压缩后大小；
+   * reasons: classifier 自动模式审核 / status 状态非 200 / usage_policy 返回含 Usage Policy。
+   * null 表示没存或已过文件保留期。
+   */
+  body_archive?: BodyArchiveInfo | null
   [key: string]: unknown
+}
+
+export type BodyArchiveInfo = {
+  bytes: number
+  day?: string
+  mtime?: string
+  reasons?: string[]
 }
 
 export type DebugResponseCapture = {

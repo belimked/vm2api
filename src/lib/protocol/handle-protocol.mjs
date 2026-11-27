@@ -790,7 +790,7 @@ export function createHandleProtocol(deps) {
     ) {
       if (!inbound.model) inbound = { ...inbound, model: routeMeta.routeModel }
     }
-    logBag.inbound_body = logCtx.mode === 'debug' ? inbound : null
+    logBag.inbound_body = logCtx.mode === 'debug' || logCtx.archive_bodies ? inbound : null
     logBag.inbound_summary = summarizeBody(inbound)
     logBag.model = inbound?.model || routeMeta?.routeModel || null
     logBag.requested_model = inbound?.model || routeMeta?.routeModel || null

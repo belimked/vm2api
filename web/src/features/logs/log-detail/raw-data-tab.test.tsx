@@ -15,6 +15,21 @@ function render(item: RequestLogItem) {
 }
 
 describe('outbound request header provenance', () => {
+  it('offers the full request body download only when a file exists', () => {
+    const withFile = render({
+      outbound_headers: { 'x-app': 'cli' },
+      body_archive: { bytes: 48_000, reasons: ['classifier', 'status'] },
+    })
+    expect(withFile).toContain('下载完整请求体')
+    expect(withFile).toContain('自动模式审核、状态非 200')
+    expect(render({ outbound_headers: { 'x-app': 'cli' } })).not.toContain(
+      '下载完整请求体'
+    )
+    // Classifier records have no stored bodies; the button still shows.
+    expect(
+      render({ body_archive: { bytes: 10, reasons: ['classifier'] } })
+    ).toContain('下载完整请求体')
+  })
   it('identifies CLI final headers and keeps the envelope separate', () => {
     const html = render({
       outbound_headers_source: 'cli_final',

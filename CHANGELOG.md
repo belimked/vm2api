@@ -4,6 +4,7 @@
 
 - 工具审核拦截改为 403 `tool_use_blocked`；Jev 拦截写入精确拒答指纹，重命中不封设备。
 - 工具审核：写入文件的 heredoc 正文送审前压缩；超长参数按 `max_context_chars` 切段并行送审（`tool_windows` 1–16，默认 4）；段数不够时由 `overflow` 决定暂停（默认）或只审首尾后放行。
+- 日志：新增「完整请求体文件」（`logging.body_archive`，默认关；保留 3 天、文件夹上限 3072 MB）。开启后把自动模式审核请求、状态非 200、状态 200 但返回含 Usage Policy（或 `stop_reason=refusal`）的请求，完整入站请求体脱敏后 gzip 存到 `data/request-logs/bodies/YYYY-MM-DD/<request_id>.json.gz`；不受 `KIN_REQUEST_LOG_DEBUG_CHARS` 截断，普通模式也生效；清理任务按文件时间删过期文件、超上限时从最旧的删起。自动模式审核请求在库里仍不存请求体；classifier 标记缺失时按 system 开头兜底识别。面板：设置 → 日志新增开关、保留天数、文件夹上限；日志详情「原始数据」页签新增「下载完整请求体」（`GET /api/panel/request-logs/:id/body`，仅管理端）。
 
 ## 1.4.191+cus — 2026-11-25（定制分支 cus/v1.4.191）
 

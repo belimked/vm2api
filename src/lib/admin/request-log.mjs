@@ -25,6 +25,7 @@ import { classifyRequestError, resolveMutedErrorClasses } from './error-class.mj
 import { costColumnsFromUsage, normalizeUsage } from './pricing.mjs'
 import { disjointOpenaiUsage } from '../protocol/openai-usage.mjs'
 import { REASONING_EFFORTS, sessionIdForLog } from '../protocol/log-fields.mjs'
+import { BodyArchive, bodyArchiveReasons, normalizeBodyArchiveConfig } from './body-archive.mjs'
 
 /** Persist the token a client actually sent — only for failed ingress auth. */
 export function presentedApiKeyForLog(token) {
@@ -67,6 +68,7 @@ export function normalizeLoggingConfig(raw = {}) {
     retain_days: retainDays,
     debug_retain_days: debugRetainDays,
     max_mb: clampInt(raw.max_mb ?? raw.maxMb, 0, 102400, DEFAULT_MAX_MB),
+    body_archive: normalizeBodyArchiveConfig(raw.body_archive),
   }
 }
 
@@ -448,12 +450,14 @@ export class RequestLogStore {
     this.maxMb = Number.isFinite(maxMb) && maxMb >= 0 ? maxMb : DEFAULT_MAX_MB
     this.jsonlMirror = !!jsonlMirror
     this.mutedErrorClasses = resolveMutedErrorClasses(null)
+    this.bodyArchive = new BodyArchive({ dir: path.join(this.root, 'bodies') })
     this._mem = [] // recent normal summaries for panel hot path
     this._memMax = 200
     this._cleanupTimer = null
   }
 
-  setConfig({ mode, retainDays, debugRetainDays, maxMb, mutedErrorClasses } = {}) {
+  setConfig({ mode, retainDays, debugRetainDays, maxMb, mutedErrorClasses, bodyArchive } = {}) {
+    if (bodyArchive !== undefined) this.bodyArchive.setConfig(bodyArchive)
     if (mode != null) {
       const m = String(mode).trim().toLowerCase()
       if (MODES.has(m)) this.mode = m
@@ -512,6 +516,8 @@ export class RequestLogStore {
       // readable by the owning tenant; only the operator's configured mode may
       // enable them, never the caller's x-kin-debug / x-kin-log header.
       capture_outbound: this.mode === 'debug',
+      // 完整请求体落盘（body-archive.mjs）：开启后普通模式也要拿到入站体和响应。
+      archive_bodies: mode !== 'off' && this.bodyArchive.enabled,
     }
   }
 
@@ -522,7 +528,7 @@ export class RequestLogStore {
    * never wraps the response.
    */
   tapResponse(ctx, res) {
-    if (!ctx || ctx.mode !== 'debug' || !res || ctx.response) return
+    if (!ctx || (ctx.mode !== 'debug' && !ctx.archive_bodies) || !res || ctx.response) return
     const limit = Math.max(0, this.maxDebugBodyChars)
     const captured = { status: null, headers: null, body: '', bytes: 0, truncated: false }
     ctx.response = captured
@@ -669,6 +675,8 @@ export class RequestLogStore {
     }
     const classified = classifyRequestError(summary)
     if (classified?.error_class) summary.error_class = classified.error_class
+    const archiveReasons =
+      ctx.archive_bodies && extra.inbound_body != null ? bodyArchiveReasons(extra, ctx.response) : []
 
     const persist = () => {
       summary.vm_owner_user_id = this.repo.vmOwnerOf(extra.vm_id)
@@ -694,6 +702,7 @@ export class RequestLogStore {
         cache_prefix: extra.cache_prefix || null,
         cache_continuity: extra.cache_continuity || null,
         classifier: extra.classifier || null,
+        body_archive: archiveReasons.length ? { reasons: archiveReasons } : null,
         outbound_headers:
           ctx.capture_outbound && extra.outbound_headers != null ? redactHeaders(extra.outbound_headers) : null,
         outbound_headers_source: ctx.capture_outbound ? extra.outbound_headers_source || null : null,
@@ -713,11 +722,52 @@ export class RequestLogStore {
         this.repo.insertDebug(summary.request_id || summary.id, summary.ts, debugRec)
       } catch {}
     }
+    if (archiveReasons.length) this._archiveBody(summary, extra, archiveReasons)
     this._mem.push(summary)
     if (this._mem.length > this._memMax) this._mem = this._mem.slice(-this._memMax)
     if (writeBehindArmed()) enqueueWrite(persist)
     else persist()
     return summary
+  }
+
+  /** 完整请求体落盘：同步做脱敏序列化（入站体之后可能被改写），压缩和写文件异步。 */
+  _archiveBody(summary, extra, reasons) {
+    let bodyJson
+    try {
+      bodyJson = redactSecrets(redactImagePayloads(extra.inbound_body))
+    } catch {
+      return
+    }
+    const meta = {
+      request_id: summary.request_id,
+      ts: summary.ts,
+      reasons,
+      status: summary.status,
+      upstream_status: summary.upstream_status,
+      protocol: summary.protocol,
+      path: summary.path,
+      model: summary.model,
+      session_id: summary.session_id ?? null,
+      api_key_id: summary.api_key_id,
+      vm_id: summary.vm_id,
+      account_id: summary.account_id,
+      error_code: summary.error_code,
+      error_message: summary.error_message,
+      stop_reason: extra.stop_reason ?? null,
+      classifier: extra.classifier || null,
+      body_chars: bodyJson.length,
+    }
+    this.bodyArchive.write({ requestId: summary.request_id, ts: summary.ts, meta, bodyJson }).catch(() => {})
+  }
+
+  /** 日志详情用：文件还在就返回大小和日期，过期或没存返回 null。 */
+  bodyArchiveInfo(requestId, ts = null) {
+    const hit = this.bodyArchive.find(requestId, ts)
+    return hit ? { bytes: hit.bytes, day: hit.day, mtime: hit.mtime } : null
+  }
+
+  bodyArchiveFile(requestId, ts = null) {
+    return this.bodyArchive.find(requestId, ts)
   }
 
   /** Optional legacy JSONL mirror for external log collectors. */
@@ -848,6 +898,7 @@ export class RequestLogStore {
       retain_days: this.retainDays,
       debug_retain_days: this.debugRetainDays,
       max_mb: this.maxMb,
+      body_archive: this.bodyArchive.snapshot(),
       muted_error_classes: this.mutedErrorClasses.slice(),
       recent_normal: this._mem.length,
       backend: 'sqlite',
@@ -873,6 +924,9 @@ export class RequestLogStore {
     } catch {}
     this._cleanupLegacyFiles(this.retainDays, this.root)
     this._cleanupLegacyFiles(this.debugRetainDays, path.join(this.root, 'debug'))
+    try {
+      this.bodyArchive.cleanup()
+    } catch {}
   }
 
   startCleanupScheduler({ intervalMs = CLEANUP_INTERVAL_MS } = {}) {

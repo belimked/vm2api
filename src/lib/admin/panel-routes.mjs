@@ -1679,6 +1679,7 @@ export function createPanelHandler(ctx) {
         debugRetainDays: ctx.routingConfig.logging.debug_retain_days,
         maxMb: ctx.routingConfig.logging.max_mb,
         mutedErrorClasses: ctx.routingConfig.logging.muted_error_classes,
+        bodyArchive: ctx.routingConfig.logging.body_archive,
       })
     }
     stickyRouter.reloadConfig(ctx.routingConfig)
@@ -2961,12 +2962,41 @@ export function createPanelHandler(ctx) {
           }),
         )
       }
+      if (req.method === 'GET' && /^\/api\/panel\/request-logs\/[^/]+\/body$/.test(p)) {
+        // 完整请求体文件含整段对话（自动模式审核请求还带 CLAUDE.md），只给管理端下载。
+        const requestId = p.split('/')[4]
+        const notFound = () => json(res, 404, { ok: false, error: { message: 'body archive not found' } })
+        if (panelIdentity(req).role === 'user') return notFound()
+        const rec = requestLog.getDebug(requestId)
+        const hit = requestLog.bodyArchiveFile?.(requestId, rec?.ts || rec?.created_at || null)
+        if (!hit) return notFound()
+        const filename = `${String(requestId).replace(/[^A-Za-z0-9._-]/g, '_')}.json`
+        res.writeHead(
+          200,
+          corsHeadersForRequest(req, {
+            'content-type': 'application/json; charset=utf-8',
+            'content-encoding': 'gzip',
+            'content-length': String(hit.bytes),
+            'content-disposition': `attachment; filename="${filename}"`,
+            'cache-control': 'no-store',
+            'access-control-expose-headers': 'content-disposition',
+          }),
+        )
+        fs.createReadStream(hit.file)
+          .on('error', () => res.destroy())
+          .pipe(res)
+        return
+      }
       if (req.method === 'GET' && /^\/api\/panel\/request-logs\/[^/]+$/.test(p)) {
         const id = p.split('/').pop()
         const owner_user_id = panelIdentity(req).role === 'user' ? req.panelUserId : null
         const rec = requestLog.getDebug(id, { owner_user_id })
         if (!rec) return json(res, 404, { ok: false, error: { message: 'debug log not found' } })
-        return json(res, 200, { ok: true, item: rec })
+        const archive = owner_user_id ? null : requestLog.bodyArchiveInfo?.(id, rec.ts || rec.created_at || null)
+        const item = archive
+          ? { ...rec, body_archive: { ...(rec.body_archive || {}), ...archive } }
+          : { ...rec, body_archive: null }
+        return json(res, 200, { ok: true, item })
       }
 
       // ---- Scrolling usage logs (keyset cursor, camelCase rows) ----

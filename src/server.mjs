@@ -528,6 +528,7 @@ if (routingConfig?.logging) {
     debugRetainDays: routingConfig.logging.debug_retain_days,
     maxMb: routingConfig.logging.max_mb,
     mutedErrorClasses: routingConfig.logging.muted_error_classes,
+    bodyArchive: routingConfig.logging.body_archive,
   })
 }
 runAtActivation('request-log-cleanup', () => {
@@ -943,6 +944,7 @@ backupService.onRestored((db) => {
     debugRetainDays: routingConfig.logging?.debug_retain_days,
     maxMb: routingConfig.logging?.max_mb,
     mutedErrorClasses: routingConfig.logging?.muted_error_classes,
+    bodyArchive: routingConfig.logging?.body_archive,
   })
   healthMonitor?.setConfig(routingConfig.health_probe)
   credentialRefreshMonitor?.setConfig(normalizeCredentialRefreshConfig(routingConfig.credential_refresh))

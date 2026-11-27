@@ -1,7 +1,10 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import type { RequestLogItem } from '@/types/panel-logs'
-import { Check, Copy } from 'lucide-react'
+import type { BodyArchiveInfo, RequestLogItem } from '@/types/panel-logs'
+import { Check, Copy, Download } from 'lucide-react'
+import { toast } from 'sonner'
+import { panelFetch } from '@/lib/api'
+import { fmtBytes } from '@/lib/format'
 import { maskPresentedKey } from '@/lib/log-mute'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -118,6 +121,70 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
+const ARCHIVE_REASON: Record<string, string> = {
+  classifier: '自动模式审核',
+  status: '状态非 200',
+  usage_policy: 'Usage Policy',
+}
+
+/** 完整请求体文件：后端以 gzip 转发，浏览器自动解压，存成 <request_id>.json。 */
+function BodyArchiveDownload({
+  requestId,
+  archive,
+}: {
+  requestId: string
+  archive: BodyArchiveInfo
+}) {
+  const [busy, setBusy] = useState(false)
+  const reasons = (archive.reasons ?? [])
+    .map((r) => ARCHIVE_REASON[r] ?? r)
+    .join('、')
+  async function download() {
+    setBusy(true)
+    try {
+      const res = await panelFetch(
+        `/api/panel/request-logs/${encodeURIComponent(requestId)}/body`
+      )
+      if (!res.ok) {
+        throw new Error(
+          res.status === 404
+            ? '文件不存在或已过保留期'
+            : `下载失败（${res.status}）`
+        )
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${requestId}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '下载失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className='flex flex-wrap items-center gap-2 text-xs'>
+      <Button
+        type='button'
+        variant='outline'
+        size='sm'
+        className='h-7 gap-1 px-2 text-xs'
+        disabled={busy}
+        onClick={download}
+      >
+        <Download className='h-3 w-3' />
+        {busy ? '下载中…' : '下载完整请求体'}
+      </Button>
+      <span className='text-muted-foreground'>
+        {reasons ? `${reasons} · ` : ''}压缩后 {fmtBytes(archive.bytes)}
+      </span>
+    </div>
+  )
+}
+
 /**
  * 「原始数据」页签：debug 采样记录（`/api/panel/request-logs/:id`）。
  * 只有 debug 模式落库的请求才有头/体；普通请求给出开启方式。
@@ -144,18 +211,26 @@ export function RawDataTab({
   }
   if (!list.length) {
     return (
-      <div className='space-y-2 rounded-lg border border-dashed p-6 text-sm text-muted-foreground'>
-        <p>
-          {logMode === 'debug'
-            ? '这条 debug 记录没有可展示的原始数据（可能已过 debug 保留期）。'
-            : '该请求未开启 debug 采样，没有保存原始请求体与响应体。'}
-        </p>
-        <p className='text-xs'>
-          在「设置 → 日志」把模式切到
-          Debug，之后的请求会保存入站/出站请求体和返回给客户端的响应。 请求时带{' '}
-          <code>x-kin-debug: 1</code>{' '}
-          只保存入站请求体与响应，出站请求体（含网关改写）不保存。
-        </p>
+      <div className='space-y-3'>
+        {item?.body_archive ? (
+          <BodyArchiveDownload
+            requestId={requestId}
+            archive={item.body_archive}
+          />
+        ) : null}
+        <div className='space-y-2 rounded-lg border border-dashed p-6 text-sm text-muted-foreground'>
+          <p>
+            {logMode === 'debug'
+              ? '这条 debug 记录没有可展示的原始数据（可能已过 debug 保留期）。'
+              : '该请求未开启 debug 采样，没有保存原始请求体与响应体。'}
+          </p>
+          <p className='text-xs'>
+            在「设置 → 日志」把模式切到
+            Debug，之后的请求会保存入站/出站请求体和返回给客户端的响应。
+            请求时带 <code>x-kin-debug: 1</code>{' '}
+            只保存入站请求体与响应，出站请求体（含网关改写）不保存。
+          </p>
+        </div>
       </div>
     )
   }
@@ -164,6 +239,12 @@ export function RawDataTab({
   const text = pretty(current.value)
   return (
     <div className='space-y-3'>
+      {item?.body_archive ? (
+        <BodyArchiveDownload
+          requestId={requestId}
+          archive={item.body_archive}
+        />
+      ) : null}
       <div className='flex flex-wrap items-center gap-2 text-xs'>
         {item?.upstream_status != null && item.upstream_status !== '' ? (
           <Badge variant='outline' className='font-mono'>
