@@ -265,3 +265,14 @@ test('reseller model ids with slash or bracket suffix are kept', () => {
   assert.equal(normalizeJevUsage(value({ response_model: undefined, model: 'typesafe/jev[slow]' })).model, 'typesafe/jev[slow]')
   assert.equal(normalizeJevUsage(value({ response_model: 'bad model <x>', model: 'jev-latest' })).model, 'jev-latest')
 })
+
+test('commandcode Jev via a reseller is priced at the Command Code list price', () => {
+  const row = normalizeJevUsage(value({ official_typesafe: false, response_model: 'commandcode/jev-1.14.0' }))
+  assert.equal(row.input_nano_usd_per_token, 42)
+  assert.equal(row.estimated_cost_nano_usd, row.input_tokens * 42)
+  assert.equal(row.pricing_basis, 'commandcode-public-2026-11-27-estimate')
+  assert.equal(normalizeJevUsage(value({ official_typesafe: false, response_model: 'commandcode/jev' })).input_nano_usd_per_token, 42)
+  const other = normalizeJevUsage(value({ official_typesafe: false, response_model: 'neohorse/jev-4b' }))
+  assert.equal(other.estimated_cost_nano_usd, null)
+  assert.equal(other.pricing_basis, 'unknown')
+})

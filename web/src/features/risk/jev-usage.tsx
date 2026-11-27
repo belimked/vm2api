@@ -239,8 +239,8 @@ export function JevUsagePanel({
             <p className='text-xs text-muted-foreground'>
               {tokens(summary.total.unknown_usage_requests)} 次未完整返回用量，
               {tokens(summary.total.unknown_cost_requests)}{' '}
-              次费用未知。未知不等于免费；估算使用本版本内置的 2026-10-25
-              公开单价，不含其他系统或组织的用量。
+              次费用未知。未知不等于免费；估算使用本版本内置的公开单价（官方 TypeSafe
+              与 commandcode/jev 系列均为每百万输入 $0.042，输出免费；中转站实际计费可能不同），不含其他系统或组织的用量。
             </p>
             {summary.storage_errors_since_start > 0 && (
               <p role='alert' className='text-sm text-destructive'>

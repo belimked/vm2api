@@ -27,8 +27,12 @@ export function normalizeJevUsage(value = {}) {
   const provider = ['jev', 'laya', 'modernbert'].includes(value.provider) ? value.provider : 'jev'
   const input = count(value.usage?.input_tokens)
   const output = count(value.usage?.output_tokens)
-  // A public-list estimate only for the official TypeSafe endpoint, not reseller billing.
-  const priced = provider === 'jev' && value.official_typesafe === true
+  const model = label(value.response_model) || label(value.model)
+  // Public-list estimates: official TypeSafe endpoint, or Command Code's Jev list price
+  // ($0.042 / 1M input, output free; commandcode.ai/models, 2026-11-27). Not reseller billing.
+  const official = provider === 'jev' && value.official_typesafe === true
+  const commandcode = provider === 'jev' && !official && /^commandcode\/jev(?:-|$)/.test(model)
+  const priced = official || commandcode
   const iso =
     typeof value.created_at === 'string' &&
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.created_at) &&
@@ -40,7 +44,7 @@ export function normalizeJevUsage(value = {}) {
     created_at: iso,
     request_id: label(value.request_id, 100),
     provider,
-    model: label(value.response_model) || label(value.model),
+    model,
     key_fingerprint: /^[a-f0-9]{12}$/.test(value.key_fingerprint || '') ? value.key_fingerprint : '',
     http_status:
       Number.isInteger(value.http_status) && value.http_status >= 100 && value.http_status <= 599
@@ -55,7 +59,11 @@ export function normalizeJevUsage(value = {}) {
     estimated_cost_nano_usd: priced && input !== null ? input * 42 : null,
     input_nano_usd_per_token: priced ? 42 : null,
     output_nano_usd_per_token: priced ? 0 : null,
-    pricing_basis: priced ? 'typesafe-public-2026-10-25-estimate' : 'unknown',
+    pricing_basis: official
+      ? 'typesafe-public-2026-10-25-estimate'
+      : commandcode
+        ? 'commandcode-public-2026-11-27-estimate'
+        : 'unknown',
   }
 }
 export function recordJevUsage(value) {
