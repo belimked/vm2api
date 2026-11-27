@@ -206,6 +206,8 @@ type EndpointForm = {
   uid: string
   base_url: string
   from_base_url: string
+  model: string
+  fallback: boolean
   keys: string[]
   expanded: boolean
   clearSaved: boolean
@@ -251,7 +253,7 @@ function ownedDiffers(a: JevInterceptConfig, b: JevInterceptConfig) {
 function decisionKey(base: string) {
   const text = base.trim().replace(/\/+$/, '')
   if (!text) return ''
-  if (/\/(systemone|decide)$/i.test(text)) return text.toLowerCase()
+  if (/\/(systemone|decide|decisions)$/i.test(text)) return text.toLowerCase()
   if (/\/v1$/i.test(text)) return `${text}/systemone`.toLowerCase()
   return `${text}/v1/systemone`.toLowerCase()
 }
@@ -290,6 +292,8 @@ function formsFrom(data: JevInterceptConfig): EndpointForm[] {
     uid: `saved:${index}:${base}`,
     base_url: base,
     from_base_url: base,
+    model: data.endpoints?.[index]?.model || '',
+    fallback: data.endpoints?.[index]?.fallback === true,
     keys: [''],
     expanded: false,
     clearSaved: false,
@@ -304,7 +308,10 @@ function endpointsDirty(
   const current = forms.map((form) => form.base_url.trim())
   if (savedBases(data).join('\n') !== current.join('\n')) return true
   return forms.some(
-    (form) => form.clearSaved || form.keys.some((key) => key.trim())
+    (form, index) =>
+      form.clearSaved || form.keys.some((key) => key.trim()) ||
+      form.model.trim() !== (data.endpoints?.[index]?.model || '') ||
+      form.fallback !== (data.endpoints?.[index]?.fallback === true)
   )
 }
 
@@ -313,6 +320,8 @@ function blankForm(base = ''): EndpointForm {
     uid: `custom:${randomUUID()}`,
     base_url: base,
     from_base_url: '',
+    model: '',
+    fallback: false,
     keys: [''],
     expanded: true,
     clearSaved: false,
@@ -417,6 +426,8 @@ export function ModelSettings({
           const typed = form.keys.map((key) => key.trim()).filter(Boolean)
           const row: Record<string, unknown> = {
             base_url: form.base_url.trim(),
+            model: form.model.trim(),
+            fallback: form.fallback,
           }
           if (form.from_base_url) row.from_base_url = form.from_base_url
           if (form.clearSaved) {
@@ -464,7 +475,7 @@ export function ModelSettings({
         body: JSON.stringify({
           base_url: base,
           api_keys: typed,
-          model: draft.model,
+          model: form.model.trim() || draft.model,
           timeout_ms: Number(draft.timeout_ms) || 2000,
         }),
       })
@@ -729,6 +740,23 @@ export function ModelSettings({
                     ) : null}
                   </div>
                 </FieldLine>
+                <FieldLine label='模型' htmlFor={`jev-model-${form.uid}`}>
+                  <div className='space-y-2'>
+                    <Input
+                      id={`jev-model-${form.uid}`}
+                      className='font-mono'
+                      value={form.model}
+                      placeholder='留空用下方全局模型'
+                      onChange={(e) => patchForm(form.uid, { model: e.target.value })}
+                    />
+                    <ToggleItem label='仅备用' desc='主地址都失败时才用'>
+                      <Switch
+                        checked={form.fallback}
+                        onCheckedChange={(fallback) => patchForm(form.uid, { fallback })}
+                      />
+                    </ToggleItem>
+                  </div>
+                </FieldLine>
                 <FieldLine label='Key' htmlFor={`jev-key-${form.uid}`}>
                   <div className='space-y-2'>
                     <div className='flex flex-wrap gap-2'>
@@ -911,7 +939,7 @@ export function ModelSettings({
           <p className='text-xs text-muted-foreground'>
             Laya 和 ModernBERT
             的示例地址相同，已在列表里就不会再加一行。TypeSafe 常用
-            jev-latest，ModernBERT 常用 english，Laya 可以留空。
+            jev-latest，ModernBERT 常用 english，Laya 可以留空。各地址可单独填模型。
           </p>
         </div>
         <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem]'>

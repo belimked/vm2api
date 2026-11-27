@@ -772,6 +772,24 @@ function normalizeKeys(raw) {
   return list
 }
 
+function normalizeEndpointOptions(raw) {
+  const options = []
+  const seen = new Set()
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const base_url = endpointBase(item.base_url)
+    const decision = decisionUrl(base_url)
+    if (!decision || seen.has(decision)) continue
+    const model = typeof item.model === 'string' ? item.model.trim().slice(0, 120) : ''
+    const fallback = item.fallback === true
+    if (!model && !fallback) continue
+    seen.add(decision)
+    options.push({ base_url, model, fallback })
+    if (options.length >= 20) break
+  }
+  return options
+}
+
 export function normalizeJevConfig(raw) {
   const base = defaultJevConfig()
   // Run the defaults through the same normalisation: `publicJevConfig(null)`
@@ -813,6 +831,7 @@ export function normalizeJevConfig(raw) {
       .slice(0, 300),
     api_key: apiKeys[0] || '',
     api_keys: apiKeys,
+    endpoint_options: normalizeEndpointOptions(raw.endpoint_options),
     model: String(raw.model || '')
       .trim()
       .slice(0, 120),
@@ -1072,6 +1091,14 @@ export function validateJevPatch(body = {}) {
           problems.push('from_base_url 必须是字符串')
           break
         }
+        if (Object.hasOwn(item, 'model') && (typeof item.model !== 'string' || item.model.length > 120)) {
+          problems.push('endpoints 的 model 必须是最长 120 字符的字符串')
+          break
+        }
+        if (Object.hasOwn(item, 'fallback') && typeof item.fallback !== 'boolean') {
+          problems.push('endpoints 的 fallback 必须是布尔')
+          break
+        }
         if (Object.hasOwn(item, 'append') && typeof item.append !== 'boolean') {
           problems.push('append 必须是布尔')
           break
@@ -1099,6 +1126,7 @@ export function applyJevPatch(settings, body = {}) {
     ...current,
     ...body,
     base_url: flat ? flat.base_url : Object.hasOwn(body, 'base_url') ? body.base_url : current.base_url,
+    endpoint_options: flat ? flat.endpoint_options : current.endpoint_options,
     api_keys: flat
       ? flat.api_keys
       : Object.hasOwn(body, 'api_keys')
@@ -1379,7 +1407,7 @@ export function resolvedPolicyModel(cfg) {
 }
 
 /**
- * Full `/v1/systemone` or `/decide` URLs are used as given.
+ * Full `/v1/systemone`, `/decide` or `/decisions` URLs are used as given.
  * A host or `/v1` base gets the Jev path Laya also serves.
  */
 export function decisionUrl(baseUrl) {
@@ -1387,7 +1415,7 @@ export function decisionUrl(baseUrl) {
     .trim()
     .replace(/\/+$/, '')
   if (!base) return ''
-  if (/\/(systemone|decide)$/i.test(base)) return base
+  if (/\/(systemone|decide|decisions)$/i.test(base)) return base
   if (/\/v1$/i.test(base)) return `${base}/systemone`
   return `${base}/v1/systemone`
 }
@@ -1469,12 +1497,12 @@ function dedupKey(url, model, config, state) {
   return `${url}\0${model}\0${config.safety_threshold}\0${config.block_if_below}\0${asked}\0${state}`
 }
 
-/** Model catalog lives beside systemone: strip /decide and /v1, then add /v1/models. */
+/** Model catalog lives beside systemone: strip decision suffixes and /v1, then add /v1/models. */
 export function policyModelsUrl(baseUrl) {
   let base = String(baseUrl || '')
     .trim()
     .replace(/\/+$/, '')
-  base = base.replace(/\/(systemone|decide)$/i, '').replace(/\/+$/, '')
+  base = base.replace(/\/(systemone|decide|decisions)$/i, '').replace(/\/+$/, '')
   base = base.replace(/\/v1$/i, '')
   if (!/^https?:\/\//i.test(base)) return ''
   return `${base}/v1/models`
@@ -1593,13 +1621,19 @@ function splitKeyLine(line) {
 
 function jevTargets(config) {
   const lines = config.api_keys.length ? config.api_keys : ['']
+  const options = new Map(config.endpoint_options.map((item) => [decisionUrl(item.base_url), item]))
+  const globalModel = resolvedPolicyModel(config)
   const out = []
   for (const line of lines) {
     const split = splitKeyLine(line)
     const sourceBase = endpointBase(split.baseUrl || config.base_url)
     const url = decisionUrl(sourceBase)
     if (!url) continue
-    out.push({ url, sourceBase, apiKey: split.apiKey, id: jevKeyId(url, split.apiKey) })
+    const option = options.get(url)
+    out.push({
+      url, sourceBase, apiKey: split.apiKey, id: jevKeyId(url, split.apiKey),
+      model: option?.model || globalModel, fallback: option?.fallback === true,
+    })
   }
   return out
 }
@@ -1621,13 +1655,15 @@ export function publicJevEndpoints(config) {
   const normalized = normalizeJevConfig(config)
   const groups = []
   const index = new Map()
+  const options = new Map(normalized.endpoint_options.map((item) => [decisionUrl(item.base_url), item]))
   const touch = (base) => {
     const shown = endpointBase(base)
     const decision = decisionUrl(shown)
     if (!decision) return null
     let row = index.get(decision)
     if (!row) {
-      row = { base_url: shown, keys: [] }
+      const option = options.get(decision)
+      row = { base_url: shown, model: option?.model || '', fallback: option?.fallback === true, keys: [] }
       index.set(decision, row)
       groups.push(row)
     }
@@ -1683,12 +1719,20 @@ function flattenJevEndpoints(current, endpoints) {
     return found
   }
   const lines = []
+  const oldOptions = new Map(normalized.endpoint_options.map((item) => [decisionUrl(item.base_url), item]))
+  const endpoint_options = []
   let primary = ''
   endpoints.forEach((endpoint, index) => {
     const base = endpointBase(endpoint?.base_url)
     if (!primary) primary = base
     const from = endpointBase(endpoint?.from_base_url) || base
     const previous = take(from)
+    const old = oldOptions.get(decisionUrl(from)) || oldOptions.get(decisionUrl(base))
+    endpoint_options.push({
+      base_url: base,
+      model: Object.hasOwn(endpoint, 'model') ? endpoint.model : old?.model || '',
+      fallback: Object.hasOwn(endpoint, 'fallback') ? endpoint.fallback : old?.fallback === true,
+    })
     const typed = Array.isArray(endpoint?.api_keys)
       ? endpoint.api_keys
           .map((item) =>
@@ -1712,7 +1756,7 @@ function flattenJevEndpoints(current, endpoints) {
       else if (bound) lines.push(`${bound} ${split.apiKey}`)
     }
   })
-  return { base_url: primary, api_keys: lines }
+  return { base_url: primary, api_keys: lines, endpoint_options }
 }
 
 function clampTimeout(timeoutMs, fallback = TIMEOUT_DEFAULT) {
@@ -1901,7 +1945,9 @@ export async function probePolicyBaseline({
   if (!picked.decision || typeof fetchImpl !== 'function') {
     throw Object.assign(new Error('先填模型地址'), { code: 'base_url_required' })
   }
-  const chosen = model === undefined ? resolvedPolicyModel(picked.normalized) : String(model || '').trim()
+  const chosen = String(model || '').trim() ||
+    picked.normalized.endpoint_options.find((item) => decisionUrl(item.base_url) === picked.decision)?.model ||
+    resolvedPolicyModel(picked.normalized)
   const wait = clampTimeout(timeoutMs ?? picked.normalized.timeout_ms)
   const keys = picked.keys.length ? picked.keys : ['']
   const results = []
@@ -1930,7 +1976,7 @@ function quotaCandidates(baseUrl) {
     return []
   }
   const root = decision
-    .replace(/\/(systemone|decide)$/i, '')
+    .replace(/\/(systemone|decide|decisions)$/i, '')
     .replace(/\/v1$/i, '')
     .replace(/\/+$/, '')
   return [...new Set([origin, root].filter(Boolean))].flatMap((base) => QUOTA_PATHS.map((path) => `${base}${path}`))
@@ -2078,17 +2124,19 @@ export async function classifyJev(text, cfg, fetchImpl = globalThis.fetch, now =
     if (cached) return { ...cached, reason: 'replay' }
   }
   const payload = { state: document, questions: questionsFor(config) }
-  if (model) payload.model = model
   const all = jevTargets(config)
   const targets = all.filter((target) => !retiredJevKeys.has(target.id))
   if (!targets.length) return unavailable(config, all.some((target) => target.apiKey) ? '密钥失效' : '')
   const start = keyCursor++
+  const primary = targets.filter((target) => !target.fallback)
+  const standby = targets.filter((target) => target.fallback)
+  const rotate = (group) => group.map((_, i) => group[(start + i) % group.length])
+  const ordered = primary.length ? [...rotate(primary), ...rotate(standby)] : rotate(standby)
   let network = false
   let http = ''
   const skipUrl = new Set()
-  for (let i = 0; i < targets.length; i++) {
+  for (const target of ordered) {
     if (options.signal?.aborted) break
-    const target = targets[(start + i) % targets.length]
     if (skipUrl.has(target.url)) continue
     // One row per real provider attempt; dedup replays return before this loop.
     const attemptStarted = Date.now()
@@ -2096,12 +2144,14 @@ export async function classifyJev(text, cfg, fetchImpl = globalThis.fetch, now =
       created_at: new Date(attemptStarted).toISOString(),
       request_id: options.policyRequestId ?? cfg?.policy_request_id,
       provider: config.provider,
-      model,
+      model: target.model,
       key_fingerprint: jevKeyFingerprint(target.apiKey),
       official_typesafe: isOfficialTypeSafeUrl(target.url),
       outcome: 'network_error',
     }
     try {
+      if (target.model) payload.model = target.model
+      else delete payload.model
       const response = await fetchImpl(target.url, {
         method: 'POST',
         headers: {

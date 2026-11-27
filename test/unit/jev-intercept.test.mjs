@@ -60,6 +60,8 @@ test('decision URL and default model follow the selected backend', () => {
   assert.equal(decisionUrl('https://api.typesafe.ai'), 'https://api.typesafe.ai/v1/systemone')
   assert.equal(decisionUrl('http://127.0.0.1:8000/v1'), 'http://127.0.0.1:8000/v1/systemone')
   assert.equal(decisionUrl('https://jevtypesafeai.com/api/v1/decide'), 'https://jevtypesafeai.com/api/v1/decide')
+  assert.equal(decisionUrl('https://emrank.tech/v1/decisions'), 'https://emrank.tech/v1/decisions')
+  assert.equal(policyModelsUrl('https://emrank.tech/v1/decisions'), 'https://emrank.tech/v1/models')
   assert.equal(resolvedPolicyModel({ provider: 'jev' }), 'jev-latest')
   assert.equal(resolvedPolicyModel({ provider: 'laya' }), '')
   assert.equal(resolvedPolicyModel({ provider: 'modernbert' }), 'english')
@@ -69,6 +71,84 @@ test('decision URL and default model follow the selected backend', () => {
   ])
   assert.deepEqual(parsePolicyDecision({ answers: { safety: { noul: 0.9 } } }).hits, [])
   assert.equal(parsePolicyDecision({}), null)
+})
+
+test('per-address models and standby routing survive saves and probes', async () => {
+  const base = 'https://api.typesafe.ai'
+  const backup = 'https://emrank.tech/v1/decisions'
+  const { saved, settings } = settingsBag()
+  const patch = applyJevPatch(settings, {
+    enabled: true, dedup_sec: 0,
+    endpoints: [
+      { base_url: base, model: 'jev-latest', api_keys: ['primary-test-key'] },
+      { base_url: backup, model: 'commandcode/jev-1.14.0', fallback: true, api_keys: ['backup-test-key'] },
+    ],
+  })
+  assert.equal(patch.ok, true)
+  assert.deepEqual(patch.config.endpoints.map(({ model, fallback }) => ({ model, fallback })), [
+    { model: 'jev-latest', fallback: false },
+    { model: 'commandcode/jev-1.14.0', fallback: true },
+  ])
+  assert.equal(patch.config.endpoint_options, undefined)
+  assert.equal(normalizeJevConfig(saved.get('jev_intercept')).endpoint_options.length, 2)
+  assert.deepEqual(normalizeJevConfig({ endpoint_options: [
+    { base_url: backup, model: '  custom  ', fallback: false },
+    { base_url: backup, model: 'duplicate', fallback: true },
+    { base_url: base, model: '', fallback: false },
+  ] }).endpoint_options, [{ base_url: backup, model: 'custom', fallback: false }])
+  const calls = []
+  const response = { ok: true, json: async () => ({ answers: { safety: { noul: 0.9 } } }) }
+  const fetcher = async (url, init) => {
+    calls.push([url, JSON.parse(init.body).model])
+    return url.includes('typesafe') ? { ok: false, status: 500 } : response
+  }
+  for (let i = 0; i < 4; i++) await classifyJev(`failover-${i}`, saved.get('jev_intercept'), fetcher)
+  assert.deepEqual(calls.flatMap(([url, model]) => [url, model]).slice(0, 4), [
+    `${base}/v1/systemone`, 'jev-latest', backup, 'commandcode/jev-1.14.0',
+  ])
+  calls.length = 0
+  for (let i = 0; i < 5; i++) await classifyJev(`healthy-${i}`, saved.get('jev_intercept'), async (url, init) => {
+    calls.push([url, JSON.parse(init.body).model])
+    return response
+  })
+  assert.equal(calls.length, 5)
+  assert.ok(calls.every(([url, model]) => url.includes('typesafe') && model === 'jev-latest'))
+  calls.length = 0
+  await classifyJev('network-failover', saved.get('jev_intercept'), async (url, init) => {
+    calls.push([url, JSON.parse(init.body).model])
+    if (url.includes('typesafe')) throw new Error('offline')
+    return response
+  })
+  assert.equal(calls[1][1], 'commandcode/jev-1.14.0')
+  const moved = applyJevPatch(settings, { endpoints: [
+    { base_url: base }, { base_url: 'https://emrank.tech/v1/systemone', from_base_url: backup },
+  ] })
+  assert.equal(moved.config.endpoints[1].model, 'commandcode/jev-1.14.0')
+  assert.equal(moved.config.endpoints[1].fallback, true)
+  applyJevPatch(settings, { timeout_ms: 3000 })
+  assert.equal(saved.get('jev_intercept').endpoint_options[1].fallback, true)
+  assert.equal(applyJevPatch(settings, { endpoints: [{ base_url: base }] }).config.endpoints.length, 1)
+  for (const bad of [{ model: 1 }, { model: 'x'.repeat(121) }, { fallback: 'true' }]) {
+    assert.ok(validateJevPatch({ endpoints: [{ base_url: base, ...bad }] }).length)
+  }
+  const probed = []
+  await probePolicyBaseline({
+    config: { base_url: backup, endpoint_options: [{ base_url: backup, model: 'backup-model', fallback: true }] },
+    baseUrl: backup, model: '', fetchImpl: async (_url, init) => {
+      if (init.method === 'POST') probed.push(JSON.parse(init.body).model)
+      return response
+    },
+  })
+  assert.ok(probed.length > 0 && probed.every((model) => model === 'backup-model'))
+  probed.length = 0
+  await probePolicyBaseline({
+    config: { base_url: backup, endpoint_options: [{ base_url: backup, model: 'backup-model' }] },
+    baseUrl: backup, model: 'explicit-model', fetchImpl: async (_url, init) => {
+      if (init.method === 'POST') probed.push(JSON.parse(init.body).model)
+      return response
+    },
+  })
+  assert.ok(probed.length > 0 && probed.every((model) => model === 'explicit-model'))
 })
 
 test('any low question in the bank blocks and names that set', () => {

@@ -189,6 +189,8 @@ export type JevEndpointKey = {
 
 export type JevEndpoint = {
   base_url: string
+  model?: string
+  fallback?: boolean
   keys: JevEndpointKey[]
 }
 
