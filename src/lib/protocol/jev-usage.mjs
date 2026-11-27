@@ -12,7 +12,7 @@ export function jevUsageStorageErrors() {
 }
 const count = (value) => (Number.isSafeInteger(value) && value >= 0 && value <= 1000000000 ? value : null)
 const label = (value, max = 80) =>
-  typeof value === 'string' && value.length <= max && /^[a-zA-Z0-9_.:-]+$/.test(value) ? value : ''
+  typeof value === 'string' && value.length <= max && /^[a-zA-Z0-9_.:/[\]-]+$/.test(value) ? value : ''
 export function isOfficialTypeSafeUrl(value) {
   try {
     return new URL(value).origin === 'https://api.typesafe.ai'

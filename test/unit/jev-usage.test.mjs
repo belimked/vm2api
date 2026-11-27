@@ -259,3 +259,9 @@ test('key statuses come from the latest event alone, without the usage aggregate
   assert.equal(full[0].requests, 1)
   assert.equal(Object.hasOwn(full[0], 'estimated_cost_nano_usd'), true)
 })
+
+test('reseller model ids with slash or bracket suffix are kept', () => {
+  assert.equal(normalizeJevUsage(value({ response_model: 'commandcode/jev-1.14.0' })).model, 'commandcode/jev-1.14.0')
+  assert.equal(normalizeJevUsage(value({ response_model: undefined, model: 'typesafe/jev[slow]' })).model, 'typesafe/jev[slow]')
+  assert.equal(normalizeJevUsage(value({ response_model: 'bad model <x>', model: 'jev-latest' })).model, 'jev-latest')
+})
