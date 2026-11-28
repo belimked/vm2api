@@ -257,6 +257,7 @@ export async function blockCountTokensBeforeHop(req, inbound, deps = {}) {
     devices: deviceRepo(deps),
     sessions: sessionRepo(deps),
     account: deps.account || null,
+    apiKeyId: req?.apiKeyRecord?.id ?? '',
   })
   return { error: decision?.action === 'block' ? decision.error : null, wait: decision.wait === true }
 }

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 决策模型关新增「API Key 范围」（`jev_intercept.api_key_scope_mode` = `all` / `include` / `exclude`，`api_key_ids`）：按下游 API Key 决定请求是否送审，会话审核与工具审核共用同一范围；题库、阈值、地址仍全局一套。范围外的请求跳过硬正则、蒸馏和 Jev（封禁、系统改写、禁用工具照旧），日志记为「API Key 范围外」（`key-scope`）。`include` 且列表为空等同全部；无 API Key 的请求在 `include` 下不审。面板：风控 → 前置页「账号范围」下方新增「API Key 范围」区块。
+
 - 决策模型关支持按地址指定模型及仅备用地址，并兼容 `/v1/decisions` 路径。
 - JEV 使用记录：模型名允许 `/` 和 `[]`（如 `commandcode/jev-1.14.0`、`typesafe/jev[slow]`），此前第三方地址的模型显示为「未返回」。`commandcode/jev*` 模型按 Command Code 公开价（每百万输入 $0.042，输出免费）估算费用。
 - 工具审核拦截改为 403 `tool_use_blocked`；Jev 拦截写入精确拒答指纹，重命中不封设备。

@@ -469,10 +469,11 @@ export function createHandleProtocol(deps) {
     }
   }
 
-  function runtimeToolGate(auditBody, logBag, { inbound, requestId, riskState }) {
+  function runtimeToolGate(auditBody, logBag, { inbound, requestId, riskState, apiKeyId = '' }) {
     try {
       return createConfiguredToolUseGate(deps.settings || new SettingsRepo(), auditBody, logBag,
-        (rejection) => rememberToolGateBlock({ inbound, requestId, policy: riskState?.policy, repo: riskState?.repo, rejection }))
+        (rejection) => rememberToolGateBlock({ inbound, requestId, policy: riskState?.policy, repo: riskState?.repo, rejection }),
+        { apiKeyId })
     } catch {
       // Test/in-memory handlers may not have a settings database; the default is disabled.
       return null
@@ -518,6 +519,7 @@ export function createHandleProtocol(deps) {
       sessions: riskState.sessions,
       requestId,
       account,
+      apiKeyId: req.apiKeyRecord?.id ?? '',
       scopeMatched,
       bodyCtx,
       interceptSession,
@@ -1299,7 +1301,7 @@ export function createHandleProtocol(deps) {
             projectRoot: cfg.paths.project,
             captureOutbound: logCtx.capture_outbound === true,
             accountGate,
-            toolGate: runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState }),
+            toolGate: runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState, apiKeyId: req.apiKeyRecord?.id ?? '' }),
             ops: deps.codexOps || {},
             ...codexSticky,
           }),
@@ -1734,7 +1736,7 @@ export function createHandleProtocol(deps) {
       // This backend forwards caller cache controls unchanged. Billing must
       // use the upstream 5m/1h split, not the TTL requested for template fills.
       cacheTtl = null
-      const toolGate = !apiOpenAI || protocol === 'anthropic.messages' ? runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState }) : null
+      const toolGate = !apiOpenAI || protocol === 'anthropic.messages' ? runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState, apiKeyId: req.apiKeyRecord?.id ?? '' }) : null
       let result
       try {
         result = await runApiInference({
@@ -2463,7 +2465,7 @@ export function createHandleProtocol(deps) {
           } else if (protocol === 'openai.responses') {
             state = createResponsesStreamState(inbound.model || body.model, candidate.vmId, converted.responseTools)
           }
-          const toolGate = runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState })
+          const toolGate = runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState, apiKeyId: req.apiKeyRecord?.id ?? '' })
           const keepalive =
             anthropicKeepalive ||
             createDownstreamKeepalive({
@@ -2755,7 +2757,7 @@ export function createHandleProtocol(deps) {
     }
 
     let output
-    const toolGate = runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState })
+    const toolGate = runtimeToolGate(auditBody, logBag, { inbound, requestId: logCtx.request_id, riskState, apiKeyId: req.apiKeyRecord?.id ?? '' })
     let clientBody = hidePersonaUsageOnMessage(result.body, personaHideTokens, cacheTtl)
     if (toolGate) clientBody = await toolGate.message(clientBody)
     if (toolGate?.rejection) {

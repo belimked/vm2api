@@ -1,6 +1,6 @@
 import { ErrorType, makeError } from '../core/errors.mjs'
 import { redactSecrets } from '../core/security.mjs'
-import { classifyJev, cleanQuestions, readJevConfig } from './jev-intercept.mjs'
+import { classifyJev, cleanQuestions, jevApiKeyInScope, readJevConfig } from './jev-intercept.mjs'
 
 export const TOOL_USE_GATE_SETTING = 'tool_use_gate'
 export const TOOL_USE_GATE_INCOMPLETE = 'tool_use_gate_incomplete'
@@ -506,8 +506,10 @@ export function createToolUseGate({ config, inbound, jev, classify = classifyJev
   }
 }
 
-export function createConfiguredToolUseGate(settings, inbound, logBag, onBlock) {
+export function createConfiguredToolUseGate(settings, inbound, logBag, onBlock, { apiKeyId = '' } = {}) {
   const read = (key, fallback) => settings.get(key, fallback)
   const config = readToolUseGateConfig(read)
-  return config.enabled && enabledToolQuestions(config).length ? createToolUseGate({ config, inbound, logBag, jev: readJevConfig(read), onBlock }) : null
+  if (!config.enabled || !enabledToolQuestions(config).length) return null
+  const jev = readJevConfig(read)
+  return jevApiKeyInScope(jev, apiKeyId) ? createToolUseGate({ config, inbound, logBag, jev, onBlock }) : null
 }

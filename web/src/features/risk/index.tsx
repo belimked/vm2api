@@ -13,6 +13,7 @@ import {
   LogDetailDialog,
 } from '@/features/logs/log-detail/log-detail-dialog'
 import { AccountScopeSettings } from './account-scope'
+import { ApiKeyScopeSettings } from './api-key-scope'
 import { Panel } from './blocks'
 import { DistillSettings } from './distill-settings'
 import { HardRegexSettings } from './hard-regex-settings'
@@ -58,6 +59,7 @@ export function RiskAuditPage() {
   })
   const navigate = useNavigate({ from: '/risk' })
   const [scopeDirty, setScopeDirty] = useState(false)
+  const [keyScopeDirty, setKeyScopeDirty] = useState(false)
   const [ruleDirty, setRuleDirty] = useState(false)
   const [modelDirty, setModelDirty] = useState(false)
   const [routingDirty, setRoutingDirty] = useState(false)
@@ -69,14 +71,16 @@ export function RiskAuditPage() {
   }, [])
 
   useBlocker({
-    enableBeforeUnload: scopeDirty || ruleDirty || modelDirty || routingDirty,
+    enableBeforeUnload:
+      scopeDirty || keyScopeDirty || ruleDirty || modelDirty || routingDirty,
     shouldBlockFn: ({ next }) => {
       const target =
         next.routeId === '/_authenticated/risk' ? riskSearch(next.search) : null
       const leavesPage = !target || target.view !== view
       const leavesRule = leavesPage || (target?.rule ?? 'distill') !== rule
       const discardsDraft =
-        (leavesPage && (scopeDirty || modelDirty || routingDirty)) ||
+        (leavesPage &&
+          (scopeDirty || keyScopeDirty || modelDirty || routingDirty)) ||
         (leavesRule && ruleDirty)
       if (
         discardsDraft &&
@@ -85,6 +89,7 @@ export function RiskAuditPage() {
         return true
       if (leavesPage) {
         setScopeDirty(false)
+        setKeyScopeDirty(false)
         setModelDirty(false)
         setRoutingDirty(false)
       }
@@ -133,6 +138,7 @@ export function RiskAuditPage() {
 
         <TabsContent value='preflight' className='min-w-0 space-y-4'>
           <AccountScopeSettings onDirtyChange={setScopeDirty} />
+          <ApiKeyScopeSettings onDirtyChange={setKeyScopeDirty} />
           <PreflightSettings
             rule={rule}
             onRule={(next) => go('preflight', next)}

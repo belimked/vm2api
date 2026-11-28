@@ -331,3 +331,19 @@ test('one unavailable window follows fail_open', async () => {
     assert.deepEqual(await run(gate, lines), fail_open ? lines : [])
   }
 })
+
+test('tool gate follows the Jev API Key scope', () => {
+  const settings = new Map([['tool_use_gate', { enabled: true }]])
+  const repo = { get: (key, fallback) => (settings.has(key) ? settings.get(key) : fallback) }
+  assert.notEqual(createConfiguredToolUseGate(repo, {}, null), null)
+  assert.notEqual(createConfiguredToolUseGate(repo, {}, null, undefined, { apiKeyId: 'key_a' }), null)
+
+  settings.set('jev_intercept', { api_key_scope_mode: 'include', api_key_ids: ['key_a'] })
+  assert.notEqual(createConfiguredToolUseGate(repo, {}, null, undefined, { apiKeyId: 'key_a' }), null)
+  assert.equal(createConfiguredToolUseGate(repo, {}, null, undefined, { apiKeyId: 'key_b' }), null)
+  assert.equal(createConfiguredToolUseGate(repo, {}, null), null, 'keyless request is outside an include list')
+
+  settings.set('jev_intercept', { api_key_scope_mode: 'exclude', api_key_ids: ['key_a'] })
+  assert.equal(createConfiguredToolUseGate(repo, {}, null, undefined, { apiKeyId: 'key_a' }), null)
+  assert.notEqual(createConfiguredToolUseGate(repo, {}, null, undefined, { apiKeyId: 'key_b' }), null)
+})

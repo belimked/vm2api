@@ -59,6 +59,10 @@ export const PASS_REASONS: Record<string, { label: string; hint: string }> = {
     label: '等待账号判定',
     hint: '范围含这个平台或指定了账号，等到槽位确定后再判',
   },
+  'key-scope': {
+    label: 'API Key 范围外',
+    hint: '下游 API Key 不在「API Key 范围」里，跳过正则、蒸馏和决策模型',
+  },
   unknown: {
     label: '未经关卡',
     hint: '鉴权、请求体等错误在关卡前结束，或升级前的旧日志',

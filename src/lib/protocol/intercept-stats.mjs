@@ -41,6 +41,7 @@ const PASS_LABEL = {
   platform: 'OpenAI 平台未接入',
   scope: '账号不在范围',
   'scope-wait': '等待账号判定',
+  'key-scope': 'API Key 范围外',
   unknown: '未记录',
 }
 

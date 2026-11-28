@@ -19,6 +19,7 @@ import {
   isPolicyBlockMemory,
   jevDocument,
   jevAccountInScope,
+  jevApiKeyInScope,
   jevScopeConfigured,
   jevScopeWaits,
   matchHardPolicy,
@@ -258,6 +259,7 @@ export async function evaluateProtocolIntercept({
   sessions = null,
   requestId,
   account = null,
+  apiKeyId = '',
   scopeMatched = false,
   fetchImpl,
   bodyCtx = null,
@@ -343,8 +345,8 @@ export async function evaluateProtocolIntercept({
   }
   const routeTarget = backend === 'api' ? audit?.downgrade_endpoint : audit?.downgrade_pool
   const routeConfigured = !!(jev?.enabled && (routeTarget || audit?.downgrade_model))
-  let outside = ''
-  if (!scopeMatched && openaiPlatform) {
+  let outside = !jevApiKeyInScope(jev, apiKeyId) ? 'key-scope' : ''
+  if (!outside && !scopeMatched && openaiPlatform) {
     if (!jevScopeConfigured(jev)) {
       if (jev?.openai_platform_enabled !== true) outside = 'platform'
     } else if (!jevScopeWaits(jev, 'gpt')) {
@@ -354,7 +356,7 @@ export async function evaluateProtocolIntercept({
     } else if (account && !jevAccountInScope(jev, account)) {
       outside = 'scope'
     }
-  } else if (!scopeMatched && !routeConfigured && jevScopeWaits(jev, 'claude')) {
+  } else if (!outside && !scopeMatched && !routeConfigured && jevScopeWaits(jev, 'claude')) {
     if (!account) outside = 'scope-wait'
     else if (!jevAccountInScope(jev, account)) outside = 'scope'
   }

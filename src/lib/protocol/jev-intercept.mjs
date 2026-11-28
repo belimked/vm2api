@@ -422,6 +422,8 @@ export function defaultJevConfig() {
     account_plan_types: [],
     account_platform_plans: [],
     account_ids: [],
+    api_key_scope_mode: 'all',
+    api_key_ids: [],
     provider: 'jev',
     base_url: '',
     api_key: '',
@@ -753,6 +755,22 @@ export function jevAccountInScope(jev, account) {
   return pairs.includes(scopeKeyOf(account))
 }
 
+function apiKeyScopeIds(raw) {
+  if (!Array.isArray(raw)) return []
+  return [...new Set(raw.map((id) => String(id ?? '').trim().slice(0, 100)).filter(Boolean))].slice(0, 500)
+}
+
+/** Downstream key scope is independent of the upstream account scope. */
+export function jevApiKeyInScope(jev, apiKeyId) {
+  const mode = jev?.api_key_scope_mode
+  const ids = Array.isArray(jev?.api_key_ids) ? jev.api_key_ids : []
+  const id = String(apiKeyId ?? '').trim()
+  // An empty include list would silence every audit; treat it as `all`.
+  if (mode === 'include') return !ids.length || (!!id && ids.includes(id))
+  if (mode === 'exclude') return !id || !ids.includes(id)
+  return true
+}
+
 function normalizeKeys(raw) {
   const list = []
   const seen = new Set()
@@ -825,6 +843,8 @@ export function normalizeJevConfig(raw) {
     account_plan_types: accountPlanTypes,
     account_platform_plans: accountPlatformPlans,
     account_ids: accountIds,
+    api_key_scope_mode: ['include', 'exclude'].includes(raw.api_key_scope_mode) ? raw.api_key_scope_mode : 'all',
+    api_key_ids: apiKeyScopeIds(raw.api_key_ids),
     provider: providerOf(raw.provider).id,
     base_url: String(raw.base_url || '')
       .trim()
@@ -870,6 +890,8 @@ export function publicJevConfig(cfg) {
     account_plan_types: [...c.account_plan_types],
     account_platform_plans: [...c.account_platform_plans],
     account_ids: [...c.account_ids],
+    api_key_scope_mode: c.api_key_scope_mode,
+    api_key_ids: [...c.api_key_ids],
     provider: c.provider,
     providers: POLICY_PROVIDERS.map((item) => ({ ...item })),
     base_url: c.base_url,
@@ -913,6 +935,8 @@ export function publicJevConfig(cfg) {
       account_plan_types: [],
       account_platform_plans: [],
       account_ids: [],
+      api_key_scope_mode: 'all',
+      api_key_ids: [],
       timeout_ms: TIMEOUT_DEFAULT,
     },
     account_type_options: JEV_ACCOUNT_TYPES.map((item) => ({ ...item })),
@@ -1010,6 +1034,17 @@ export function validateJevPatch(body = {}) {
   }
   for (const key of ['block_if_below', 'fail_open', 'expand_base64', 'strip_reminders', 'openai_platform_enabled']) {
     if (Object.hasOwn(body, key) && typeof body[key] !== 'boolean') problems.push(`${key} 必须是布尔`)
+  }
+  if (Object.hasOwn(body, 'api_key_scope_mode') && !['all', 'include', 'exclude'].includes(body.api_key_scope_mode)) {
+    problems.push('api_key_scope_mode 只能是 all、include、exclude')
+  }
+  if (Object.hasOwn(body, 'api_key_ids')) {
+    const ids = body.api_key_ids
+    if (!Array.isArray(ids)) problems.push('api_key_ids 必须是字符串数组')
+    else if (ids.length > 500) problems.push('api_key_ids 最多 500 项')
+    else if (ids.some((id) => typeof id !== 'string' || !id.trim() || id.trim().length > 100)) {
+      problems.push('api_key_ids 只能是非空且最长 100 字符的字符串')
+    }
   }
   for (const key of ['account_types', 'account_plan_types', 'account_platform_plans', 'account_ids']) {
     if (!Object.hasOwn(body, key)) continue

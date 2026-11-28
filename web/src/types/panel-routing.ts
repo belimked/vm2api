@@ -195,6 +195,8 @@ export type JevEndpoint = {
 }
 
 /** `GET/PUT /api/panel/jev-intercept`。决策模型与硬正则。密钥只回 api_key_set。 */
+export type JevApiKeyScopeMode = 'all' | 'include' | 'exclude'
+
 export type JevInterceptConfig = {
   enabled: boolean
   hard_regex_enabled: boolean
@@ -205,6 +207,9 @@ export type JevInterceptConfig = {
   account_types: string[]
   account_plan_types: string[]
   account_ids: string[]
+  /** API Key 范围。all = 全部审；include = 只审列表里的；exclude = 列表里的不审。include 且列表空 = all。 */
+  api_key_scope_mode?: JevApiKeyScopeMode
+  api_key_ids?: string[]
   account_scope?: JevScopeInventory
   provider: 'jev' | 'laya' | 'modernbert'
   providers?: {
@@ -225,6 +230,8 @@ export type JevInterceptConfig = {
     expand_base64: boolean
     strip_reminders: boolean
     openai_platform_enabled: boolean
+    api_key_scope_mode?: JevApiKeyScopeMode
+    api_key_ids?: string[]
     timeout_ms: number
   }
   base_url: string
