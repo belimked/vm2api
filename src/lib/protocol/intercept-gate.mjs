@@ -345,8 +345,10 @@ export async function evaluateProtocolIntercept({
   }
   const routeTarget = backend === 'api' ? audit?.downgrade_endpoint : audit?.downgrade_pool
   const routeConfigured = !!(jev?.enabled && (routeTarget || audit?.downgrade_model))
-  let outside = !jevApiKeyInScope(jev, apiKeyId) ? 'key-scope' : ''
-  if (!outside && !scopeMatched && openaiPlatform) {
+  // Key scope only turns off the Jev model audit; hard regex and distill still run.
+  const keyOutside = !jevApiKeyInScope(jev, apiKeyId)
+  let outside = ''
+  if (!scopeMatched && openaiPlatform) {
     if (!jevScopeConfigured(jev)) {
       if (jev?.openai_platform_enabled !== true) outside = 'platform'
     } else if (!jevScopeWaits(jev, 'gpt')) {
@@ -356,7 +358,7 @@ export async function evaluateProtocolIntercept({
     } else if (account && !jevAccountInScope(jev, account)) {
       outside = 'scope'
     }
-  } else if (!outside && !scopeMatched && !routeConfigured && jevScopeWaits(jev, 'claude')) {
+  } else if (!scopeMatched && !routeConfigured && jevScopeWaits(jev, 'claude')) {
     if (!account) outside = 'scope-wait'
     else if (!jevAccountInScope(jev, account)) outside = 'scope'
   }
@@ -482,6 +484,7 @@ export async function evaluateProtocolIntercept({
     }
   }
   if (mandatoryOnly || outside) return pass(outside || 'unchecked')
+  if (keyOutside) return pass('key-scope')
 
   if (jev?.enabled) {
     const verdict = await classifyJevSession(inbound, body, { ...jev, policy_request_id: requestId }, fetchImpl, {

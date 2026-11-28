@@ -61,7 +61,7 @@ export const PASS_REASONS: Record<string, { label: string; hint: string }> = {
   },
   'key-scope': {
     label: 'API Key 范围外',
-    hint: '下游 API Key 不在「API Key 范围」里，跳过正则、蒸馏和决策模型',
+    hint: '下游 API Key 不在「API Key 范围」里，跳过决策模型（会话与工具审核），正则和蒸馏照常',
   },
   unknown: {
     label: '未经关卡',

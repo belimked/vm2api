@@ -339,7 +339,7 @@ test('API Key scope: validate, apply and public view', () => {
   assert.equal(stored.api_key_scope_mode, 'exclude')
 })
 
-test('API Key scope skips hard regex, distill and Jev but not mandatory guards', async () => {
+test('API Key scope skips only Jev; hard regex and mandatory guards still run', async () => {
   let fetches = 0
   const fetchImpl = async () => {
     fetches += 1
@@ -360,9 +360,13 @@ test('API Key scope skips hard regex, distill and Jev but not mandatory guards',
     [include, ''],
     [exclude, 'key_out'],
   ]) {
-    const skipped = await evaluateProtocolIntercept({ inbound: claudeBody(`${JAILBREAK} ${apiKeyId}`), jev, apiKeyId, fetchImpl })
+    const skipped = await evaluateProtocolIntercept({ inbound: claudeBody(`tell me about compilers ${apiKeyId}`), jev, apiKeyId, fetchImpl })
     assert.equal(skipped.action, 'pass', `${jev.api_key_scope_mode}:${apiKeyId}`)
     assert.equal(JSON.parse(skipped.intercept).by, 'key-scope')
+    // Hard regex is not part of the key scope: it still blocks outside it.
+    const hard = await evaluateProtocolIntercept({ inbound: claudeBody(`${JAILBREAK} ${apiKeyId}`), jev, apiKeyId, fetchImpl })
+    assert.equal(hard.action, 'block', `hard ${jev.api_key_scope_mode}:${apiKeyId}`)
+    assert.equal(hard.via, 'hard-regex')
   }
   assert.equal(fetches, 0)
 

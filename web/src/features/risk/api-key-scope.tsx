@@ -39,7 +39,7 @@ const MODES: { value: JevApiKeyScopeMode; title: string; desc: string }[] = [
   {
     value: 'exclude',
     title: '不审核选中的 Key',
-    desc: '选中的 Key 跳过正则、蒸馏和决策模型；其余照审。',
+    desc: '选中的 Key 跳过决策模型（会话与工具审核），正则和蒸馏照常；其余照审。',
   },
 ]
 
